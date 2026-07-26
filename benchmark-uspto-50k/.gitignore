@@ -1,0 +1,13 @@
+# 大且**可复现**的中间产物不入库:一条 `make.sh` 就能重新生成,而它们合计
+# 近 100 MB,入库既会撑爆仓库也会让 diff 失去意义。
+#
+# 判据是"能不能用仓库里的脚本从零重建",不是"文件大不大":
+#   uspto50k_raw.csv  下载得到,URL 写在 README
+#   templates.jsonl   extract_templates.py 生成(约 160 秒)
+#   bench.jsonl       run_benchmark.py 生成(约 190 秒)
+#
+# 反过来,**结论**要入库 —— summary.json、rdchiral_verdicts.jsonl、图、文档
+# 都不大,而且是这次测量的证据。
+/data/uspto50k_raw.csv
+/data/templates.jsonl
+/results/bench.jsonl

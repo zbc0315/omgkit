@@ -1,0 +1,68 @@
+{
+  "n_records": 50016,
+  "fwd": {
+    "comparable": 49719,
+    "omgkit_hit": 49043,
+    "rdkit_hit": 49052,
+    "only_omgkit": 3,
+    "only_rdkit": 12,
+    "neither": 664,
+    "shape_skipped": 297
+  },
+  "retro": {
+    "comparable": 50012,
+    "omgkit_hit": 49400,
+    "rdkit_hit": 49116,
+    "only_omgkit": 291,
+    "only_rdkit": 7,
+    "neither": 605,
+    "shape_skipped": 4
+  },
+  "timing": {
+    "omgkit_fwd": {
+      "n": 49719,
+      "median_us": 20.79,
+      "p90_us": 46.71,
+      "p99_us": 342.21,
+      "max_us": 5495.25,
+      "total_s": 1.685
+    },
+    "rdkit_fwd": {
+      "n": 49719,
+      "median_us": 15.33,
+      "p90_us": 64.54,
+      "p99_us": 637.04,
+      "max_us": 10591.96,
+      "total_s": 2.221
+    },
+    "omgkit_retro": {
+      "n": 50012,
+      "median_us": 14.12,
+      "p90_us": 27.17,
+      "p99_us": 65.0,
+      "max_us": 676.08,
+      "total_s": 0.839
+    },
+    "rdkit_retro": {
+      "n": 50012,
+      "median_us": 13.21,
+      "p90_us": 34.33,
+      "p99_us": 121.08,
+      "max_us": 1436.96,
+      "total_s": 1.001
+    }
+  },
+  "miss_attribution": {
+    "记录·目标侧漏写": 421,
+    "记录·目标要的构型输入侧没有": 346,
+    "记录·自相矛盾": 296,
+    "记录·目标要的几何输入侧没有": 130,
+    "记录·取代基换了,构型比不了": 46,
+    "引擎·模板写了却没落实": 30,
+    "引擎·翻了": 14,
+    "记录·无映射号的中心对不上": 3
+  },
+  "engine_adjudication": {
+    "模板:rdchiral 自己也还原不出": 44
+  }
+}
