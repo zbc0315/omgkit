@@ -263,8 +263,18 @@ fn branch_has_other_stereocentre(
 ///
 /// 返回被标注的双键数。
 ///
-/// 只**新增**标注,不清除已有的 —— 反应产物里的顺反可能是搬运过来的,
-/// 那时方向键早已不在,重新感知一遍会把它抹掉。
+/// # 只**新增**标注,已经有的一概不动
+///
+/// 反应产物里的顺反可能是搬运过来的,那时方向键早已不在,重新感知会把它抹掉。
+/// 但"不动"要做到两层:既不擦成 `None`,也**不改成别的值**。
+///
+/// 后一层是必需的。搬运来的标注用双键**自己的参照原子**表达,与写法无关;而它
+/// 旁边的方向键可能来自完全另一处 —— 反应模板写的那一根就是。共轭链上这两者会
+/// 撞在一起:模板给 `C=C` 写了一对方向,其中一根**同时**贴着下一根双键,而下一
+/// 根的另一侧是从底物搬过来的。拿这一对方向去重算下一根双键,等于用模板的参照系
+/// 覆盖一个本来正确的答案 —— 拓扑全对,只有几何被悄悄换掉。
+///
+/// USPTO-50k 上这一档实测 12 条,全是共轭多烯的酰胺化/酯化。
 pub fn perceive_bond_stereo(mol: &mut MolBuilder) -> usize {
     let informative = informative_directions(mol);
     if !informative.iter().any(|&x| x) {
@@ -274,6 +284,10 @@ pub fn perceive_bond_stereo(mol: &mut MolBuilder) -> usize {
     let mut found: Vec<(u32, BondStereo, [u32; 2])> = Vec::new();
     for (di, db) in mol.bonds().iter().enumerate() {
         if db.order != BondOrder::Double || db.flags.contains(BondFlags::AROMATIC) {
+            continue;
+        }
+        // 已经带着有效标注的不重算,见本函数文档
+        if stereo_atoms_are_valid(mol, u32::try_from(di).unwrap_or(u32::MAX)) {
             continue;
         }
         let Some((ref_b, dir_b)) = outward_direction(mol, db.begin, db.end, &informative) else {
@@ -411,13 +425,6 @@ pub fn directions_for_writing(mol: &MolBuilder) -> WritingDirections {
             }
         }
     }
-    if constraints.is_empty() {
-        return WritingDirections {
-            dirs: out,
-            component: vec![None; mol.num_bonds()],
-        };
-    }
-
     // 约束图:每条参照键一个节点,同一根双键的两条参照键相连。
     // 边上带着**两端各自的锚点**与"同向还是反向"。
     //
@@ -482,10 +489,62 @@ pub fn directions_for_writing(mol: &MolBuilder) -> WritingDirections {
     for (&bi, &dir) in &assigned {
         out[bi as usize] = dir;
     }
+
+    // 第二遍:**沿用**存储写法的那些方向键也要编上片段号。
+    //
+    // 它们同样有整体翻转自由度 —— 一根双键两侧的方向键**同时**取反,任何一对
+    // 取代基的相对位置都不变。`informative_directions` 已经保证写出来的方向必然
+    // 成对地夹着一根立体源双键,所以这里不会把孤零零一根当成一组。
+    //
+    // 不编号就等于不定死:同一个分子换种写法读进来,存储下标一变,规范串里的
+    // `/` 与 `\` 就整体互换。反应产物是这一档的大户 —— `run_reactants` 交出来
+    // 的分子还没跑过 `perceive_bond_stereo`,几何全靠沿用来的方向撑着,
+    // 一根约束也没有,于是整段自由度悬空。
+    let mut stack: Vec<u32> = Vec::new();
+    for bi in 0..mol.num_bonds() as u32 {
+        if out[bi as usize] == BondDirection::None || component[bi as usize].is_some() {
+            continue;
+        }
+        let comp = next_comp;
+        next_comp += 1;
+        component[bi as usize] = Some(comp);
+        stack.push(bi);
+        while let Some(cur) = stack.pop() {
+            for other in flanking_directions(mol, cur, &out) {
+                if component[other as usize].is_none() {
+                    component[other as usize] = Some(comp);
+                    stack.push(other);
+                }
+            }
+        }
+    }
+
     WritingDirections {
         dirs: out,
         component,
     }
+}
+
+/// 与 `bond` 隔着同一根双键锁在一起的那些方向键。
+///
+/// 走法:从 `bond` 的任一端出发,找一根双键,再从双键的另一端取所有写了方向的
+/// 单键。共轭链上这样一路传下去,整条链就是一个片段。
+fn flanking_directions(mol: &MolBuilder, bond: u32, dirs: &[BondDirection]) -> Vec<u32> {
+    let b = mol.bonds()[bond as usize];
+    let mut out = Vec::new();
+    for end in [b.begin, b.end] {
+        for (far, di) in mol.neighbors(end) {
+            if di == bond || mol.bonds()[di as usize].order != BondOrder::Double {
+                continue;
+            }
+            for (_, oi) in mol.neighbors(far) {
+                if oi != di && dirs[oi as usize] != BondDirection::None {
+                    out.push(oi);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// 每根键该写什么方向,连同它属于哪个**约束片段**。
@@ -496,8 +555,10 @@ pub fn directions_for_writing(mol: &MolBuilder) -> WritingDirections {
 pub struct WritingDirections {
     /// 每根键的方向,相对该键自己的 `begin → end`。
     pub dirs: Vec<BondDirection>,
-    /// 该键所属约束片段的编号;不由约束定下方向的键是 `None`
-    /// (包括沿用存储写法的那些 —— 它们没有可翻的自由度可言)。
+    /// 该键所属片段的编号;没写方向的键是 `None`。
+    ///
+    /// 由感知结果重新生成方向的键与**沿用**存储写法的键都编号,两者的整体翻转
+    /// 自由度是同一回事:一根双键两侧的方向同时取反,几何不变、字符串却变了。
     pub component: Vec<Option<u32>>,
 }
 

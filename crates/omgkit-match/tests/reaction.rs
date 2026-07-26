@@ -50,6 +50,41 @@ fn products(rxn_smarts: &str, reactant_smis: &[&str]) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// 同上,但产物走**调用方真正走的那条路**:净化之后再感知一次顺反。
+///
+/// `sanitize` 那 12 步里没有顺反感知(理由见 `omgkit_io::stereo` 的模块文档),
+/// 所以 [`products`] 得到的产物身上只有沿用来的方向键,`stereo` 还没算。真实
+/// 调用方不会停在那里 —— Python 绑定的 `Mol.sanitize` 就是净化完接着感知。
+///
+/// 差别不只是"多算一步":感知会**读**方向键。产物身上的方向键可能来自模板,
+/// 而搬运过来的 `stereo` 来自底物,两者参照系不同。只有走完这一步,那类冲突
+/// 才会显形 —— 停在 [`products`] 的判据对它一律空过。
+fn perceived_products(rxn: &str, mols: &[&str]) -> Vec<String> {
+    let rxn_parsed =
+        smarts::parse_reaction(rxn).unwrap_or_else(|e| panic!("{rxn}:\n{}", e.render()));
+    let inputs: Vec<(MolBuilder, MolProps)> = mols
+        .iter()
+        .map(|s| {
+            let m = sanitized(s);
+            let p = MolProps::compute(&m);
+            (m, p)
+        })
+        .collect();
+    let mut v: Vec<String> = run_reactants(&rxn_parsed, &inputs, 0, false)
+        .into_iter()
+        .flat_map(|outcome| outcome.products)
+        .map(|mut p| match sanitize(&mut p) {
+            Ok(()) => {
+                omgkit_io::stereo::perceive_bond_stereo(&mut p);
+                canon::canonical_smiles(&p).smiles
+            }
+            Err(e) => format!("<净化失败: {e}>"),
+        })
+        .collect();
+    v.sort();
+    v
+}
+
 /// 展平成"产物 SMILES 的多重集",排序后便于比对。
 fn flat(rxn: &str, mols: &[&str]) -> Vec<String> {
     let mut v: Vec<String> = products(rxn, mols).into_iter().flatten().collect();
@@ -240,6 +275,59 @@ fn replaced_substituents_keep_the_geometry() {
             got,
             vec![canonical(expected)],
             "{substrate}:羟基换成氯之后手性该保持,不该翻"
+        );
+    }
+}
+
+/// 取代基被**隐式氢**接管时,构型同样要换参照系。
+///
+/// 脱保护、脱羧、脱卤都是这个形状:中心从 D4H0 变成 D3H1,少了一个图上的邻居。
+/// 氢不是图里的节点,可它占着四面体的一个位置 —— 因为"两侧邻居个数对不上"
+/// 就跳过重定基的话,标记会原样留在**反应物的**参照系里,而产物的邻居顺序已经
+/// 变了,于是拿到镜像。
+///
+/// 这一档极难发现:拓扑、原子数、电荷、分子式全对,只有构型反了。
+/// 反面(反应物侧的隐式氢被新邻居顶替)一并守在下面一条。
+#[test]
+fn a_substituent_replaced_by_a_hydrogen_still_rebases() {
+    // Boc 保护的季碳脱去 Boc:两侧都不写手性,走的是继承 + 重定基那条路
+    let rxn = "C-C(-C)(-C)-O-C(=O)-[C;H0;D4;+0:1](-[C:2])(-[N;D1;H2:3])-[C:4](-[#7:5])=[O;D1;H0:6]\
+               >>[#7:5]-[C:4](=[O;D1;H0:6])-[CH;D3;+0:1](-[C:2])-[N;D1;H2:3]";
+    // 叔丁基的三个甲基都配得上 `C-C(-C)(-C)`,同一个产物会出现好几组
+    let got = flat(rxn, &["CNC(=O)[C@@](N)(CC)C(=O)OC(C)(C)C"]);
+    assert!(!got.is_empty(), "一个产物都没有");
+    for p in &got {
+        assert_eq!(
+            *p,
+            canonical("CC[C@H](N)C(=O)NC"),
+            "取代基换成隐式氢之后构型反了 —— 重定基被长度对不上挡掉了"
+        );
+    }
+}
+
+/// 反面:反应物侧的**隐式氢**被新邻居顶替时,产物不能随模板的书写顺序而变。
+///
+/// 新邻居占的正是氢原来的位置。模板把同样这几个邻居换个次序写,描述的仍是同一个
+/// 产物 —— 结果必须一样。这条判据比"结果等于某个值"更强,它同时守住两件事:
+/// 换参照系这一步**真的做了**,而且**没做过头**。
+///
+/// 下面六种写法里前三种撤掉那一支就会给出镜像(枚举全部 24 种写法时是 12 种),
+/// 后三种撤掉也照样对 —— 只挑后三种当判据就会空过。
+#[test]
+fn the_product_does_not_depend_on_how_the_template_orders_neighbours() {
+    for tail in [
+        "[N:3]-[C;H0;D4;+0:1](-[C:2])(-[O:4])-Cl",
+        "[C:2]-[C;H0;D4;+0:1](-[N:3])(-Cl)-[O:4]",
+        "Cl-[C;H0;D4;+0:1](-[O:4])(-[C:2])-[N:3]",
+        "[C:2]-[C;H0;D4;+0:1](-[N:3])(-[O:4])-Cl",
+        "[N:3]-[C;H0;D4;+0:1](-[O:4])(-[C:2])-Cl",
+        "[O:4]-[C;H0;D4;+0:1](-Cl)(-[C:2])-[N:3]",
+    ] {
+        let rxn = format!("[C:2]-[CH;D3;+0:1](-[N:3])-[O:4]>>{tail}");
+        assert_eq!(
+            flat(&rxn, &["C[C@H](N)O"]),
+            vec![canonical("C[C@](N)(O)Cl")],
+            "{tail}:同一个产物,换个书写次序就变了构型"
         );
     }
 }
@@ -601,6 +689,86 @@ fn inherited_directions_still_work_when_the_template_is_silent() {
         assert!(
             p.contains('/') || p.contains('\\'),
             "产物 {p} 丢了继承来的双键立体"
+        );
+    }
+}
+
+/// 模板里**孤零零**一根方向键定不了任何几何,不能拿它去顶掉继承来的方向。
+///
+/// 顺反要双键两端各一根方向键才定得下来。`F/C=CF` 里那根 `/` 只说了"这根单键
+/// 画在右上",另一端没画,取代基的相对位置仍然未知。
+///
+/// 危险在于:孤立的那根抄进产物之后并不孤立 —— 双键另一侧的键是从底物继承的,
+/// 带着底物的方向。两根凑成一对,一根来自模板的书写顺序、一根来自底物的书写
+/// 顺序,几何就成了两个参照系拼出来的任意结果。
+///
+/// 下面这条模板是 rdchiral 从 USPTO-50k 抽出来的酯水解,原样照抄:两侧各写一根
+/// 孤立方向键,而且书写朝向恰好相反(反应物侧 `[C:2]/[C:4]=`,产物侧
+/// `=[C:4]/[C:2]`)。照抄的话每一条都会翻一次,实测正向有 100 条以上栽在这里。
+#[test]
+fn a_lone_direction_in_the_template_does_not_override_the_substrate() {
+    let rxn = "C-C-[O;H0;D2;+0:1]-[C:2](=[O;D1;H0:3])/[C:4]=[C:5]\
+               >>[C:5]=[C:4]/[C:2](=[O;D1;H0:3])-[OH;D1;+0:1]";
+    for (sub, want) in [
+        ("CCOC(=O)/C=C/c1ccccc1", "OC(=O)/C=C/c1ccccc1"),
+        ("CCOC(=O)/C=C\\c1ccccc1", "OC(=O)/C=C\\c1ccccc1"),
+    ] {
+        let got = flat(rxn, &[sub]);
+        assert_eq!(
+            got,
+            vec![canonical(want)],
+            "{sub}:模板那根孤立方向键把底物的几何顶掉了"
+        );
+    }
+}
+
+/// 共轭链上,模板写的方向键**同时贴着两根双键**,不能让它去重算另一根。
+///
+/// 模板给 `[C:3]=[C:4]` 写了一对方向,其中 `[C:4]-[C:5]` 那根同时是**下一根**
+/// 双键的侧翼,而下一根的另一侧是从底物搬过来的。搬运用的是双键自己的参照原子
+/// (与写法无关、天然正确),模板那根用的是模板的书写顺序 —— 两个参照系。
+///
+/// 拿它们凑成一对去感知下一根双键,就把一个正确答案覆盖成任意值。判据要走
+/// **调用方真正走的那条路**:净化之后再感知一次顺反(Python 绑定的 `sanitize`
+/// 就是这么做的),否则这一步压根不会执行,判据空过。
+///
+/// 实测 USPTO-50k 上 12 条,全是共轭多烯的酰胺化/酯化。
+#[test]
+fn a_template_direction_does_not_reach_into_the_neighbouring_double_bond() {
+    let rxn = "O-[C;H0;D3;+0:1](=[O;D1;H0:2])/[C:3]=[C:4]/[C:5].[C:6]-[NH2;D1;+0:7]\
+               >>[C:6]-[NH;D2;+0:7]-[C;H0;D3;+0:1](=[O;D1;H0:2])/[C:3]=[C:4]/[C:5]";
+    // 两条底物在**模板管着的**那根双键(挨着羧基的)上都是反式 —— 模板要求如此;
+    // 区别在**隔壁**那根:一条反式一条顺式,而它归继承管。
+    for (diene, want) in [
+        ("C/C=C/C=C/C(=O)O", "C/C=C/C=C/C(=O)NCC"),
+        ("C/C=C\\C=C\\C(=O)O", "C/C=C\\C=C\\C(=O)NCC"),
+    ] {
+        let got = perceived_products(rxn, &[diene, "CCN"]);
+        assert_eq!(
+            got,
+            vec![canonical(want)],
+            "{diene}:模板那根方向键伸到隔壁双键上去了"
+        );
+    }
+}
+
+/// 反面:模板把几何**写全**了的时候,它说了算 —— 哪怕与底物相反。
+///
+/// 守的是上一条别修过头。"孤立的不算数"不能滑成"模板写的都不算数":产物模板
+/// 双键两端各写一根方向键时,那是作者对产物几何的明确指定,底物继承来的要让位。
+#[test]
+fn a_determined_pair_in_the_template_still_overrides_the_substrate() {
+    // 丁烯两端等价,模板在同一个底物上配得上两次,两组产物相同
+    let got = flat(
+        "[C:1][C:2]=[C:3][C:4]>>[C:1]/[C:2]=[C:3]\\[C:4]",
+        &["C/C=C/C"],
+    );
+    assert!(!got.is_empty(), "一个产物都没有");
+    for p in &got {
+        assert_eq!(
+            *p,
+            canonical("C/C=C\\C"),
+            "模板两端都写了方向,产物却还是底物的几何"
         );
     }
 }

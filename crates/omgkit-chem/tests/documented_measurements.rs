@@ -41,8 +41,8 @@ const CLAIM_ORGANOMETALLIC_MOLECULES: usize = 2;
 /// `sssr.rs` 声称:7553 条含环分子。口径同 `differential_l2_ringset`。
 const CLAIM_MOLECULES_WITH_RINGS: usize = 7553;
 
-/// `canon.rs` 声称:7 条分子取不同起点会写出不同的串。
-const CLAIM_TIE_BREAK_MATTERS: usize = 7;
+/// `canon.rs` 声称:3 条分子取不同起点会写出不同的串。
+const CLAIM_TIE_BREAK_MATTERS: usize = 3;
 
 fn corpus() -> Vec<String> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../harness/corpus/large.smi");

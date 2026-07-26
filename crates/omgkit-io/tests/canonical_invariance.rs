@@ -275,6 +275,45 @@ fn different_spellings_converge_to_one_canonical_form() {
     }
 }
 
+/// 顺反的**整体翻转**也是书写习惯:`/C=C/` 与 `\C=C\` 是同一个几何。
+///
+/// 一根双键两侧的方向键同时取反,任何一对取代基的相对位置都不变。对分子而言
+/// 那是个真自由度,对规范串而言必须定死,否则同一个分子有两串。
+///
+/// 关键在于**没跑过 `perceive_bond_stereo` 的分子也要定死**。跑过感知的分子,
+/// 方向是从 `stereo` 重新生成的,写出器早就按约束片段把翻转定死了;没跑过的
+/// 分子只剩沿用来的方向,一个约束都没有,那一段自由度会悬空。
+///
+/// `run_reactants` 交出来的产物正是后者 —— 这一条最初就是在反应产物上露的馅:
+/// 同一个肉桂酸,一条从 SMILES 直接读进来、一条由反应生成,两串规范式互为
+/// 整体翻转。
+#[test]
+fn canonical_is_independent_of_the_global_direction_flip() {
+    for group in [
+        &["F/C=C/F", "F\\C=C\\F", "C(\\F)=C/F"][..],
+        &[
+            "OC(=O)/C=C/c1ccccc1",
+            "OC(=O)\\C=C\\c1ccccc1",
+            "c1ccccc1/C=C/C(O)=O",
+            "C(=C\\C(O)=O)/c1ccccc1",
+        ][..],
+        // 共轭链:整条链一起翻
+        &["C/C=C/C=C/C", "C\\C=C\\C=C\\C"][..],
+        // 顺式那一支同样要定死
+        &["C/C=C\\C", "C\\C=C/C"][..],
+    ] {
+        let mut first: Option<String> = None;
+        for smi in group {
+            let m = smiles::parse(smi).unwrap_or_else(|e| panic!("{smi}: {}", e.render()));
+            let c = canonical_smiles(&m);
+            match &first {
+                None => first = Some(c),
+                Some(f) => assert_eq!(f, &c, "{smi} 与 {} 是同一个几何,规范串却不同", group[0]),
+            }
+        }
+    }
+}
+
 /// 方括号是**书写习惯**,不是分子的性质 —— 规范串不能跟着它变。
 ///
 /// `[CH3][CH2][OH]` 与 `CCO` 是同一个分子,只是前者把氢写在方括号里。写出器要

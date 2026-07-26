@@ -438,6 +438,65 @@ fn build_products(
     split_components(&out, &from_reactant)
 }
 
+/// 模板里哪些方向键**真的表了态**,按模板键下标索引。
+///
+/// # 一根方向键单独出现时什么也没说
+///
+/// 顺反要靠双键**两端各一根**方向键才定得下来。`F/C=C/F` 是反式;而 `F/C=CF`
+/// 里那根 `/` 定不了任何东西 —— 它只说了"这根单键画在右上",另一端没画,
+/// 两个取代基的相对位置仍然未知。SMILES 与 SMARTS 在这一点上是同一套规则。
+///
+/// # 照抄一根孤立方向键会把参照系换掉
+///
+/// 孤立的那根抄进产物之后,并不会孤立地待着:双键另一侧的键多半是从底物
+/// **继承**来的,它带着底物的方向。于是产物里凑出了一对方向 —— 一根来自
+/// 模板的书写顺序,一根来自底物的书写顺序,两个互不相干的参照系。凑出来的
+/// 几何是任意的:底物明明是反式,产物可以变成顺式,而拓扑、原子数、电荷
+/// 全对,只有几何被悄悄换掉。这正是本项目最难发现的那一类错。
+///
+/// rdchiral 从 USPTO-50k 抽出的模板大量落在这一档:两侧各写一根孤立方向键,
+/// 且书写朝向一正一反(反应物侧写 `[C:2]/[C:4]=`,产物侧写 `=[C:4]/[C:2]`),
+/// 于是每一条都恰好翻一次。实测正向 100 条以上因此翻错。
+///
+/// # 判据
+///
+/// 双键"被模板定死"= 它两端**各自**还挂着至少一根写了方向的键。方向键"算数"
+/// = 它挨着至少一根被定死的双键。两条都不满足时按没写方向处理,几何交回给
+/// 继承那一支 —— 那一支两侧都取自同一个底物,参照系是一致的。
+fn honoured_directions(template: &QueryMol) -> Vec<bool> {
+    let bonds = template.topology.bonds();
+    let has_dir: Vec<bool> = template
+        .bonds
+        .iter()
+        .map(|e| bond_direction_from(e) != BondDirection::None)
+        .collect();
+    // 这个原子上,除了 `skip` 那根键之外还有没有写了方向的键
+    let flanked = |atom: u32, skip: usize| {
+        template
+            .topology
+            .neighbors(atom)
+            .any(|(_, bi)| bi as usize != skip && has_dir[bi as usize])
+    };
+    let determined: Vec<bool> = (0..bonds.len())
+        .map(|bi| {
+            bond_order_from(&template.bonds[bi]) == BondOrder::Double
+                && flanked(bonds[bi].begin, bi)
+                && flanked(bonds[bi].end, bi)
+        })
+        .collect();
+    (0..bonds.len())
+        .map(|bi| {
+            has_dir[bi]
+                && [bonds[bi].begin, bonds[bi].end].iter().any(|&a| {
+                    template
+                        .topology
+                        .neighbors(a)
+                        .any(|(_, ob)| ob as usize != bi && determined[ob as usize])
+                })
+        })
+        .collect()
+}
+
 /// 把一个产物模板的原子与键建进共享图。
 fn emit_template(
     template: &QueryMol,
@@ -491,6 +550,7 @@ fn emit_template(
     }
 
     // 二、产物模板里的键
+    let honoured = honoured_directions(template);
     for (bi, expr) in template.bonds.iter().enumerate() {
         let b = template.topology.bonds()[bi];
         let order = bond_order_from(expr);
@@ -515,11 +575,14 @@ fn emit_template(
             omgkit_core::BondFlags::AROMATIC,
             order == BondOrder::Aromatic,
         );
-        // 方向有两个可能的来源,**模板写的优先**。
+        // 方向有两个可能的来源,**模板真的表了态时**它优先。
         //
-        // 一、模板自己写了 `/` 或 `\`。那是作者对产物几何的明确指定,例如
+        // 一、模板自己写了 `/` 或 `\`,而且写成了**能定下几何的那种**:
         //    `>>C/[C:1]=[C:2]/C` 说的就是"新生成的双键是反式"。它相对模板键的
         //    begin → end,而新键的两端正是模板两端的像,朝向一致,直接照抄。
+        //
+        //    孤零零一根方向键不算表态,判据见 `honoured_directions` —— 它
+        //    什么几何也没定,却会把另一侧继承来的方向拽进另一个参照系。
         //
         // 二、模板没写方向,但两端都源自同一个反应物、那里本来就有这根键。
         //    方向表达的是**旁边那根双键**两侧取代基的相对位置 —— 反应没碰那根
@@ -528,7 +591,11 @@ fn emit_template(
         //
         //    这一支的朝向要对齐:存的方向相对源键的 begin → end,而新键的 begin
         //    对应的是模板端点 b.begin 的出处,两者不一定同向。
-        let from_template_dir = bond_direction_from(expr);
+        let from_template_dir = if honoured[bi] {
+            bond_direction_from(expr)
+        } else {
+            BondDirection::None
+        };
         bd.direction = if from_template_dir != BondDirection::None {
             from_template_dir
         } else if let (Some((t1, a1)), Some((t2, a2))) =
@@ -757,18 +824,78 @@ fn rebase_chirality(
             .neighbors(src)
             .map(|(other, _)| kept.get(&other).copied().filter(|p| after.contains(p)))
             .collect();
-        let Some(before) = fill_replaced_slots(&slots, &after) else {
+        let Some((before, after)) = align_for_rebase(&slots, &after) else {
             continue;
         };
-        if before.len() != after.len() {
-            continue;
-        }
         if permutation_is_odd(&before, &after) == Some(true) {
             if let Some(a) = out.atom_mut(dst) {
                 a.chiral_tag = tag.inverted();
             }
         }
     }
+}
+
+/// 代表**隐式氢**的哨兵。氢不是图里的节点,可它占着四面体的一个位置,
+/// 换参照系时必须算进去。取 `u32::MAX` 是因为真实原子下标不可能是它。
+const IMPLICIT_H: u32 = u32::MAX;
+
+/// 把反应物侧与产物侧的邻居顺序对齐成两条等长、同多重集的序列,供求宇称用。
+///
+/// # 度数变了不等于放弃
+///
+/// 取代基被**隐式氢**接管是常事 —— 脱保护、脱羧、脱卤都是:
+///
+/// ```text
+/// C-C(-C)(-C)-O-C(=O)-[C@@;H0;D4:1](-[C:2])(-[N:3])-[C:4]=[O:6]
+///                  >> [C:4](=[O:6])-[C@H;D3:1](-[C:2])-[N:3]
+/// ```
+///
+/// 中心从 D4H0 变成 D3H1。因为"长度对不上"就跳过重定基的话,标记会原样留在
+/// **反应物的**参照系里,而产物的邻居顺序已经变了 —— 于是拿到镜像。拓扑、
+/// 原子数、电荷全对,只有构型反了。USPTO-50k 上实测有这一档。
+///
+/// # 氢占着腾出来的那个位置
+///
+/// 所以做法是:少邻居的那一侧把哨兵**插在下标 1**,也就是紧跟第一个邻居 ——
+/// 这与解析器留下的存储约定一致(`N[C@H](O)F` 的存储序是 `(N, O, F)`,标记
+/// 说的是"从 N 看过去,H、O、F 依次逆时针")。
+///
+/// 插在哪一头其实**不影响结果**:四个邻居时把一个元素从首挪到尾是个三轮换,
+/// 宇称不变。选下标 1 只是为了与约定对得上,读代码的人不必再推一遍。
+///
+/// 两个方向对称:取代基被氢接管时哨兵进**产物侧**,反应物侧原本的隐式氢被
+/// 新邻居顶替时哨兵进**反应物侧**。
+///
+/// 只处理恰好差一个、且对齐后凑满四个邻居的情形 —— "对换一次就翻转"这条规则
+/// 只对四面体成立。
+fn align_for_rebase(slots: &[Option<u32>], after: &[u32]) -> Option<(Vec<u32>, Vec<u32>)> {
+    if let Some(before) = fill_replaced_slots(slots, after) {
+        if before.len() == after.len() {
+            return Some((before, after.to_vec()));
+        }
+    }
+    let vacated = slots.iter().filter(|s| s.is_none()).count();
+    let occupied = slots.len() - vacated;
+    if vacated == 1 && occupied == after.len() && slots.len() == 4 {
+        // 反应物侧多一个邻居:它在产物里被隐式氢接管
+        let before: Vec<u32> = slots.iter().map(|s| s.unwrap_or(IMPLICIT_H)).collect();
+        let mut aligned = after.to_vec();
+        aligned.insert(1, IMPLICIT_H);
+        return Some((before, aligned));
+    }
+    if vacated == 0 && after.len() == slots.len() + 1 && after.len() == 4 {
+        // 产物侧多一个邻居:它顶了反应物侧原本的隐式氢
+        let taken: BTreeSet<u32> = slots.iter().flatten().copied().collect();
+        let mut fresh = after.iter().filter(|a| !taken.contains(a));
+        let new = *fresh.next()?;
+        if fresh.next().is_some() {
+            return None;
+        }
+        let mut before: Vec<u32> = slots.iter().flatten().copied().collect();
+        before.insert(1, new);
+        return Some((before, after.to_vec()));
+    }
+    None
 }
 
 /// 把"被替换掉的取代基"那些空槽用产物侧新建的原子填上,保持原顺序。
