@@ -1,0 +1,19 @@
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# 差分测试的基准与语料:体积大且可复现,不入库。
+#
+# 例外:冒烟基准全部入库(合计 588K),这样新克隆下来 `cargo test` 就是绿的。
+# 放行规则要写成 `smoke.*` 而不是 `smoke.*.jsonl` —— 匹配那一档的基准是
+# `.tsv`,按后缀放行会把它漏掉,于是差分测试在新克隆上因读不到基准而报错。
+/harness/baseline/*
+!/harness/baseline/smoke.*
+/harness/corpus/chembl*.smi
+/harness/corpus/*.sdf
+/harness/report/
+
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store

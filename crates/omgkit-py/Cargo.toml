@@ -1,0 +1,42 @@
+[package]
+name = "omgkit-py"
+description = "omgkit 的 Python 绑定"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+# Python 扩展模块必须是 cdylib;模块名要与 `#[pymodule]` 的函数名一致。
+#
+# 只出 cdylib,不出 rlib:rlib 会让 `cargo test` 去建测试可执行文件,而那个
+# 二进制没有宿主解释器提供 Python 符号,必然链接失败。本 crate 的测试在
+# Python 侧(harness/test_python.py),那也是更有意义的一侧。
+name = "omgkit"
+crate-type = ["cdylib"]
+
+[dependencies]
+omgkit-core = { path = "../omgkit-core", version = "0.0.1" }
+omgkit-io = { path = "../omgkit-io", version = "0.0.1" }
+omgkit-chem = { path = "../omgkit-chem", version = "0.0.1" }
+omgkit-match = { path = "../omgkit-match", version = "0.0.1" }
+
+# 0.27 是 MSRV 还在 1.74 的最后一档,正好压在工作区的 1.75 之下 ——
+# 0.28 起要 1.83,用它就得为绑定一个 crate 抬高整个工作区的 MSRV。
+# abi3-py39 让一个 wheel 覆盖 3.9 及以上,不必逐版本编译。
+pyo3 = { version = "0.27.2", default-features = false, features = [
+    "abi3-py39",
+    "macros",
+] }
+
+[features]
+# 默认开 extension-module:构建 wheel 时要它(链接期不解析 Python 符号,
+# 由宿主解释器提供)。可它一旦打开,`cargo test` 就链不出测试可执行文件 ——
+# 那些符号在测试进程里没人提供。所以测试要 `--no-default-features`。
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
+
+[lints]
+workspace = true

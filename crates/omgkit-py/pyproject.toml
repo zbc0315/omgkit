@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "omgkit"
+description = "面向批处理与 GPU 的化学信息学工具箱"
+requires-python = ">=3.9"
+license = { text = "BSD-3-Clause" }
+# 版本由 Cargo.toml 提供,不在两处各写一份
+dynamic = ["version"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+
+[tool.maturin]
+# 用 abi3 编译:一个 wheel 覆盖 3.9 及以上,不必逐个小版本各编一份
+features = ["pyo3/extension-module"]
+strip = true

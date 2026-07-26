@@ -1,0 +1,20 @@
+[package]
+name = "omgkit-match"
+description = "omgkit 的 L5/L7 层:子结构匹配与反应产物生成"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+omgkit-core = { path = "../omgkit-core", version = "0.0.1" }
+omgkit-chem = { path = "../omgkit-chem", version = "0.0.1" }
+omgkit-io = { path = "../omgkit-io", version = "0.0.1" }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

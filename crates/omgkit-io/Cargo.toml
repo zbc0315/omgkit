@@ -1,0 +1,19 @@
+[package]
+name = "omgkit-io"
+description = "omgkit 的 L1 层:SMILES / SMARTS 的解析与输出"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+omgkit-core = { path = "../omgkit-core", version = "0.0.1" }
+
+[dev-dependencies]
+# 仅用于读取差分基准 JSONL;不进入库依赖
+serde_json = "1"
+
+[lints]
+workspace = true

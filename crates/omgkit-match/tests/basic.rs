@@ -1,0 +1,219 @@
+//! 子结构匹配的基本正确性。
+//!
+//! 这一层测的是"匹配算得对不对",判据是手工可验的小分子。大规模的正确性
+//! 由 `differential.rs` 对着外部实现比。
+
+use omgkit_chem::sanitize;
+use omgkit_core::MolBuilder;
+use omgkit_io::{smarts, smiles};
+use omgkit_match::{substructure_matches, MatchOptions, MolProps};
+
+/// 解析并跑完整的净化 —— 匹配要用到隐式氢、芳香标志、环信息。
+fn sanitized(smi: &str) -> MolBuilder {
+    let mut m = smiles::parse(smi).unwrap_or_else(|e| panic!("{smi}: {}", e.render()));
+    sanitize(&mut m).unwrap_or_else(|e| panic!("{smi}: {e}"));
+    m
+}
+
+fn count(pat: &str, smi: &str) -> usize {
+    hits(pat, smi, MatchOptions::default()).len()
+}
+
+fn hits(pat: &str, smi: &str, opts: MatchOptions) -> Vec<Vec<u32>> {
+    let q = smarts::parse(pat).unwrap_or_else(|e| panic!("{pat}: {}", e.render()));
+    let m = sanitized(smi);
+    let props = MolProps::compute(&m);
+    substructure_matches(&q, &m, &props, opts)
+}
+
+#[test]
+fn single_atom_patterns() {
+    assert_eq!(count("[OH]", "CCO"), 1);
+    assert_eq!(count("C", "CCO"), 2, "两个脂肪碳");
+    assert_eq!(count("[#6]", "CCO"), 2);
+    assert_eq!(count("c", "c1ccccc1"), 6);
+    assert_eq!(count("C", "c1ccccc1"), 0, "芳香碳不是脂肪碳");
+    assert_eq!(count("*", "CCO"), 3);
+}
+
+#[test]
+fn two_atom_patterns() {
+    assert_eq!(count("CO", "CCO"), 1);
+    assert_eq!(count("CC", "CCO"), 1);
+    assert_eq!(count("CC", "CCC"), 2, "丙烷有两条 C-C");
+    assert_eq!(count("C=O", "CC=O"), 1);
+    assert_eq!(count("C=O", "CCO"), 0, "单键不是双键");
+}
+
+/// 环上的匹配 —— 苯环里的 `cc` 有 6 条键。
+#[test]
+fn ring_patterns() {
+    assert_eq!(count("cc", "c1ccccc1"), 6);
+    assert_eq!(count("c1ccccc1", "c1ccccc1"), 1, "整个环,去重后只剩一种");
+    assert_eq!(count("[R1]", "c1ccccc1"), 6);
+    assert_eq!(count("[R2]", "c1ccc2ccccc2c1"), 2, "萘的两个稠合碳");
+    assert_eq!(
+        count("[r5]", "C1CC2CCCCC2C1"),
+        5,
+        "氢化茚:最小环为 5 的原子"
+    );
+    assert_eq!(count("[r6]", "C1CC2CCCCC2C1"), 4);
+}
+
+/// 去重开关的差别:同一组原子的多个排列。
+#[test]
+fn uniquify_changes_the_count() {
+    let uniq = hits(
+        "c1ccccc1",
+        "c1ccccc1",
+        MatchOptions {
+            uniquify: true,
+            ..Default::default()
+        },
+    );
+    let all = hits(
+        "c1ccccc1",
+        "c1ccccc1",
+        MatchOptions {
+            uniquify: false,
+            ..Default::default()
+        },
+    );
+    assert_eq!(uniq.len(), 1, "按原子集合去重后只剩一种");
+    assert_eq!(all.len(), 12, "苯的对称群阶为 12(6 个旋转 × 2 个方向)");
+}
+
+/// `max_matches` 早停。高度对称的分子上匹配数会爆炸,
+/// 只问"有没有"时不该把它们全枚举出来。
+#[test]
+fn max_matches_stops_early() {
+    let one = hits(
+        "cc",
+        "c1ccccc1",
+        MatchOptions {
+            max_matches: 1,
+            uniquify: false,
+            use_chirality: true,
+        },
+    );
+    assert_eq!(one.len(), 1);
+}
+
+/// 逻辑运算与查询基元。
+#[test]
+fn query_expressions() {
+    assert_eq!(count("[C,N]", "CCN"), 3);
+    assert_eq!(count("[C;H3]", "CCO"), 1, "只有一个甲基");
+    assert_eq!(count("[!C]", "CCO"), 1, "氧");
+    assert_eq!(count("[CX4]", "CC=O"), 1, "只有甲基是四连接");
+    assert_eq!(count("[$(CO)]", "CCO"), 1, "递归:连着氧的碳");
+    assert_eq!(count("[$(CC)]", "CCO"), 2, "两个碳都连着碳");
+}
+
+/// 映射给出的原子下标必须真的对上。
+#[test]
+fn mapping_points_at_the_right_atoms() {
+    // CCO:原子 0=C 1=C 2=O
+    let h = hits("CO", "CCO", MatchOptions::default());
+    assert_eq!(h.len(), 1);
+    assert_eq!(h[0], vec![1, 2], "查询原子 0(C)→1,原子 1(O)→2");
+}
+
+/// 断开的模式(多片段)要能匹配到分子的不同部分。
+#[test]
+fn disconnected_patterns() {
+    assert_eq!(count("C.O", "CCO"), 2, "两个碳各配一次氧");
+    assert_eq!(count("[OH].[OH]", "OCCO"), 1, "两个羟基,去重后一种");
+}
+
+/// 模式比分子大时直接无解,不该崩。
+#[test]
+fn pattern_larger_than_molecule() {
+    assert_eq!(count("CCCC", "CC"), 0);
+}
+
+/// 配位键的方向有语义:`->` 与 `<-` 匹配的是相反的朝向。
+#[test]
+fn dative_direction_matters() {
+    assert_eq!(count("N->[Cu]", "N->[Cu]"), 1);
+    assert_eq!(count("[Cu]<-N", "N->[Cu]"), 1, "同一条键,反着写也对");
+    assert_eq!(count("[Cu]->N", "N->[Cu]"), 0, "方向反了就不匹配");
+}
+
+/// 手性匹配要换参照系,不能比原始标记。
+///
+/// 标记相对**各自分子的邻居存储顺序**,查询与底物的顺序不同。直接比原始标记
+/// 是拿两个参照系里的值去比,得到的构型可以正好相反 —— 而这类错误只在写全
+/// 邻居的查询上显形,欠定查询照样"通过",很容易漏掉。
+///
+/// 期望值对应的规则:查询原子度 ≥ 3 才判构型,更少时只要求底物有手性。
+#[test]
+fn chirality_matching_rebases_the_reference_frame() {
+    let targets = ["C[C@H](O)CC", "C[C@@H](O)CC", "CC(O)CC"];
+    for (query, want) in [
+        // 欠定(度 1):只要求"有手性"
+        ("[C@H:1][OH]", [1usize, 1, 0]),
+        // 写全(度 3):判构型,而且两个构型互补
+        ("[C@:1]([OH])([CH3])[CH2]", [0, 1, 0]),
+        ("[C@@:1]([OH])([CH3])[CH2]", [1, 0, 0]),
+    ] {
+        let q = smarts::parse(query).unwrap_or_else(|e| panic!("{query}: {}", e.render()));
+        for (i, smi) in targets.iter().enumerate() {
+            let mut m = smiles::parse(smi).unwrap();
+            sanitize(&mut m).unwrap();
+            let props = MolProps::compute(&m);
+            let got = substructure_matches(
+                &q,
+                &m,
+                &props,
+                MatchOptions {
+                    max_matches: 0,
+                    uniquify: true,
+                    use_chirality: true,
+                },
+            )
+            .len();
+            assert_eq!(got, want[i], "{query} 对 {smi}");
+        }
+    }
+}
+
+/// 双键顺反匹配也要换参照系 —— 与手性同源的一处缺陷。
+///
+/// `/` 相对键自己的 `begin → end` 朝向,查询与底物的朝向不同。早先直接比原始
+/// 方向,于是**答案取决于分子怎么写的**:`F/C=C/F` 与 `C(\F)=C/F` 是同一个
+/// 分子,前者匹配、后者不匹配。
+///
+/// 所以每个构型都用**两种写法**测 —— 只用一种写法测,这个 bug 照样全绿。
+#[test]
+fn cis_trans_matching_is_independent_of_how_the_molecule_was_written() {
+    // 前两个都是反式,中间两个都是顺式,最后一个未指定
+    let targets = ["F/C=C/F", "C(\\F)=C/F", "F/C=C\\F", "C(/F)=C/F", "FC=CF"];
+    for (query, want) in [
+        ("[F]/[C]=[C]/[F]", [1usize, 1, 0, 0, 0]),
+        ("[F]/[C]=[C]\\[F]", [0, 0, 1, 1, 0]),
+        // 只写一侧 —— 说明不了相对位置,只要求"有方向"
+        ("[F]/[C]=[C][F]", [1, 1, 1, 1, 1]),
+        // 取代基对不上,一个都不该中
+        ("[C]/[C]=[C]/[C]", [0, 0, 0, 0, 0]),
+    ] {
+        let q = smarts::parse(query).unwrap_or_else(|e| panic!("{query}: {}", e.render()));
+        for (i, smi) in targets.iter().enumerate() {
+            let mut m = smiles::parse(smi).unwrap();
+            sanitize(&mut m).unwrap();
+            let props = MolProps::compute(&m);
+            let got = substructure_matches(
+                &q,
+                &m,
+                &props,
+                MatchOptions {
+                    max_matches: 0,
+                    uniquify: true,
+                    use_chirality: true,
+                },
+            )
+            .len();
+            assert_eq!(got, want[i], "{query} 对 {smi}");
+        }
+    }
+}

@@ -1,0 +1,53 @@
+# 四道闸门,与本地 `harness/README.md` 里写的是同一套。
+#
+# 只跑纯 Rust 那四个 crate(工作区的 `default-members`)。omgkit-py 是 cdylib,
+# 链接时把 Python 符号欠着,给它建测试可执行文件必然失败 —— 理由写在
+# 根 Cargo.toml 里。
+#
+# 差分测试的**冒烟**基准随仓库入库(合计 588K),所以 CI 不需要外部实现就能跑;
+# 大语料那一档标了 `#[ignore]`,本地用 `cargo test -- --ignored` 跑。
+#
+# Cargo.lock 不入库(库类项目的惯例),所以 CI 每次解析当时最新的兼容版本。
+# 代价是上游发新版可能让 CI 单独变红 —— 那时红的是依赖不是本仓库,按需锁版本。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # 报错要能定位,但别把日志刷爆
+  RUST_BACKTRACE: 1
+
+jobs:
+  gates:
+    name: fmt / clippy / test / doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml 钉的是 stable + rustfmt + clippy,这一步照它装
+      - name: 装工具链
+        run: |
+          rustup show active-toolchain || rustup toolchain install stable
+          rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 格式
+        run: cargo fmt --all --check
+
+      # 工作区的 lint 配置把 clippy::all 设成 warn,这里升成错 —— 否则警告会积压
+      - name: clippy(警告即失败)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 测试
+        run: cargo test --release
+
+      # rustdoc 的断链等三项在 Cargo.toml 里已是 deny,这一步让它真的跑到
+      - name: 文档
+        run: cargo doc --workspace --no-deps
