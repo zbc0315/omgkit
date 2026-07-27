@@ -374,6 +374,13 @@ fn build_products(
         .iter()
         .map(|(m, _)| vec![false; m.num_atoms()])
         .collect();
+    // 反应物模板**亲自匹配到**的那些底物键,按底物的键下标索引。
+    //
+    // 只有这些键归产物模板管;模板没看见的键它无权删,理由见 `carry_over`。
+    let mut template_bonds: Vec<Vec<bool>> = reactants
+        .iter()
+        .map(|(m, _)| vec![false; m.num_bonds()])
+        .collect();
 
     let mut facts = ReactantFacts {
         anchors: BTreeMap::new(),
@@ -383,6 +390,15 @@ fn build_products(
     };
 
     for (ti, template) in reaction.reactants.iter().enumerate() {
+        for qb in template.topology.bonds() {
+            let (a, b) = (
+                matches[ti][qb.begin as usize],
+                matches[ti][qb.end as usize],
+            );
+            if let Some(bi) = reactants[ti].0.bond_between(a, b) {
+                template_bonds[ti][bi as usize] = true;
+            }
+        }
         for (qi, &target) in matches[ti].iter().enumerate() {
             matched[ti][target as usize] = true;
             if let Some(n) = map_number(&template.atoms[qi]) {
@@ -427,7 +443,13 @@ fn build_products(
 
     // 模板之外的部分:每个原子只搬一次
     for (ti, (mol, _)) in reactants.iter().enumerate() {
-        carry_over(mol, &matched[ti], &mut from_reactant[ti], &mut out);
+        carry_over(
+            mol,
+            &matched[ti],
+            &template_bonds[ti],
+            &mut from_reactant[ti],
+            &mut out,
+        );
     }
     // 手性与顺反都要在切分**之前**定基 —— 切分保持邻居的相对顺序,定基却要看全图
     for (ti, (mol, _)) in reactants.iter().enumerate() {
@@ -991,6 +1013,7 @@ fn inherited_direction(mol: &MolBuilder, a: u32, b: u32) -> BondDirection {
 fn carry_over(
     mol: &MolBuilder,
     matched: &[bool],
+    template_bonds: &[bool],
     kept: &mut BTreeMap<u32, u32>,
     out: &mut MolBuilder,
 ) {
@@ -1022,8 +1045,21 @@ fn carry_over(
             if matched[other as usize] && !kept.contains_key(&other) {
                 continue;
             }
-            // 两端都在模板里的键由模板负责,不搬
-            if matched[a as usize] && matched[other as usize] {
+            // 反应物模板**亲自匹配到**的键才归产物模板负责,不搬。
+            //
+            // 判据不能是"两端都被匹配就不搬"。子结构匹配只要求模板的每根键
+            // 在底物里找得到,并不要求底物在这些原子之间没有别的键 —— 模板
+            // 把一个环写成**开链路径**时,环闭合的那根键两端确实都被匹配了,
+            // 可模板从没看见它。按"两端都匹配"判,这根键就被当成模板的地盘
+            // 删掉,环被撕开。撕开之后报出来的是**芳香**错误(原子不在环中
+            // 却带着芳香标志),病因与症状隔着一层,极难回溯。
+            //
+            // rdchiral 抽模板时只沿反应中心走一趟,稠环因此普遍写成路径,
+            // 这不是边角情形。
+            //
+            // 反过来也不能一律搬:模板匹配到、产物侧又不写的键,正是**断键**
+            // 反应要表达的东西。两条判据缺一不可。
+            if template_bonds[bi as usize] {
                 continue;
             }
             if !seen[other as usize] {
@@ -1059,6 +1095,12 @@ fn carry_over(
         let (Some(&na), Some(&nb)) = (kept.get(&src.begin), kept.get(&src.end)) else {
             continue;
         };
+        // 产物模板已经建过这根键 —— 成环模板作用在**已经成环**的底物上就是
+        // 这样:闭合键不在反应物模板里(反应物侧写的是一条链),却被产物模板
+        // 明写了出来。模板说了算,再搬一遍就是重复键:不报错,价数却翻倍。
+        if out.bond_between(na, nb).is_some() {
+            continue;
+        }
         // 整条键的属性都要跟过来:只抄键级的话,芳香键的标志位会丢,
         // 而"键级为 Aromatic 时标志位必须同步"是全局不变量 —— 破了它,
         // 写出来的芳香环会变成"大写原子 + 冒号键"这种半吊子形式

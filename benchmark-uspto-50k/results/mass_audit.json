@@ -1,0 +1,25 @@
+{
+  "n_records": 50016,
+  "tally": {
+    "omgkit_fwd_outcomes": 220401,
+    "omgkit_fwd_exact": 218908,
+    "rdkit_fwd_outcomes": 220401,
+    "rdkit_fwd_exact": 218906,
+    "omgkit_retro_outcomes": 89898,
+    "omgkit_retro_exact": 89898,
+    "rdkit_retro_outcomes": 89900,
+    "rdkit_retro_exact": 85935,
+    "rdkit_retro_duplicated": 3687,
+    "rdkit_retro_extra_atoms": 40454,
+    "rdkit_retro_unsanitizable": 278,
+    "omgkit_fwd_lost_other": 1487,
+    "omgkit_fwd_lost_atoms": 13299,
+    "rdkit_fwd_lost_other": 1487,
+    "rdkit_fwd_lost_atoms": 13299,
+    "omgkit_fwd_lost_whole_component": 6,
+    "rdkit_fwd_lost_whole_component": 6,
+    "rdkit_fwd_duplicated": 1,
+    "rdkit_fwd_extra_atoms": 2,
+    "rdkit_fwd_unsanitizable": 1
+  }
+}

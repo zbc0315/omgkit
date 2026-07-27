@@ -1,0 +1,68 @@
+{
+  "moves": {
+    "omgkit_retro_bad_delta": -6,
+    "omgkit_fwd_bad_delta": -12
+  },
+  "changed": {
+    "gained": [],
+    "lost": [],
+    "bad_changed": [
+      {
+        "row": 5351,
+        "engine": "omgkit",
+        "dir": "retro",
+        "before": 1,
+        "after": 0
+      },
+      {
+        "row": 8856,
+        "engine": "omgkit",
+        "dir": "retro",
+        "before": 1,
+        "after": 0
+      },
+      {
+        "row": 11276,
+        "engine": "omgkit",
+        "dir": "retro",
+        "before": 1,
+        "after": 0
+      },
+      {
+        "row": 30138,
+        "engine": "omgkit",
+        "dir": "fwd",
+        "before": 4,
+        "after": 0
+      },
+      {
+        "row": 35072,
+        "engine": "omgkit",
+        "dir": "fwd",
+        "before": 4,
+        "after": 0
+      },
+      {
+        "row": 40978,
+        "engine": "omgkit",
+        "dir": "retro",
+        "before": 1,
+        "after": 0
+      },
+      {
+        "row": 44160,
+        "engine": "omgkit",
+        "dir": "retro",
+        "before": 2,
+        "after": 0
+      },
+      {
+        "row": 45282,
+        "engine": "omgkit",
+        "dir": "fwd",
+        "before": 4,
+        "after": 0
+      }
+    ]
+  }
+}

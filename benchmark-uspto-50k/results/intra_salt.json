@@ -1,6 +1,31 @@
 {
   "ring_sweep": [
     {
+      "n": 4,
+      "smiles": "O=C1CCN1",
+      "n_in": 5,
+      "want_heavy": 6,
+      "want_mols": 1,
+      "og_plain": {
+        "mols": 1,
+        "heavy": 6
+      },
+      "rd_plain": {
+        "mols": 2,
+        "heavy": 6,
+        "components": 2
+      },
+      "og_grouped": {
+        "mols": 1,
+        "heavy": 6
+      },
+      "rd_grouped": {
+        "mols": 1,
+        "heavy": 6,
+        "components": 1
+      }
+    },
+    {
       "n": 5,
       "smiles": "O=C1CCCN1",
       "n_in": 6,
