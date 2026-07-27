@@ -5,18 +5,23 @@
 
 ## 组件
 
-| 文件 | 作用 |
-|---|---|
-| `gen_elements.py` | 生成元素表 → `crates/omgkit-core/src/element_data.rs` |
-| `oracle_pipeline.py` | 生成分层基准(JSONL) |
-| `check_write.py` | 用外部实现裁判 SMILES 写出(见下) |
-| `oracle_smarts.py` | 生成 SMARTS 解析基准,并抽取 SMARTS 语料 |
-| `corpus/smoke.smi` | 冒烟语料,覆盖主要语法陷阱与各步骤的触发用例 |
-| `corpus/large.smi` | 大语料(8839 条) |
-| `corpus/smarts.txt` | SMARTS 语料(776 条,抽自 PAINS / 官能团层级 / RLewis 库) |
-| `check_product_chirality.py` | 裁判产物侧手性(见下)。用例写死在文件里 —— 反应语料在这条路上触发面是 0 |
-| `corpus/reactions.txt` | 反应模板语料(20 条),**没有一条在产物侧写手性** |
-| `baseline/` | 生成的基准(已 gitignore) |
+| 文件 | 作用 | 来源 |
+|---|---|---|
+| `gen_elements.py` | 生成元素表 → `crates/omgkit-core/src/element_data.rs` | — |
+| `oracle_pipeline.py` | 生成分层基准(JSONL) | — |
+| `check_write.py` | 用外部实现裁判 SMILES 写出(见下) | — |
+| `oracle_smarts.py` | 生成 SMARTS 解析基准,并抽取 SMARTS 语料 | — |
+| `corpus/smoke.smi` | 冒烟语料(149 条),覆盖主要语法陷阱与各步骤的触发用例 | 本项目自写 |
+| `corpus/large.smi` | 大语料(8839 条) | RDKit 测试数据(NCI / ZINC / canonSmiles),见 [`../THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md) |
+| `corpus/smarts.txt` | SMARTS 语料(776 条) | RDKit 的 PAINS / 官能团层级 / RLewis 库,同上 |
+| `check_product_chirality.py` | 裁判产物侧手性(见下)。用例写死在文件里 —— 反应语料在这条路上触发面是 0 | — |
+| `corpus/reactions.txt` | 反应模板语料(20 条),**没有一条在产物侧写手性** | 本项目自写 |
+| `baseline/` | 生成的基准 —— 跑外部实现产出的,不是抄来的文件 | 派生数据 |
+
+语料一律取自外部、**不手挑**:手挑的分子与模式会不自觉地只挑实现已经处理得了
+的写法。代价是随仓库分发它们要交代清楚出处与条款,那份对照表就是
+[`../THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md),里面附了"有没有来路
+不明的条目"的核对命令。
 
 ## 用法
 
@@ -1157,9 +1162,8 @@ Rust 侧补的判据 `canonical_smiles_is_a_fixed_point` 第一版只 `parse`,�
 正向与逆向各跑一遍,与 RDKit 的 `RunReactants` 逐条对比命中与耗时。完整结论、
 公平性口径与复现步骤写在那个目录的 README,这里只记**判据本身**的几处教训。
 
-那个目录**不在本仓库内**,在与本仓库同级的 `../benchmark/uspto-50k/` —— 它带着
-上百 MB 的语料与逐条结果,不适合与库同仓。目录自足:脚本一律以自己所在位置
-定 ROOT,搬到哪都能跑。
+那套材料**不随本仓库分发** —— 它带着上百 MB 的语料与逐条结果,不适合与库同仓。
+它自足:脚本一律以自己所在位置定 ROOT,放到哪都能跑。
 
 ### 一、裁判要选对手的规范式,不能选自己的
 

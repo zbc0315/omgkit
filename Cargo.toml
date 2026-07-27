@@ -27,6 +27,10 @@ rust-version = "1.75"
 license = "BSD-3-Clause"
 repository = "https://github.com/zbc0315/omgkit"
 authors = ["zbc0315 <62389427+zbc0315@users.noreply.github.com>"]
+# 索引页只认英文与固定词表:keywords 限 ASCII、每个 ≤20 字符、至多 5 个;
+# categories 必须取自 crates.io 的既定列表,拼错会在 publish 时被拒。
+keywords = ["chemistry", "cheminformatics", "smiles", "smarts", "molecule"]
+categories = ["science", "data-structures", "parser-implementations"]
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -7,6 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [lib]
 # Python 扩展模块必须是 cdylib;模块名要与 `#[pymodule]` 的函数名一致。

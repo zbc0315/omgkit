@@ -7,6 +7,8 @@ name = "omgkit"
 description = "面向批处理与 GPU 的化学信息学工具箱"
 requires-python = ">=3.9"
 license = { text = "BSD-3-Clause" }
+authors = [{ name = "zbc0315" }]
+keywords = ["chemistry", "cheminformatics", "smiles", "smarts", "molecule"]
 # 版本由 Cargo.toml 提供,不在两处各写一份
 dynamic = ["version"]
 classifiers = [
@@ -15,6 +17,9 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: CPython",
     "Topic :: Scientific/Engineering :: Chemistry",
 ]
+
+[project.urls]
+Repository = "https://github.com/zbc0315/omgkit"
 
 [tool.maturin]
 # 用 abi3 编译:一个 wheel 覆盖 3.9 及以上,不必逐个小版本各编一份
