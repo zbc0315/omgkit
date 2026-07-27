@@ -184,6 +184,86 @@ fn canonical(smi: &str) -> String {
     canon::canonical_smiles(&m).smiles
 }
 
+/// 重原子数,用来把"少了几个原子"写成数字而不是感觉。
+fn heavy(smi: &str) -> usize {
+    sanitized(smi).num_atoms()
+}
+
+/// 去重后的产物多重集,排序;判据要的是"输出了哪些",不是"输出了几次"。
+fn distinct(rxn: &str, mols: &[&str]) -> Vec<String> {
+    let mut v = flat(rxn, mols);
+    v.dedup();
+    v
+}
+
+/// 语料 US05026856(USPTO-50k 第 49427 行)的 N-脱苄模板。
+///
+/// `-C-c1:c:c:c:c:c:1` 那一支整支没有映射号,是要删掉的。
+const DEBENZYL: &str =
+    "[C:1]-[N;H0;D3;+0:2](-C-c1:c:c:c:c:c:1)-[C:3]>>[C:1]-[NH;D2;+0:2]-[C:3]";
+/// 同一条记录的底物:N-苄基异吲哚啉,苯环上带一个甲氧基。
+const DEBENZYL_SUB: &str = "COc1ccc2c(c1)CN(Cc1ccccc1)C2";
+
+/// 产物只包含从**保留下来的原子走得到**的部分 —— 之一:模板删掉某个原子时,
+/// 只挂在它身上的东西跟着一起走。
+///
+/// 上面这条真模板在这个真底物上有**两处**匹配,第二处正好把约定暴露出来:
+///
+/// - 一处:`-C-c1ccccc1` 那一支匹配到真正的苄基 → 脱苄,产物 11 个重原子
+/// - 另一处:匹配到**稠合的苯环**那一支 → 苯环被删,挂在苯环上的甲氧基
+///   再没有别的路连回保留部分,于是一并消失 —— 产物只剩 9 个重原子
+///
+/// 后者不是缺陷:模板说了要删那 7 个原子,而甲氧基是通过它们才连着的。换任何
+/// 别的做法都得回答"这两个原子该接到哪里去",而那没有普遍答案。RDKit 在同一
+/// 条模板同一个底物上给出**一模一样**的两组产物;全语料 1493 个 outcome 落在
+/// 这一档,两个引擎的数字逐条相同。
+#[test]
+fn atoms_reachable_only_through_a_deleted_atom_go_with_it() {
+    let got = distinct(DEBENZYL, &[DEBENZYL_SUB]);
+    let mut want = vec![
+        canonical("COc1ccc2c(c1)CNC2"), // 脱苄
+        canonical("CNCc1ccccc1"),       // 苯环那一支被删,甲氧基跟着走
+    ];
+    want.sort();
+    assert_eq!(got, want);
+
+    // 把"少掉的是甲氧基那 2 个原子"写成数字:底物 18,模板删 7,若什么都不带走
+    // 该剩 11;实际 9。
+    assert_eq!(heavy(DEBENZYL_SUB), 18);
+    assert_eq!(heavy("CNCc1ccccc1"), 9);
+}
+
+/// 之二:完全不连通的组分永远走不到,因此不进产物。
+///
+/// 搬运是从匹配到的原子出发做遍历的,与任何匹配原子都不连通的组分没有路可走。
+/// 盐的反离子、旁观试剂都落在这一档。
+///
+/// # 底物为什么是拼的
+///
+/// 模板与主体底物都取自语料(同上一条),但**后面那个 HCl 是拼上去的**。
+/// USPTO-50k 抽模板时把多组分物种拆成了独立分子,50016 条记录的输入分子
+/// 全是单组分,旁观反离子一条都没有 —— 语料给不出这一档的底物。拼上去的是
+/// **书写形式**(把两个组分写进同一个分子),不是化学:盐在真实数据里到处都是,
+/// 任何调用方只要传进一个盐就会碰上。
+///
+/// 判据:结果与不带 HCl 时**逐字相同** —— HCl 静默消失,不报错。
+#[test]
+fn a_component_with_no_matched_atom_is_dropped() {
+    let with_salt = format!("{DEBENZYL_SUB}.Cl");
+    // 先证明 HCl 确实进了引擎 —— 否则这条判据可能是在"解析时就丢了"上空过,
+    // 而那与搬运时走不到完全是两回事
+    assert_eq!(heavy(&with_salt), heavy(DEBENZYL_SUB) + 1, "HCl 没被读进来");
+
+    let plain = distinct(DEBENZYL, &[DEBENZYL_SUB]);
+    let salted = distinct(DEBENZYL, &[&with_salt]);
+    assert!(!plain.is_empty(), "对照组没有产物,判据空过");
+    assert_eq!(salted, plain, "旁观的 HCl 影响了产物");
+    assert!(
+        !salted.iter().any(|s| s.contains("Cl")),
+        "HCl 出现在产物里了:{salted:?}"
+    );
+}
+
 /// 搬运未匹配部分时,键的**朝向**必须沿用源键,不能沿用遍历方向。
 ///
 /// 遍历是从已保留的原子往外走的,走到某条键时的出发端与该键存储的 `begin`

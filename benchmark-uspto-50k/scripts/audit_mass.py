@@ -15,13 +15,18 @@
                                    − 反应物模板里没有映射号的重原子)
 
 多出来 = **复制**,这是最严重的一档:拓扑错了而什么都不报错。
-少掉了 = 丢原子,再分两种:
+少掉了 = 丢原子,见下。
 
-    整个不连通组分被丢掉  —— 已知约定(搬运是从匹配到的原子出发遍历,
-                              完全不连通的组分永远走不到)
-    别的                  —— 见下
+# 曾经想按"丢的是不是整个组分"再分一档,分错了
 
-# "别的"那一档不能直接算成缺陷
+原先用子集和判"丢掉的量能不能由若干个输入组分的大小加出来",能加出来就算
+"整个不连通组分被丢掉"。这条判据在本语料上**没有意义**:50016 条记录的输入
+分子全是单组分(抽取时多组分物种已被拆开),真正的旁观组分一次都没出现。
+它挑出来的 6 条全是巧合 —— 丢失量恰好等于另一个输入分子的重原子数。
+
+判据得配得上数据。分不出来的档就别分,合成一档、把成因写清楚。
+
+# 丢原子这一档不能直接算成缺陷
 
 模板删掉一个原子时,**挂在它身上、又不通过别的路连回保留部分**的那些原子会一并
 失去落脚点。叔丁酯水解是标准例子:模板写 `C-C-[O:1]-[C:2]=[O:3]`,删掉的 `C-C`
@@ -107,16 +112,6 @@ def component_sizes(smis):
         for frag in Chem.GetMolFrags(m, asMols=True, sanitizeFrags=False):
             out.append(frag.GetNumHeavyAtoms())
     return out
-
-
-def subset_sum_reachable(sizes, target):
-    """target 能不能由若干个组分大小加出来 —— 判"丢掉的正好是整组分"。"""
-    if target == 0:
-        return True
-    reach = {0}
-    for s in sizes:
-        reach |= {r + s for r in reach if r + s <= target}
-    return target in reach
 
 
 def run_engine(engine, smarts, inputs, rx, delta):
@@ -229,14 +224,15 @@ def main():
                                                    "want": want, "got": tot}) + "\n")
                         else:
                             lost = want - tot
-                            if subset_sum_reachable(sizes, lost):
-                                tally[f"{e}_{d}_lost_whole_component"] += 1
-                            else:
-                                tally[f"{e}_{d}_lost_other"] += 1
-                                tally[f"{e}_{d}_lost_atoms"] += lost
-                                sink.write(json.dumps({"row": rec["row"], "id": rec["id"],
-                                                       "dir": d, "engine": e, "kind": "少",
-                                                       "want": want, "got": tot}) + "\n")
+                            tally[f"{e}_{d}_lost"] += 1
+                            tally[f"{e}_{d}_lost_atoms"] += lost
+                            if len(sizes) > len(inputs):
+                                # 输入分子里真有不连通组分才可能是"旁观被丢弃"
+                                tally[f"{e}_{d}_lost_with_multicomponent_input"] += 1
+                            sink.write(json.dumps({"row": rec["row"], "id": rec["id"],
+                                                   "dir": d, "engine": e, "kind": "少",
+                                                   "want": want, "got": tot,
+                                                   "sizes": sizes}) + "\n")
     sink.close()
     print(f"\n扫了 {n} 条记录\n")
     for k, v in sorted(tally.items()):
@@ -246,7 +242,7 @@ def main():
     print("\n== 两个引擎逐档对照 ==")
     print(f"  {'档':28s} {'omgkit':>10s} {'RDKit':>10s}  {'':4s}")
     kinds = ["exact", "duplicated", "extra_atoms", "unsanitizable",
-             "lost_whole_component", "lost_other", "lost_atoms"]
+             "lost", "lost_atoms", "lost_with_multicomponent_input"]
     for d in ("fwd", "retro"):
         for kind in kinds:
             a, b = tally.get(f"omgkit_{d}_{kind}", 0), tally.get(f"rdkit_{d}_{kind}", 0)

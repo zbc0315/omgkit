@@ -76,21 +76,30 @@ def header(fig, spec, title, sub=None, mono=None):
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.text(0, 0.92, title, fontsize=11, fontweight="bold", va="top")
+    # 副标题的位置要按等宽块**实际占几行**算。写死一个 y,等宽块一换行就压到
+    # 副标题上 —— 而叠字在图里不报错,只是看不清。
+    y = 0.58
     if mono:
-        ax.text(0, 0.50, mono, fontsize=7.4, family="monospace", color=GREY, va="top")
+        ax.text(0, y, mono, fontsize=7.2, family="monospace", color=GREY, va="top")
+        y -= 0.30 * mono.count("\n") + 0.26
+    else:
+        y = 0.45
     if sub:
-        ax.text(0, 0.20 if mono else 0.45, sub, fontsize=9, color=GREY, va="top")
+        ax.text(0, y, sub, fontsize=9, color=GREY, va="top")
 
 
 def panel_a(fig, spec, d):
     sub = GridSpecFromSubplotSpec(
         3, 2, subplot_spec=spec, height_ratios=[0.5, 1, 1], hspace=0.30, wspace=0.05
     )
+    # 模板串必须从数据里取,不能写死 —— 写死过一次,换了模板之后图上标的
+    # 与实际量的就成了两条,而图看不出来
+    tpl = d["templates"]["plain"].replace(">>", "\n  >>  ")
     header(
         fig, sub[0, :],
-        "(a) 同一条断酰胺逆向模板,切成几片由底物决定",
+        "(a) 同一条断酰胺逆向模板(取自语料,出现 295 次),切成几片由底物决定",
         "模板作者在写模板时无从知道目标是不是环",
-        "[C:2]-[C:1](=[O:3])-[NH:4]-[C:5] >> O-[C:1](-[C:2])=[O:3] . [NH2:4]-[C:5]",
+        tpl,
     )
     lac = next(r for r in d["ring_sweep"] if r["n"] == 7)
     cells = [
@@ -172,8 +181,8 @@ def panel_d(fig, spec, d):
     )
     header(
         fig, sub[0, :],
-        "(d) 完全不连通的旁观组分被静默丢弃",
-        "两个实现同样如此:搬运是从已匹配原子出发的遍历,走不到孤立组分",
+        "(d) 完全不连通的旁观组分被静默丢弃(明文约定)",
+        "搬运是从已匹配原子出发的遍历,走不到孤立组分;两个实现同样如此。底物是拼的——语料里没有",
     )
     cells = [
         ("O=C1CCCCCN1.Cl", "底物:内酰胺 + 旁观 HCl(9 个重原子)", "#1a202c"),
@@ -183,26 +192,32 @@ def panel_d(fig, spec, d):
         draw_mol(fig.add_subplot(sub[1, k]), smi, title, col, size=(560, 400))
 
 
-def panel_e(ax, d):
-    s = d["salt_prevalence"]
-    n = s["records"]
+def panel_e(ax, d, claim):
+    """订正版:那 3625 条"含小离子/带电片段"里,旁观反离子有几条。
+
+    原先这一格画的是"反应物侧含小离子或带电片段 = 7.2%",用来说盐很常见。
+    那个数字把**真反应物**(甲醇钠、氨、鏻盐、格氏试剂)也算了进去。逐条对着
+    记录的参与反应分子集合判过之后,旁观反离子是 0 条 —— 语料给不出这一档。
+    """
+    t = claim["tally"]
+    n = t["记录"]
     items = [
-        ("反应物侧\n带小离子", s["r_has_small_ion"]),
-        ("反应物侧\n带电片段", s["r_has_charged_fragment"]),
-        ("反应物侧\n两者之一", s["r_saltlike"]),
-        ("产物侧\n两者之一", s["p_saltlike"]),
+        ("含小离子 /\n带电片段", t["含小离子/带电片段·合计"], "#cbd5e0"),
+        ("其中:是\n参与反应的分子", t["含小离子/带电片段·是参与反应的"], "#2b6cb0"),
+        ("其中:旁观反离子", t.get("含小离子/带电片段·旁观(真反离子那一档)", 0), BAD),
     ]
     xs = np.arange(len(items))
-    vals = [100 * v / n for _, v in items]
-    bars = ax.bar(xs, vals, color=["#63b3ed", "#63b3ed", "#2b6cb0", "#cbd5e0"], width=0.62)
-    for b, (_, v) in zip(bars, items):
+    vals = [100 * v / n for _, v, _ in items]
+    bars = ax.bar(xs, vals, color=[c for _, _, c in items], width=0.58)
+    for b, (_, v, _) in zip(bars, items):
         ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.12,
                 f"{v} 条\n{100 * v / n:.1f}%", ha="center", fontsize=8.8)
     ax.set_xticks(xs)
-    ax.set_xticklabels([k for k, _ in items], fontsize=9)
+    ax.set_xticklabels([k for k, _, _ in items], fontsize=9)
     ax.set_ylabel(f"占 {n} 条记录的比例 / %")
-    ax.set_ylim(0, max(vals) * 1.42)
-    ax.set_title("(e) 盐不是边角情形", fontsize=11, fontweight="bold", loc="left")
+    ax.set_ylim(0, max(vals) * 1.45)
+    ax.set_title("(e) 订正:那 7.2% 全是真反应物,旁观反离子 0 条",
+                 fontsize=11, fontweight="bold", loc="left")
     ax.grid(alpha=0.25, axis="y")
 
 
@@ -223,7 +238,10 @@ def panel_f(ax, d):
         "输出只剩连通分量,于是分不清\n"
         "     断出来的另一半   与   旁观的反离子\n\n"
         "两条都指向同一件事 ——\n"
-        "片数不是模板的性质,是(模板, 底物)共同的性质。",
+        "片数不是模板的性质,是(模板, 底物)共同的性质。\n\n"
+        "但要说清楚:以上是表达力论证,只依赖契约的形状。\n"
+        "本语料量不出它 —— 抽取时多组分物种已被拆开,\n"
+        "50016 条记录的输入分子全是单组分,见 (e)。",
         fontsize=9.5, va="top", linespacing=1.62, family="sans-serif",
     )
 
@@ -231,6 +249,8 @@ def panel_f(ax, d):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", default=os.path.join(ROOT, "results", "intra_salt.json"))
+    ap.add_argument("--claim", default=os.path.join(ROOT, "results", "salt_claim.json"),
+                    help="audit_salt_claim.py 的输出,(e) 用它画订正后的拆分")
     ap.add_argument("--out", default=os.path.join(ROOT, "figures", "intra_and_salt.png"))
     args = ap.parse_args()
 
@@ -240,6 +260,7 @@ def main():
         plt.rcParams["axes.unicode_minus"] = False
 
     d = json.load(open(args.src))
+    claim = json.load(open(args.claim))
     fig = plt.figure(figsize=(17, 10.2))
     gs = GridSpec(2, 3, figure=fig, hspace=0.38, wspace=0.22,
                   left=0.035, right=0.985, top=0.905, bottom=0.055)
@@ -247,10 +268,10 @@ def main():
     panel_b(fig.add_subplot(gs[0, 1]), d)
     panel_c(fig.add_subplot(gs[0, 2]), d)
     panel_d(fig, gs[1, 0], d)
-    panel_e(fig.add_subplot(gs[1, 1]), d)
+    panel_e(fig.add_subplot(gs[1, 1]), d, claim)
     panel_f(fig.add_subplot(gs[1, 2]), d)
     fig.suptitle(
-        "反应模板应用:产物切成几片由底物而非模板决定 —— 分子内(上排)与盐(下排)",
+        "反应模板应用:产物切成几片由底物而非模板决定 —— 分子内(上排)与旁观组分(下排)",
         fontsize=13.5, y=0.975,
     )
     fig.savefig(args.out, dpi=170)
