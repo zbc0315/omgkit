@@ -146,7 +146,13 @@ def main():
 
     print(f"omgkit 命中而 RDKit 未命中:{len(wins)} 条")
 
-    mass, chiral, other = [], [], []
+    def rec_stub(t, d, tpl, inputs, truth, n_in):
+        return {
+            "row": t["row"], "direction": d, "id": t["id"], "tpl": tpl,
+            "inputs": inputs, "truth": truth, "rdkit": [], "n_in": n_in,
+        }
+
+    mass, chiral, other, unsanitizable = [], [], [], []
     for row, d in wins:
         t = tpls.get(row)
         if t is None:
@@ -154,15 +160,16 @@ def main():
         tpl = t[d]
         inputs = t["reactants"] if d == "fwd" else [t["prod"]]
         truth = canon(t["prod"] if d == "fwd" else ".".join(t["reactants"]))
+        n_in = sum(heavy(s) or 0 for s in inputs)
         try:
             rd = run_rdkit(tpl, inputs)
         except Exception:
             continue
         if not rd:
+            # RDKit 产出了 outcome 但全部净化不过 —— 这一档不能丢,它与
+            # "原子被复制"是同一个根因,只是复制出来的结构直接超价
+            unsanitizable.append(rec_stub(t, d, tpl, inputs, truth, n_in))
             continue
-        n_in = sum(heavy(s) or 0 for s in inputs)
-        # RDKit 的输出里有没有重原子数**多于**输入的?那是复制出来的
-        heavier = [s for s in rd if (heavy(s) or 0) > n_in]
         rec = {
             "row": row,
             "direction": d,
@@ -173,30 +180,51 @@ def main():
             "rdkit": sorted(rd),
             "n_in": n_in,
         }
-        if heavier:
+        # **先比骨架,再看拓扑**。顺序反过来是错的归因:RDKit 若同时产出了
+        # 骨架正确、只差立体的那一个,这次未命中的原因就是立体 —— 复制发生在
+        # 另一条无关的 outcome 上,不该算到这条的账上。
+        flat_truth = Chem.MolToSmiles(Chem.MolFromSmiles(truth), isomericSmiles=False)
+        same_skel = [
+            s
+            for s in sorted(rd)
+            if Chem.MolFromSmiles(s)
+            and Chem.MolToSmiles(Chem.MolFromSmiles(s), isomericSmiles=False) == flat_truth
+        ]
+        heavier = [s for s in rd if (heavy(s) or 0) > n_in]
+        if same_skel:
+            rec["rdkit_bad"] = same_skel[0]
+            chiral.append(rec)
+        elif heavier:
             rec["rdkit_bad"] = heavier[0]
             rec["n_bad"] = heavy(heavier[0])
             mass.append(rec)
-        elif any(
-            Chem.MolToSmiles(Chem.MolFromSmiles(s), isomericSmiles=False)
-            == Chem.MolToSmiles(Chem.MolFromSmiles(truth), isomericSmiles=False)
-            for s in rd
-            if Chem.MolFromSmiles(s)
-        ):
-            rec["rdkit_bad"] = sorted(rd)[0]
-            chiral.append(rec)
         else:
             other.append(rec)
 
-    print(f"  质量不守恒 {len(mass)}  立体差异 {len(chiral)}  其他 {len(other)}")
+    print(
+        f"  原子被复制 {len(mass)}  产出但净化全不过 {len(unsanitizable)} "
+        f"  立体 {len(chiral)}  其他 {len(other)}"
+    )
 
     lines = [
         "# 典型案例:RDKit 输出错、omgkit 输出对",
         "",
         "判据不依赖记录 —— 见 `scripts/make_cases.py` 的模块说明。",
         "",
-        f"全量 50016 条里,omgkit 命中而 RDKit 未命中的共 **{len(wins)}** 条,",
-        f"其中质量不守恒 {len(mass)} 条、立体差异 {len(chiral)} 条、其他 {len(other)} 条。",
+        f"全量 50016 条里,omgkit 命中而 RDKit 未命中的共 **{len(wins)}** 条。",
+        "",
+        "| RDKit 错在哪一层 | 条数 |",
+        "|---|---|",
+        f"| 原子被复制(产物重原子数 > 输入) | {len(mass)} |",
+        f"| 产出了 outcome 但**净化全不过** | {len(unsanitizable)} |",
+        f"| 四面体手性 | {len(chiral)} |",
+        f"| 其他 | {len(other)} |",
+        "",
+        "前两档是**同一个根因** —— 多片段产物模板逐个构建时,共享的原子被搬进了",
+        "每一片;复制出来的结构有的还能净化(第一档),有的直接超价(第二档)。",
+        "合起来占 "
+        f"{100 * (len(mass) + len(unsanitizable)) / max(len(wins), 1):.1f}%,",
+        "是**拓扑**层面的错,与立体化学无关。",
         "",
     ]
 
