@@ -67,6 +67,16 @@ def main():
     if os.path.exists(args.verdicts):
         c = Counter(json.loads(l)["verdict"] for l in open(args.verdicts))
         out["miss_attribution"] = dict(c.most_common())
+        # 归因合计必须等于未命中数。
+        #
+        # 定责脚本要拿预测与真值逐个立体中心比,**没有预测就无从比起**,于是
+        # 那条记录被静默跳过 —— 而"一个产物都没有"恰恰是最重的一档。归因表
+        # 因此会看着干净:它只统计了能比的那些。实测漏过 2 条(row 15318 /
+        # 31347,方向键写在芳香键上导致模板一处也匹配不上)。
+        #
+        # 所以这里对账,对不上就写进结果并显式报出来,不靠人去加一遍。
+        missed = sum(out[d]["neither"] + out[d]["only_rdkit"] for d in ("fwd", "retro"))
+        out["miss_attribution_gap"] = missed - sum(c.values())
     if os.path.exists(args.rdchiral):
         c = Counter(json.loads(l)["final"] for l in open(args.rdchiral))
         out["engine_adjudication"] = dict(c.most_common())
@@ -97,6 +107,10 @@ def main():
         print("\n未命中归因(按反应计):")
         for k, v in out["miss_attribution"].items():
             print(f"  {k:34s} {v}")
+        gap = out["miss_attribution_gap"]
+        print(f"  {'合计':34s} {sum(out['miss_attribution'].values())}")
+        if gap:
+            print(f"  !! 有 {gap} 条未命中没被归因 —— 多半是它们连预测都没有,定责脚本比不了")
     if "engine_adjudication" in out:
         print("\n疑似引擎缺陷的 rdchiral 裁定:")
         for k, v in out["engine_adjudication"].items():

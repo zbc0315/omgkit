@@ -19,6 +19,9 @@ Cargo.lock
 /harness/corpus/*.sdf
 /harness/report/
 
+# maturin build 的产物,复现命令写在 README
+/dist/
+
 __pycache__/
 *.py[cod]
 .venv/

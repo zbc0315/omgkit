@@ -217,3 +217,44 @@ fn cis_trans_matching_is_independent_of_how_the_molecule_was_written() {
         }
     }
 }
+
+/// 方向键的**键级**要求就是默认键那一个:单键或芳香键。
+///
+/// 写成"仅单键"会比不写方向还严,于是模板把方向落在一根**芳香**键上时一处也
+/// 匹配不上 —— 而稠环模板里这很常见。取自语料 US08841334B2(2-亚氨基苯并噻唑
+/// 的 N-酰化,逆向):模板在环内的 S—c 键上写了 `/`,底物那根键是芳香键。
+///
+/// 判据卡两头:放宽之后要匹配得上,而**几何约束不能跟着丢**。
+#[test]
+fn a_direction_written_on_an_aromatic_bond_still_matches() {
+    // 底物的方向写在 n—c 上,模板写在 s—c 上 —— 参照原子分处双键两侧
+    let substrate = "COCCn1/c(=N/C(=O)CC2CCCC2)sc2cc(F)ccc21";
+
+    assert_eq!(
+        count("[#16;a]/[c]", substrate),
+        2,
+        "芳香键上写方向,键级不该被否掉"
+    );
+    assert_eq!(
+        count("[#16;a][c]", substrate),
+        2,
+        "不写方向的同一个查询 —— 两者在键级上必须同义"
+    );
+    assert_eq!(
+        count("[#16;a]-[c]", substrate),
+        0,
+        "写死单键才该落空 —— `-` 与 `/` 不是一回事"
+    );
+
+    // 语料原模板的反应物侧:换算过参照系之后几何是一致的
+    let tpl = "[#16;a:4]/[c:5](=[N;H0;D2;+0:6]\\[C;H0;D3;+0:1](-[C:2])=[O;D1;H0:3]):[#7;a:7]";
+    assert_eq!(count(tpl, substrate), 1, "参照系换算过来该匹配");
+
+    // 把 N 那一端的方向翻过来 —— 要的几何变了,一处也不该中
+    let flipped = "[#16;a:4]/[c:5](=[N;H0;D2;+0:6]/[C;H0;D3;+0:1](-[C:2])=[O;D1;H0:3]):[#7;a:7]";
+    assert_eq!(
+        count(flipped, substrate),
+        0,
+        "键级放宽了,几何约束不能跟着丢"
+    );
+}

@@ -225,10 +225,24 @@ fn bond_prim_matches(p: BondPrim, b: &BondProps) -> bool {
         // 匹配。而且单独一条 `/` 本身什么都不表示 —— 顺反是双键加两条参照键
         // 的性质,同样要等映射齐了才判。
         //
-        // 但**键级约束要留着**:`/` 不只表示方向,它还蕴含单键。整个返回 true
-        // 会让 `/` 匹配上双键,于是 `[C]/[C]=[C][C]` 比 `[C][C]=[C][C]` 匹配得
-        // **更多** —— 方向要求只该收紧不该放宽。
-        BondPrim::UpRight | BondPrim::DownRight => b.order == BondOrder::Single,
+        // 但**键级约束要留着**:整个返回 true 会让 `/` 匹配上双键,于是
+        // `[C]/[C]=[C][C]` 比 `[C][C]=[C][C]` 匹配得**更多** —— 加了方向
+        // 只该收紧不该放宽。
+        //
+        // 而这里的约束就是[默认键]那一个:**单键或芳香键**。写成"仅单键"会比
+        // 默认键**更严**,于是在芳香键上写方向的模板一处也匹配不上 —— 稠环模板
+        // 里这是常态,方向落在环内某根芳香键上并不罕见。方向该改的是朝向,不是
+        // 键级;能不能带方向由写模板的人负责,不由匹配代为否决。
+        //
+        // SMILES 解析那边早就是这么做的(见 `smiles.rs` 的 `bond_symbol`:
+        // "`/` `\` 是**纯方向**标记,不指定键级")—— OpenSMILES 把方向键描述为
+        // "单键",照字面实现会错。同一条结论要在 SMARTS 这边一并成立,否则
+        // 同一根键读进来是芳香的,查询却按单键去配。
+        //
+        // [默认键]: BondExpr::default_bond
+        BondPrim::UpRight | BondPrim::DownRight => {
+            matches!(b.order, BondOrder::Single | BondOrder::Aromatic)
+        }
         // 配位键的两个基元靠朝向区分
         BondPrim::Dative => b.order == BondOrder::Dative && b.dative_forward,
         BondPrim::DativeReversed => b.order == BondOrder::Dative && !b.dative_forward,

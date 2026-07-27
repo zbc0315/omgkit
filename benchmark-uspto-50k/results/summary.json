@@ -11,45 +11,45 @@
   },
   "retro": {
     "comparable": 50012,
-    "omgkit_hit": 49400,
+    "omgkit_hit": 49402,
     "rdkit_hit": 49116,
     "only_omgkit": 291,
-    "only_rdkit": 7,
+    "only_rdkit": 5,
     "neither": 605,
     "shape_skipped": 4
   },
   "timing": {
     "omgkit_fwd": {
       "n": 49719,
-      "median_us": 20.83,
-      "p90_us": 46.67,
-      "p99_us": 343.75,
-      "max_us": 5597.71,
-      "total_s": 1.696
+      "median_us": 21.04,
+      "p90_us": 47.25,
+      "p99_us": 351.54,
+      "max_us": 5486.37,
+      "total_s": 1.72
     },
     "rdkit_fwd": {
       "n": 49719,
-      "median_us": 15.29,
-      "p90_us": 64.12,
-      "p99_us": 633.67,
-      "max_us": 10498.79,
-      "total_s": 2.221
+      "median_us": 15.38,
+      "p90_us": 64.29,
+      "p99_us": 641.88,
+      "max_us": 10427.08,
+      "total_s": 2.231
     },
     "omgkit_retro": {
       "n": 50012,
-      "median_us": 14.08,
-      "p90_us": 27.21,
-      "p99_us": 64.79,
-      "max_us": 673.29,
-      "total_s": 0.838
+      "median_us": 14.29,
+      "p90_us": 27.46,
+      "p99_us": 65.71,
+      "max_us": 691.25,
+      "total_s": 0.851
     },
     "rdkit_retro": {
       "n": 50012,
-      "median_us": 13.25,
-      "p90_us": 34.29,
-      "p99_us": 120.33,
-      "max_us": 1419.46,
-      "total_s": 1.0
+      "median_us": 13.29,
+      "p90_us": 34.38,
+      "p99_us": 121.0,
+      "max_us": 1485.88,
+      "total_s": 1.005
     }
   },
   "miss_attribution": {
@@ -62,6 +62,7 @@
     "引擎·翻了": 14,
     "记录·无映射号的中心对不上": 3
   },
+  "miss_attribution_gap": 0,
   "engine_adjudication": {
     "模板:rdchiral 自己也还原不出": 44
   }
