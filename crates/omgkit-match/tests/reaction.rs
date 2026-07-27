@@ -233,22 +233,24 @@ fn atoms_reachable_only_through_a_deleted_atom_go_with_it() {
     assert_eq!(heavy("CNCc1ccccc1"), 9);
 }
 
-/// 之二:完全不连通的组分永远走不到,因此不进产物。
+/// 与上一条相反的一档:**完全不连通的旁观组分要原样交回来**,不能丢。
 ///
-/// 搬运是从匹配到的原子出发做遍历的,与任何匹配原子都不连通的组分没有路可走。
-/// 盐的反离子、旁观试剂都落在这一档。
+/// 搬运是从匹配到的原子出发做遍历的,与任何匹配原子都不连通的组分本来没有路
+/// 可走。曾经因此把它们丢掉 —— 而那是**引擎自己在丢原子**:产物的重原子数少于
+/// 底物,不报错。逆合成正是把模板作用到任意分子上,盐是常态,所以这一条不做成
+/// 开关,直接改成默认搬过来(见 `seed_spectators`)。
+///
+/// 与上一条的分界是"这个组分里**有没有**原子被模板匹配到":有,留下还是删掉就是
+/// 模板的表态;没有,模板压根没提到它,不能替它做主。
 ///
 /// # 底物为什么是拼的
 ///
 /// 模板与主体底物都取自语料(同上一条),但**后面那个 HCl 是拼上去的**。
-/// USPTO-50k 抽模板时把多组分物种拆成了独立分子,50016 条记录的输入分子
-/// 全是单组分,旁观反离子一条都没有 —— 语料给不出这一档的底物。拼上去的是
-/// **书写形式**(把两个组分写进同一个分子),不是化学:盐在真实数据里到处都是,
-/// 任何调用方只要传进一个盐就会碰上。
-///
-/// 判据:结果与不带 HCl 时**逐字相同** —— HCl 静默消失,不报错。
+/// USPTO-50k 抽模板时把多组分物种拆成了独立分子,50016 条记录的输入分子全是
+/// 单组分,旁观反离子一条都没有 —— 语料给不出这一档的底物。拼上去的是**书写
+/// 形式**,不是化学:盐在真实数据里到处都是。
 #[test]
-fn a_component_with_no_matched_atom_is_dropped() {
+fn a_component_with_no_matched_atom_comes_back_untouched() {
     let with_salt = format!("{DEBENZYL_SUB}.Cl");
     // 先证明 HCl 确实进了引擎 —— 否则这条判据可能是在"解析时就丢了"上空过,
     // 而那与搬运时走不到完全是两回事
@@ -257,11 +259,52 @@ fn a_component_with_no_matched_atom_is_dropped() {
     let plain = distinct(DEBENZYL, &[DEBENZYL_SUB]);
     let salted = distinct(DEBENZYL, &[&with_salt]);
     assert!(!plain.is_empty(), "对照组没有产物,判据空过");
-    assert_eq!(salted, plain, "旁观的 HCl 影响了产物");
-    assert!(
-        !salted.iter().any(|s| s.contains("Cl")),
-        "HCl 出现在产物里了:{salted:?}"
+
+    // 旁观组分作为自己的一个分子回来,别的产物一个字不变
+    let mut want = plain.clone();
+    want.push(canonical("Cl"));
+    want.sort();
+    assert_eq!(salted, want, "旁观的 HCl 没被原样交回来");
+
+    // 逐 outcome 数重原子:这条模板会删掉 7 个原子,不新建;带不带 HCl,
+    // 产物总数就该差**恰好一个** HCl 的重原子数。数字才是判据,SMILES 只是佐证。
+    for (a, b) in products(DEBENZYL, &[DEBENZYL_SUB])
+        .iter()
+        .zip(products(DEBENZYL, &[&with_salt]).iter())
+    {
+        let ha: usize = a.iter().map(|s| heavy(s)).sum();
+        let hb: usize = b.iter().map(|s| heavy(s)).sum();
+        assert_eq!(hb, ha + 1, "带上 HCl 之后产物少了原子:{a:?} → {b:?}");
+    }
+}
+
+/// 盐:两个反离子各自不连通,断键之后两个都要回来。
+///
+/// 底物是使用者给的一条实例。它把上一条判据推到更难的形状:**两个**旁观组分,
+/// 而且反应把主体切成了两半 —— 引擎既不能丢掉反离子,也不该替使用者决定
+/// 哪个反离子跟哪一半走(那没有普遍答案,模板里也没有这条信息)。
+///
+/// 判据是**质量守恒**:模板新建一个氧,所以产物重原子数 = 底物 + 1。
+#[test]
+fn both_counter_ions_of_a_salt_come_back() {
+    const SALT: &str = "[Na+].[O-]CC(=O)OCC[O-].[K+]";
+    const ESTER: &str = "[C:1](=[O:2])[O:3][C:4]>>[C:1](=[O:2])[O:3].[O:5][C:4]";
+
+    let got = flat(ESTER, &[SALT]);
+    assert!(!got.is_empty(), "一个产物都没有,判据空过");
+
+    let total: usize = got.iter().map(|s| heavy(s)).sum();
+    assert_eq!(
+        total,
+        heavy(SALT) + 1,
+        "质量不守恒 —— 模板只新建一个氧,产物却是 {got:?}"
     );
+    for ion in ["[Na+]", "[K+]"] {
+        assert!(
+            got.contains(&canonical(ion)),
+            "{ion} 没回来:{got:?}"
+        );
+    }
 }
 
 /// 搬运未匹配部分时,键的**朝向**必须沿用源键,不能沿用遍历方向。

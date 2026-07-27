@@ -93,13 +93,17 @@ pub struct Outcome {
 /// 两个甲基没有别的路连回保留部分,于是一并消失 —— 一次少掉 4 个重原子而不是 2 个。
 /// 这在 USPTO-50k 上有 1493 个 outcome,RDKit 的行为逐条相同。
 ///
-/// **二、完全不连通的组分永远走不到。** 底物写成 `内酰胺.HCl` 时,HCl 与任何
-/// 匹配到的原子都不连通,遍历到不了它,产物里就没有它。盐的反离子、旁观试剂
-/// 都落在这一档。USPTO-50k 上触发次数为 **0** —— 那份语料的输入分子全是单组分,
-/// 但任何调用方只要传进一个盐就会遇到。
+/// **二、完全不连通的旁观组分原样交回来,不丢。** 底物写成 `内酰胺.HCl` 或
+/// `[Na+].[O-]CC(=O)OCC[O-].[K+]` 时,反离子与任何匹配到的原子都不连通,遍历
+/// 走不到它们。**但走不到不等于该丢** —— 丢了产物的重原子数就少于底物,是引擎
+/// 自己在破坏质量守恒,而且不报错。逆合成正是把模板作用到任意分子上,盐是常态。
 ///
-/// 想保住旁观组分,得由调用方在跑完之后自己把它们并回去 —— 引擎不做这件事,
-/// 因为"这个反离子该跟哪一个产物走"没有普遍答案。
+/// 所以这些组分会被原样搬进产物图,按连通分量切开之后各自成为一个产物分子。
+/// **引擎不替调用方决定归属** —— "这个反离子该跟哪一半走"没有普遍答案,模板里
+/// 也没有这条信息;交回去,由调用方定。
+///
+/// 与上一条的分界是"这个组分里**有没有**原子被模板匹配到":有,留下还是删掉
+/// 是模板的表态;没有,模板压根没提到它。
 ///
 /// # `atom_mapping`
 ///
@@ -198,6 +202,8 @@ pub fn run_reactants(
         return Vec::new();
     }
 
+    // 连通分量按分子算一次就够 —— 它与匹配到哪个位点无关
+    let comps: Vec<Vec<u32>> = reactants.iter().map(|(m, _)| components(m)).collect();
     let mut out = Vec::new();
     let mut combo: Vec<usize> = vec![0; per_template.len()];
     loop {
@@ -206,7 +212,7 @@ pub fn run_reactants(
             .enumerate()
             .map(|(i, &j)| &per_template[i][j])
             .collect();
-        let built = build_products(reaction, reactants, &mapping, &home);
+        let built = build_products(reaction, reactants, &mapping, &home, &comps);
         out.push(stamp_atom_maps(reactants, built, atom_mapping));
         if max_products != 0 && out.len() >= max_products {
             break;
@@ -325,6 +331,7 @@ pub fn run_on_substrate(
     // 所有模板都落在这唯一一张图上
     let home = vec![0usize; reaction.reactants.len()];
     let n_atoms = inputs[0].0.num_atoms();
+    let comps: Vec<Vec<u32>> = inputs.iter().map(|(m, _)| components(m)).collect();
 
     let mut out = Vec::new();
     let mut combo: Vec<usize> = vec![0; per_template.len()];
@@ -346,7 +353,7 @@ pub fn run_on_substrate(
             })
         });
         if disjoint {
-            let built = build_products(reaction, &inputs, &mapping, &home);
+            let built = build_products(reaction, &inputs, &mapping, &home, &comps);
             out.push(stamp_atom_maps(&inputs, built, atom_mapping));
             if max_products != 0 && out.len() >= max_products {
                 break;
@@ -543,11 +550,41 @@ type BuiltProduct = (MolBuilder, Vec<BTreeMap<u32, u32>>);
 /// 拆出这个间接层是为了让"一个模板 ↔ 一个分子"不再是写死的假设:分子内反应
 /// 里好几个模板落在同一个分子上,`home` 全指向同一个下标。位置式的
 /// [`run_reactants`] 传的是恒等映射,行为一字不变。
+/// 连通分量编号,每个原子一个。**每个分子只算一次**。
+///
+/// 分量结构是分子自己的性质,与匹配到哪个位点无关;而 `build_products` 每出一个
+/// outcome 就要判一次"哪些分量没有被匹配到",一个底物上有几十处匹配就要重算几十遍。
+/// 算一次传下去,省下的是常数乘以 outcome 数。
+fn components(mol: &MolBuilder) -> Vec<u32> {
+    let n = mol.num_atoms();
+    let mut comp = vec![u32::MAX; n];
+    let mut stack: Vec<u32> = Vec::new();
+    let mut next = 0u32;
+    for s in 0..n as u32 {
+        if comp[s as usize] != u32::MAX {
+            continue;
+        }
+        comp[s as usize] = next;
+        stack.push(s);
+        while let Some(a) = stack.pop() {
+            for (other, _) in mol.neighbors(a) {
+                if comp[other as usize] == u32::MAX {
+                    comp[other as usize] = next;
+                    stack.push(other);
+                }
+            }
+        }
+        next += 1;
+    }
+    comp
+}
+
 fn build_products(
     reaction: &Reaction,
     reactants: &[(MolBuilder, MolProps)],
     matches: &[&Vec<u32>],
     home: &[usize],
+    comps: &[Vec<u32>],
 ) -> Vec<BuiltProduct> {
     // 被模板匹配到的原子(不论有没有映射号),这些不再作为"模板外的部分"搬运
     let mut matched: Vec<Vec<bool>> = reactants
@@ -624,8 +661,12 @@ fn build_products(
         );
     }
 
-    // 模板之外的部分:每个原子只搬一次
+    // 模板之外的部分:每个原子只搬一次。
+    //
+    // 先埋旁观组分的种子,再走遍历 —— 两步共用同一趟 `carry_over`,键的排序
+    // 纪律与重定基因此完全一致。
     for (ti, (mol, _)) in reactants.iter().enumerate() {
+        seed_spectators(mol, &comps[ti], &matched[ti], &mut from_reactant[ti], &mut out);
         carry_over(
             mol,
             &matched[ti],
@@ -1190,6 +1231,66 @@ fn inherited_direction(mol: &MolBuilder, a: u32, b: u32) -> BondDirection {
         src.direction
     } else {
         src.direction.flipped()
+    }
+}
+
+/// 旁观组分:模板**一个原子都没匹配到**的那些连通分量,原样搬进产物。
+///
+/// # 不搬就是丢原子
+///
+/// 底物写成 `内酰胺.HCl` 或 `[Na+].[O-]CC(=O)OCC[O-].[K+]` 时,反离子与任何
+/// 匹配到的原子都不连通,[`carry_over`] 的遍历永远走不到它们。丢掉它们,产物的
+/// 重原子数就少于底物 —— **引擎自己违反了质量守恒**,而且不报错。
+///
+/// 逆合成正是把模板作用到**任意**分子上,盐是常态而非边角,所以这一条不做成开关。
+///
+/// # 做法:埋一个种子,剩下的交给同一趟遍历
+///
+/// 给每个这样的组分往产物图里放一个种子原子、登记进 `kept`,`carry_over` 随后
+/// 会从种子出发把整个组分连同它的键搬过来。这样键的排序纪律(按源键下标,不按
+/// 遍历发现顺序)、手性与顺反的重定基、按连通分量切分、原子映射发号,全都与别处
+/// 走同一条路径,不必再开一条。
+///
+/// # 判据是"有没有被匹配",不是"在不在 `kept` 里"
+///
+/// 组分里只要有**一个**原子被模板匹配到,它就归模板管:留下还是删掉是模板的表态,
+/// 与旁观无关。模板删掉某个原子、挂在它身上的东西跟着失去落脚点,那是另一条约定
+/// (见本模块的契约),这里不碰。
+fn seed_spectators(
+    mol: &MolBuilder,
+    comp: &[u32],
+    matched: &[bool],
+    kept: &mut BTreeMap<u32, u32>,
+    out: &mut MolBuilder,
+) {
+    // 单分量的分子不可能有旁观组分 —— 模板既然匹配上了,那唯一的分量就有匹配原子。
+    // 绝大多数底物是这一档,先短路掉。
+    let Some(&n_comp) = comp.iter().max() else { return };
+    if n_comp == 0 {
+        return;
+    }
+    let n_comp = n_comp as usize + 1;
+
+    // 哪些分量里有被匹配到的原子 —— 它们归模板管,不是旁观
+    let mut has_match = vec![false; n_comp];
+    for (a, &hit) in matched.iter().enumerate() {
+        if hit {
+            has_match[comp[a] as usize] = true;
+        }
+    }
+    // 每个旁观分量埋一个种子:取分量里**下标最小**的原子。遍历的发现顺序不能用,
+    // 它会让同一个分子因为写法不同而搬出不同的邻居次序。
+    let mut seeded = vec![false; n_comp];
+    for (a, &c) in comp.iter().enumerate() {
+        let c = c as usize;
+        if has_match[c] || seeded[c] {
+            continue;
+        }
+        seeded[c] = true;
+        let mut carried = mol.atoms()[a];
+        carried.atom_map = 0;
+        let idx = out.add_atom_data(carried);
+        kept.insert(a as u32, idx);
     }
 }
 
