@@ -179,6 +179,8 @@ pub fn run_reactants(
         .zip(reactants)
         .map(|(t, (mol, props))| substructure_matches(t, mol, props, opts))
         .collect();
+    // 位置式契约:第 i 个模板只找第 i 个分子
+    let home: Vec<usize> = (0..reaction.reactants.len()).collect();
     if per_template.iter().any(Vec::is_empty) {
         return Vec::new();
     }
@@ -191,10 +193,151 @@ pub fn run_reactants(
             .enumerate()
             .map(|(i, &j)| &per_template[i][j])
             .collect();
-        let built = build_products(reaction, reactants, &mapping);
+        let built = build_products(reaction, reactants, &mapping, &home);
         out.push(stamp_atom_maps(reactants, built, atom_mapping));
         if max_products != 0 && out.len() >= max_products {
             break;
+        }
+        // 进位
+        let mut i = 0;
+        loop {
+            if i == combo.len() {
+                return out;
+            }
+            combo[i] += 1;
+            if combo[i] < per_template[i].len() {
+                break;
+            }
+            combo[i] = 0;
+            i += 1;
+        }
+    }
+    out
+}
+
+/// 把若干个分子拼成一张图(不加任何键),返回拼好的图。
+///
+/// 只有 [`BondData`] 的 `begin`、`end`、`stereo_atoms` 带原子下标,要加偏移;
+/// [`AtomData`] 一个下标都不带 —— 手性是**相对邻居顺序**说的,不是相对下标。
+/// 正因如此,原子与键都必须**按原顺序**逐个搬:顺序一乱,每个原子的邻居序
+/// 跟着乱,手性标记的含义就变了,而拓扑、原子数、电荷全对,只有构型悄悄反了。
+fn concat(mols: &[(MolBuilder, MolProps)]) -> MolBuilder {
+    let n_atoms = mols.iter().map(|(m, _)| m.num_atoms()).sum();
+    let n_bonds = mols.iter().map(|(m, _)| m.num_bonds()).sum();
+    let mut out = MolBuilder::with_capacity(n_atoms, n_bonds);
+    for (m, _) in mols {
+        let base = u32::try_from(out.num_atoms()).unwrap_or(u32::MAX);
+        for a in m.atoms() {
+            out.add_atom_data(*a);
+        }
+        for b in m.bonds() {
+            let mut nb = *b;
+            nb.begin += base;
+            nb.end += base;
+            for s in &mut nb.stereo_atoms {
+                if *s != BondData::NO_STEREO_ATOM {
+                    *s += base;
+                }
+            }
+            let _ = out.add_bond_data(nb);
+        }
+    }
+    out
+}
+
+/// 把整个反应物侧当作**一张图**上的查询来跑,而不是按位置配对。
+///
+/// # 与 [`run_reactants`] 的分工
+///
+/// [`run_reactants`] 的契约是"N 个反应物模板 ↔ N 个输入分子,第 i 个配第 i 个"。
+/// 那是个**位置**契约,而位置不是化学:同一批分子换个顺序递进来就可能不出产物,
+/// 调用方只好把所有排列都试一遍。更要紧的是,模板的片段数比分子数多时它直接
+/// 交白卷 —— 而那正是**分子内反应**的形状:两个片段落在同一个分子上。
+///
+/// 本函数把输入拼成一张图,让每个反应物模板在整张图上自由找位置,只要求
+/// 各模板匹配到的原子**两两不重叠**。于是
+///
+/// - 分子间:片段落在不同的连通分量上,与位置式的结果一致(不必再枚举排列)
+/// - 分子内:片段落在同一个分量的不同部位 —— 位置式表达不了的那一档
+/// - 盐:阳离子与阴离子是同一个分子的两个组分,模板可以同时碰到它们
+///
+/// 这与产物侧是同一条原则:**片数是(模板, 底物)共同的性质,不是模板的性质**。
+/// 产物侧早就这么做了(建进同一张图、按连通分量切开),这里只是把同一条原则
+/// 补到反应物侧。
+///
+/// # 代价
+///
+/// 匹配的搜索空间变大:位置式下第 i 个模板只在第 i 个分子里找,这里在整张图里
+/// 找,再靠不相交筛掉大部分组合。片段多、分子大时组合数会涨得很快,`max_products`
+/// 只截输出、不截枚举。要可预测的耗时就用 [`run_reactants`]。
+///
+/// # 调用前同样要先感知双键顺反
+///
+/// 理由与 [`run_reactants`] 完全相同,见那里。
+#[must_use]
+pub fn run_on_substrate(
+    reaction: &Reaction,
+    substrate: &[(MolBuilder, MolProps)],
+    max_products: usize,
+    atom_mapping: bool,
+) -> Vec<Outcome> {
+    debug_assert!(
+        !substrate.iter().any(|(m, _)| directions_not_perceived(m)),
+        "底物里有双键的几何**方向键已经写明**、却没有感知过顺反 —— \
+         漏了 omgkit_io::stereo::perceive_bond_stereo。理由见 run_reactants"
+    );
+    if substrate.is_empty() || reaction.reactants.is_empty() || reaction.products.is_empty() {
+        return Vec::new();
+    }
+
+    let mol = concat(substrate);
+    let props = MolProps::compute(&mol);
+    let inputs = [(mol, props)];
+
+    // 反应侧不判立体,理由见 `run_reactants`
+    let opts = MatchOptions {
+        max_matches: 0,
+        uniquify: false,
+        use_chirality: false,
+    };
+    let per_template: Vec<Vec<Vec<u32>>> = reaction
+        .reactants
+        .iter()
+        .map(|t| substructure_matches(t, &inputs[0].0, &inputs[0].1, opts))
+        .collect();
+    if per_template.iter().any(Vec::is_empty) {
+        return Vec::new();
+    }
+
+    // 所有模板都落在这唯一一张图上
+    let home = vec![0usize; reaction.reactants.len()];
+    let n_atoms = inputs[0].0.num_atoms();
+
+    let mut out = Vec::new();
+    let mut combo: Vec<usize> = vec![0; per_template.len()];
+    let mut used = vec![false; n_atoms];
+    loop {
+        let mapping: Vec<&Vec<u32>> = combo
+            .iter()
+            .enumerate()
+            .map(|(i, &j)| &per_template[i][j])
+            .collect();
+        // 两个模板抢同一个原子是不合法的:位置式契约靠"分子各不相同"天然
+        // 保证了这一点,拼成一张图之后必须自己判。
+        used.iter_mut().for_each(|u| *u = false);
+        let disjoint = mapping.iter().all(|m| {
+            m.iter().all(|&a| {
+                let fresh = !used[a as usize];
+                used[a as usize] = true;
+                fresh
+            })
+        });
+        if disjoint {
+            let built = build_products(reaction, &inputs, &mapping, &home);
+            out.push(stamp_atom_maps(&inputs, built, atom_mapping));
+            if max_products != 0 && out.len() >= max_products {
+                break;
+            }
         }
         // 进位
         let mut i = 0;
@@ -382,10 +525,16 @@ impl ChiralityPlan {
 /// 不在表里 —— 它们没有反应物出处。
 type BuiltProduct = (MolBuilder, Vec<BTreeMap<u32, u32>>);
 
+/// `home[ti]` = 第 ti 个反应物模板匹配进了第几个输入分子。
+///
+/// 拆出这个间接层是为了让"一个模板 ↔ 一个分子"不再是写死的假设:分子内反应
+/// 里好几个模板落在同一个分子上,`home` 全指向同一个下标。位置式的
+/// [`run_reactants`] 传的是恒等映射,行为一字不变。
 fn build_products(
     reaction: &Reaction,
     reactants: &[(MolBuilder, MolProps)],
     matches: &[&Vec<u32>],
+    home: &[usize],
 ) -> Vec<BuiltProduct> {
     // 被模板匹配到的原子(不论有没有映射号),这些不再作为"模板外的部分"搬运
     let mut matched: Vec<Vec<bool>> = reactants
@@ -408,19 +557,22 @@ fn build_products(
     };
 
     for (ti, template) in reaction.reactants.iter().enumerate() {
+        // 第 ti 个模板落在第几个输入分子上。位置式契约下就是 ti 自己;把两个
+        // 模板放到同一个分子上(分子内反应)时,好几个 ti 会指向同一个下标。
+        let ri = home[ti];
         for qb in template.topology.bonds() {
             let (a, b) = (
                 matches[ti][qb.begin as usize],
                 matches[ti][qb.end as usize],
             );
-            if let Some(bi) = reactants[ti].0.bond_between(a, b) {
-                template_bonds[ti][bi as usize] = true;
+            if let Some(bi) = reactants[ri].0.bond_between(a, b) {
+                template_bonds[ri][bi as usize] = true;
             }
         }
         for (qi, &target) in matches[ti].iter().enumerate() {
-            matched[ti][target as usize] = true;
+            matched[ri][target as usize] = true;
             if let Some(n) = map_number(&template.atoms[qi]) {
-                facts.anchors.entry(n).or_insert((ti, target));
+                facts.anchors.entry(n).or_insert((ri, target));
                 facts
                     .degree
                     .entry(n)

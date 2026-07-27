@@ -270,6 +270,49 @@ impl PyReaction {
             .collect()
     }
 
+    /// 把整个反应物侧当作**一张图**上的查询来跑,而不是按位置配对。
+    ///
+    /// [`run`](Self::run) 要求"第 i 个分子配第 i 个模板片段",于是模板片段数
+    /// 比分子数多时直接返回空 —— 而那正是**分子内反应**的形状:两个片段落在
+    /// 同一个分子上。本方法把输入拼成一张图,让每个片段在整张图上自由找位置,
+    /// 只要求各片段匹配到的原子两两不重叠。
+    ///
+    /// - 分子间:与 `run` 结果一致,且不必再枚举输入的排列
+    /// - 分子内:`run` 表达不了的那一档
+    /// - 盐:阳离子与阴离子是同一个分子的两个组分,模板可以同时碰到
+    ///
+    /// 代价是搜索空间变大,耗时不如 `run` 可预测;要稳定耗时就用 `run`。
+    #[pyo3(signature = (substrate, *, max_products = 0, atom_mapping = false))]
+    fn run_on_substrate(
+        &self,
+        substrate: Vec<PyMol>,
+        max_products: usize,
+        atom_mapping: bool,
+    ) -> Vec<PyOutcome> {
+        let inputs: Vec<(MolBuilder, omgkit_match::MolProps)> = substrate
+            .into_iter()
+            .map(|m| {
+                let props = omgkit_match::MolProps::compute(&m.inner);
+                (m.inner, props)
+            })
+            .collect();
+        omgkit_match::run_on_substrate(&self.inner, &inputs, max_products, atom_mapping)
+            .into_iter()
+            .map(|o| PyOutcome {
+                products: o
+                    .products
+                    .into_iter()
+                    .map(|inner| PyMol { inner })
+                    .collect(),
+                reactants: o
+                    .reactants
+                    .into_iter()
+                    .map(|inner| PyMol { inner })
+                    .collect(),
+            })
+            .collect()
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "<omgkit.Reaction {} -> {}>",

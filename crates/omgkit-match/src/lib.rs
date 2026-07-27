@@ -27,4 +27,4 @@ pub mod react;
 
 pub use matcher::{substructure_matches, MatchOptions};
 pub use props::MolProps;
-pub use react::{run_reactants, Outcome, ProductSet};
+pub use react::{run_on_substrate, run_reactants, Outcome, ProductSet};

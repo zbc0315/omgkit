@@ -1179,3 +1179,106 @@ fn products_never_invent_atoms() {
         }
     }
 }
+
+// ---------------------------------------------------------------- 一张图上的匹配
+
+/// 把整个反应物侧当作一张图上的查询来跑,产物规范化成 SMILES 的多重集。
+fn on_substrate(rxn_smarts: &str, mols: &[&str]) -> Vec<Vec<String>> {
+    let rxn = smarts::parse_reaction(rxn_smarts)
+        .unwrap_or_else(|e| panic!("{rxn_smarts}:\n{}", e.render()));
+    let inputs: Vec<(MolBuilder, MolProps)> = mols
+        .iter()
+        .map(|s| {
+            let m = sanitized(s);
+            let p = MolProps::compute(&m);
+            (m, p)
+        })
+        .collect();
+    omgkit_match::run_on_substrate(&rxn, &inputs, 0, false)
+        .into_iter()
+        .map(|outcome| {
+            outcome
+                .products
+                .into_iter()
+                .map(|mut p| match sanitize(&mut p) {
+                    Ok(()) => canon::canonical_smiles(&p).smiles,
+                    Err(e) => format!("<净化失败: {e}>"),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// 分子内反应:模板的两个片段落在**同一个分子**上。
+///
+/// 位置式的 `run_reactants` 表达不了这一档 —— 它要求模板片段数等于输入分子数,
+/// 这里是 2 对 1,直接交白卷。RDKit 的 `RunReactants` 与 rdchiral 同样跑不了
+/// (两者都会抛 "Number of reactants provided does not match")。USPTO-50k 上
+/// 这类有 301 条。
+///
+/// 下面是语料 US08058045B2(第 304 行)的正向模板与底物:分子内 Williamson
+/// 成醚,氯与羟基在同一条链上,关成吗啉酮。真值也照抄记录。
+#[test]
+fn two_template_fragments_can_land_on_one_molecule() {
+    let rxn = "Cl-[CH2;D2;+0:1]-[C:2](-[#7:3])=[O;D1;H0:4].[C:5]-[OH;D1;+0:6]\
+               >>[#7:3]-[C:2](=[O;D1;H0:4])-[CH2;D2;+0:1]-[O;H0;D2;+0:6]-[C:5]";
+    let sub = "O=C(CCl)NC[C@H](O)CO";
+
+    // 位置式:2 个模板片段 vs 1 个分子 —— 契约表达不了
+    assert!(
+        products(rxn, &[sub]).is_empty(),
+        "位置式契约本不该给出产物"
+    );
+
+    let sets = on_substrate(rxn, &[sub]);
+    assert!(!sets.is_empty(), "一张图上也没找到 —— 分子内没跑通");
+    let want = canonical("O=C1CO[C@H](CO)CN1");
+    assert!(
+        sets.iter().any(|s| s.len() == 1 && s[0] == want),
+        "没有给出记录里的产物 {want},实际 {sets:?}"
+    );
+}
+
+/// 同一条规则在分子间底物上不能改变结果。
+///
+/// 拼成一张图之后,两个片段落在不同的连通分量上 —— 这与位置式配对是同一件事,
+/// 结果必须一致。差别只在调用方不必再把输入的所有排列试一遍。
+#[test]
+fn one_graph_matching_agrees_with_positional_on_separate_molecules() {
+    let rxn = "Cl-[CH2;D2;+0:1]-[C:2](-[#7:3])=[O;D1;H0:4].[C:5]-[OH;D1;+0:6]\
+               >>[#7:3]-[C:2](=[O;D1;H0:4])-[CH2;D2;+0:1]-[O;H0;D2;+0:6]-[C:5]";
+    let mols = ["O=C(CCl)NC", "CCO"];
+
+    let mut positional: Vec<String> = products(rxn, &mols).into_iter().flatten().collect();
+    positional.sort();
+    positional.dedup();
+    assert!(!positional.is_empty(), "对照组没有产物,判据空过");
+
+    let mut combined: Vec<String> = on_substrate(rxn, &mols).into_iter().flatten().collect();
+    combined.sort();
+    combined.dedup();
+    assert_eq!(combined, positional);
+}
+
+/// 两个模板片段不能抢同一个原子。
+///
+/// 位置式契约靠"分子各不相同"天然保证了这一点;拼成一张图之后必须自己判,
+/// 否则同一个羟基会既当亲核试剂又当离去基团那一侧,凭空多出一堆产物。
+///
+/// 判据:底物只有**一个**可当 `[C:5]-[OH:6]` 的羟基,而它同时也是模板另一个
+/// 片段里 `[C:2]` 能碰到的碳;不判不相交的话产物数会多出来。这里比的是
+/// "每一组产物里的原子数都不超过底物" —— 抢原子必然导致重复建原子。
+#[test]
+fn two_template_fragments_never_share_an_atom() {
+    let rxn = "Cl-[CH2;D2;+0:1]-[C:2](-[#7:3])=[O;D1;H0:4].[C:5]-[OH;D1;+0:6]\
+               >>[#7:3]-[C:2](=[O;D1;H0:4])-[CH2;D2;+0:1]-[O;H0;D2;+0:6]-[C:5]";
+    let sub = "O=C(CCl)NC[C@H](O)CO";
+    let n_in = heavy(sub);
+    for set in on_substrate(rxn, &[sub]) {
+        let n_out: usize = set.iter().map(|s| heavy(s)).sum();
+        assert!(
+            n_out <= n_in,
+            "产物 {set:?} 有 {n_out} 个重原子,底物只有 {n_in} —— 原子被抢重了"
+        );
+    }
+}
