@@ -1153,11 +1153,11 @@ Rust 侧补的判据 `canonical_smiles_is_a_fixed_point` 第一版只 `parse`,�
 
 ## USPTO-50k:五万条反应的正逆双向
 
-`benchmark-uspto-50k/` 是本项目规模最大的一次差分:USPTO-50k 全量 50016 条,
+`benchmark/uspto-50k/` 是本项目规模最大的一次差分:USPTO-50k 全量 50016 条,
 正向与逆向各跑一遍,与 RDKit 的 `RunReactants` 逐条对比命中与耗时。完整结论、
 公平性口径与复现步骤写在那个目录的 README,这里只记**判据本身**的几处教训。
 
-那个目录**不在本仓库内**,与本仓库同级(`../benchmark-uspto-50k/`)—— 它带着
+那个目录**不在本仓库内**,在与本仓库同级的 `../benchmark/uspto-50k/` —— 它带着
 上百 MB 的语料与逐条结果,不适合与库同仓。目录自足:脚本一律以自己所在位置
 定 ROOT,搬到哪都能跑。
 
