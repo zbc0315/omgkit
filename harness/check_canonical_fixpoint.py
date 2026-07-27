@@ -7,14 +7,17 @@
 2. **净化幂等**:净化两次要与净化一次相同。不幂等的话,调用方多调一次就得到
    另一个分子,而且不报错。
 
-# 已知残留
+# 曾经的残留:参照原子的挑法带着输入的痕迹
 
-参照原子的**挑法**还带着输入的痕迹:`perceive_bond_stereo` 取的是存储顺序里第一个
-带方向的邻居,所以方向写在哪一侧,参照就落在哪一侧。双键一端挂着两个取代基时,
-两种挑法都对,写出来的方向符号却落在不同的键上 —— 几何一样,串不一样。
+`perceive_bond_stereo` 挑参照原子取的是"存储顺序里第一个带方向的邻居",所以方向
+写在哪一侧,参照就落在哪一侧。而写出器是**按参照键**放方向符号的,于是双键一端
+挂着两个取代基、其中一个又是另一根双键的端点时,那个端点带了两根有方向的键;
+读回去感知只认下其中一根,第二次写出就少一个符号 —— 几何一样,串不一样。
+实测语料 8831 条里 **2 条**。
 
-实测语料上这样的有 **2 条**,而且都只差一个不携带信息的方向符号(外部实现读三串
-都是同一个分子),第二次起就稳定。`--max-bad` 默认放到 2,多一条就红。
+已修:规范写法下参照原子改按**规范秩**挑(`stereo::normalized_stereo_refs`),
+写出器的输入于是只取决于(图, 几何),两者往返无损,不动点自动成立。2 条 → **0 条**。
+`--max-bad` 因此默认 0。Rust 侧的判据是 `canonical_smiles_is_a_fixed_point`。
 
 用法:python3 harness/check_canonical_fixpoint.py <语料.smi> [--max-bad N] [--limit N]
 """
@@ -25,7 +28,7 @@ import omgkit
 
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument("corpus")
-ap.add_argument("--max-bad", type=int, default=2, help="容忍几条不动点例外")
+ap.add_argument("--max-bad", type=int, default=0, help="容忍几条不动点例外")
 ap.add_argument("--limit", type=int, default=10**9)
 args = ap.parse_args()
 path = args.corpus

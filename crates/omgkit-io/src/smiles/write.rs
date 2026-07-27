@@ -142,6 +142,18 @@ pub fn write_with_priority_styled(
         };
     }
 
+    // 规范写法下,双键的参照原子改按规范秩挑,而不是沿用感知留下的那一个 ——
+    // 感知挑的是"存储顺序里第一个带方向的邻居",那带着输入写法的痕迹,会让
+    // 规范串不成不动点。理由与做法见 `stereo::normalized_stereo_refs`。
+    //
+    // 忠实写法不动:那边要的是原样再现输入,包括方向符号落在哪根键上。
+    let normalized = if style == WriteStyle::Canonical {
+        crate::stereo::normalized_stereo_refs(mol, priority)
+    } else {
+        None
+    };
+    let mol = normalized.as_ref().unwrap_or(mol);
+
     let tree = build_tree(mol, priority);
     emit(mol, &tree, style)
 }

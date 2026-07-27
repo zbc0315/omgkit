@@ -574,6 +574,80 @@ fn bond_between(mol: &MolBuilder, a: u32, b: u32) -> Option<u32> {
     mol.neighbors(a).find(|&(o, _)| o == b).map(|(_, bi)| bi)
 }
 
+/// 把每根双键的**参照原子**改选成规范秩最小的那个邻居,顺反跟着换算。
+///
+/// # 参照挑在哪一侧,方向符号就落在哪根键上
+///
+/// 参照原子记的是"相对谁说顺反"。同一根双键换一个参照、把顺反翻一次,说的是
+/// 同一件事 —— 几何没变。可 [`directions_for_writing`] 是**按参照键**放方向
+/// 符号的,于是换个参照,符号就落到另一根键上,串跟着变。
+///
+/// 而 [`perceive_bond_stereo`] 挑参照用的是"存储顺序里第一个带方向的邻居",
+/// 那是**输入写法留下的痕迹**:同一个分子换种写法读进来,参照就换一个。
+///
+/// # 后果:规范串不是不动点
+///
+/// 双键一端挂着两个取代基、而其中一个恰好又是另一根双键的端点时,写出来的
+/// 符号可能落在两根不同的键上,那个端点于是带了两根有方向的键。读回去时感知
+/// 只认下其中一根做参照,第二次写出就少一个符号 —— 几何一模一样,串不一样。
+/// 实测语料 8831 条里有 2 条。
+///
+/// # 修法:让写出器的输入只取决于(图, 几何)
+///
+/// 按**规范秩**挑参照。规范秩与输入编号无关,于是写出器看到的 `stereo_atoms`
+/// 也与输入编号无关;而图与几何往返无损,`write(parse(write(m))) == write(m)`
+/// 就自动成立 —— 不必再去管感知那一步挑了谁。
+///
+/// 只动 [`BondStereo::Cis`] / [`BondStereo::Trans`]:这两个本就是"相对记录的
+/// 参照原子"说的,换参照翻一次天经地义。`Z`/`E` 按 CIP 优先级定义,与参照
+/// 原子无关,换参照不该动它们。
+///
+/// 没有任何一根双键带有效参照时原样返回,不做拷贝 —— 绝大多数分子走这条路。
+#[must_use]
+pub fn normalized_stereo_refs(mol: &MolBuilder, priority: &[u32]) -> Option<MolBuilder> {
+    let targets: Vec<u32> = (0..mol.num_bonds() as u32)
+        .filter(|&di| {
+            stereo_atoms_are_valid(mol, di)
+                && matches!(
+                    mol.bonds()[di as usize].stereo,
+                    BondStereo::Cis | BondStereo::Trans
+                )
+        })
+        .collect();
+    if targets.is_empty() || priority.len() != mol.num_atoms() {
+        return None;
+    }
+
+    let mut out = mol.clone();
+    for di in targets {
+        let db = mol.bonds()[di as usize];
+        let pick = |end: u32, partner: u32| {
+            mol.neighbors(end)
+                .map(|(other, _)| other)
+                .filter(|&other| other != partner)
+                .min_by_key(|&other| priority[other as usize])
+        };
+        let (Some(x), Some(y)) = (pick(db.begin, db.end), pick(db.end, db.begin)) else {
+            continue;
+        };
+        // 换掉一侧的参照就翻一次;两侧都换等于翻两次,回到原样
+        let swaps = u8::from(x != db.stereo_atoms[0]) + u8::from(y != db.stereo_atoms[1]);
+        let stereo = if swaps % 2 == 1 {
+            match db.stereo {
+                BondStereo::Cis => BondStereo::Trans,
+                _ => BondStereo::Cis,
+            }
+        } else {
+            db.stereo
+        };
+        if let Some(mut b) = out.bond_mut(di) {
+            b.set_stereo(stereo);
+            b.set_stereo_atoms([x, y]);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -841,3 +915,4 @@ mod tests {
         assert_eq!(n, 2, "一根双键只该有两条方向键,实际 {n} 条");
     }
 }
+

@@ -12,6 +12,7 @@ authors.workspace = true
 omgkit-core = { path = "../omgkit-core", version = "0.0.1" }
 
 [dev-dependencies]
+omgkit-chem = { path = "../omgkit-chem" }
 # 仅用于读取差分基准 JSONL;不进入库依赖
 serde_json = "1"
 

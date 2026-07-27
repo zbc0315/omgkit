@@ -118,6 +118,17 @@ fn renumber(mol: &MolBuilder, atom_perm: &[u32], bond_perm: &[usize]) -> MolBuil
     out
 }
 
+/// 解析 + 净化 + 感知顺反 —— 调用方真正走的那条路。
+///
+/// 感知这一步不能省:`stereo_atoms` 是它填的,而"参照原子挑在哪一侧"正是
+/// 规范串不动点的要害。少了它,相关判据全部空过。
+fn perceived(smi: &str) -> MolBuilder {
+    let mut m = smiles::parse(smi).unwrap_or_else(|e| panic!("{smi}: {}", e.render()));
+    omgkit_chem::sanitize(&mut m).unwrap_or_else(|e| panic!("{smi}: {e}"));
+    omgkit_io::stereo::perceive_bond_stereo(&mut m);
+    m
+}
+
 fn canonical_smiles(mol: &MolBuilder) -> String {
     canon::canonical_smiles(mol).smiles
 }
@@ -402,5 +413,40 @@ fn different_molecules_get_different_canonical_forms() {
         if let Some(prev) = seen.insert(c.clone(), smi) {
             panic!("{smi} 与 {prev} 是不同的分子,却都规范成了 {c}");
         }
+    }
+}
+
+/// 规范串必须是**不动点**:读回来再规范化,还是同一串。
+///
+/// 这条与重排恒定不是一回事,重排判据换的是分子对象的编号、不经过"写出再解析"
+/// 那一趟,而那一趟会同时改掉原子次序、键序、氢的表示,以及**方向符号落在哪根
+/// 键上**。最后这一项正是这条判据要守的。
+///
+/// # 为什么会不成立
+///
+/// 顺反记的是"相对某两个参照原子"。同一根双键换一个参照、把顺反翻一次,说的
+/// 是同一件事;可写出器是**按参照键**放方向符号的,换个参照符号就落到另一根
+/// 键上。而感知挑参照用的是"存储顺序里第一个带方向的邻居" —— 输入写法留下的
+/// 痕迹。于是同一个分子换种写法读进来,规范串就差一个不携带信息的方向符号。
+///
+/// 下面两条取自语料(`harness/corpus/large.smi`),是全语料 8831 条里仅有的
+/// 两条:双键一端挂着两个取代基,而其中一个又是另一根双键的端点,那个端点
+/// 于是带了两根有方向的键,读回去时感知只认下其中一根。
+#[test]
+fn canonical_smiles_is_a_fixed_point() {
+    for smi in [
+        "CC1=C/C(=N\\O)/C(=N\\O)/N=C1",
+        "CN1CCC\\2=C1/C(=N\\O)/S/C2=N\\c3ccc(cc3)F",
+        // 对照:普通顺反、共轭链、环上双键 —— 本来就该成立,防止判据只盖到特例
+        "F/C=C/F",
+        "OC(=O)/C=C/c1ccccc1",
+        "F/C=C/C=C/F",
+    ] {
+        // **必须走调用方真正走的那条路**:净化之后再感知顺反。少了感知,
+        // `stereo_atoms` 根本没被填,参照原子的挑法压根不参与,判据当场空过 ——
+        // 实测只 parse 的话撤掉修复也是绿的。
+        let once = canonical_smiles(&perceived(smi));
+        let twice = canonical_smiles(&perceived(&once));
+        assert_eq!(once, twice, "{smi} 的规范串不是不动点");
     }
 }
