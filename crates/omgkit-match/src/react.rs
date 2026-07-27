@@ -611,10 +611,7 @@ fn build_products(
         // 模板放到同一个分子上(分子内反应)时,好几个 ti 会指向同一个下标。
         let ri = home[ti];
         for qb in template.topology.bonds() {
-            let (a, b) = (
-                matches[ti][qb.begin as usize],
-                matches[ti][qb.end as usize],
-            );
+            let (a, b) = (matches[ti][qb.begin as usize], matches[ti][qb.end as usize]);
             if let Some(bi) = reactants[ri].0.bond_between(a, b) {
                 template_bonds[ri][bi as usize] = true;
             }
@@ -666,7 +663,13 @@ fn build_products(
     // 先埋旁观组分的种子,再走遍历 —— 两步共用同一趟 `carry_over`,键的排序
     // 纪律与重定基因此完全一致。
     for (ti, (mol, _)) in reactants.iter().enumerate() {
-        seed_spectators(mol, &comps[ti], &matched[ti], &mut from_reactant[ti], &mut out);
+        seed_spectators(
+            mol,
+            &comps[ti],
+            &matched[ti],
+            &mut from_reactant[ti],
+            &mut out,
+        );
         carry_over(
             mol,
             &matched[ti],
@@ -1265,7 +1268,9 @@ fn seed_spectators(
 ) {
     // 单分量的分子不可能有旁观组分 —— 模板既然匹配上了,那唯一的分量就有匹配原子。
     // 绝大多数底物是这一档,先短路掉。
-    let Some(&n_comp) = comp.iter().max() else { return };
+    let Some(&n_comp) = comp.iter().max() else {
+        return;
+    };
     if n_comp == 0 {
         return;
     }

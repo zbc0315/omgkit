@@ -199,8 +199,7 @@ fn distinct(rxn: &str, mols: &[&str]) -> Vec<String> {
 /// 语料 US05026856(USPTO-50k 第 49427 行)的 N-脱苄模板。
 ///
 /// `-C-c1:c:c:c:c:c:1` 那一支整支没有映射号,是要删掉的。
-const DEBENZYL: &str =
-    "[C:1]-[N;H0;D3;+0:2](-C-c1:c:c:c:c:c:1)-[C:3]>>[C:1]-[NH;D2;+0:2]-[C:3]";
+const DEBENZYL: &str = "[C:1]-[N;H0;D3;+0:2](-C-c1:c:c:c:c:c:1)-[C:3]>>[C:1]-[NH;D2;+0:2]-[C:3]";
 /// 同一条记录的底物:N-苄基异吲哚啉,苯环上带一个甲氧基。
 const DEBENZYL_SUB: &str = "COc1ccc2c(c1)CN(Cc1ccccc1)C2";
 
@@ -300,10 +299,7 @@ fn both_counter_ions_of_a_salt_come_back() {
         "质量不守恒 —— 模板只新建一个氧,产物却是 {got:?}"
     );
     for ion in ["[Na+]", "[K+]"] {
-        assert!(
-            got.contains(&canonical(ion)),
-            "{ion} 没回来:{got:?}"
-        );
+        assert!(got.contains(&canonical(ion)), "{ion} 没回来:{got:?}");
     }
 }
 
@@ -1268,10 +1264,7 @@ fn two_template_fragments_can_land_on_one_molecule() {
     let sub = "O=C(CCl)NC[C@H](O)CO";
 
     // 位置式:2 个模板片段 vs 1 个分子 —— 契约表达不了
-    assert!(
-        products(rxn, &[sub]).is_empty(),
-        "位置式契约本不该给出产物"
-    );
+    assert!(products(rxn, &[sub]).is_empty(), "位置式契约本不该给出产物");
 
     let sets = on_substrate(rxn, &[sub]);
     assert!(!sets.is_empty(), "一张图上也没找到 —— 分子内没跑通");
