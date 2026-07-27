@@ -457,24 +457,33 @@ rdchiral 抽出,方向写在环内的 S—c 键上,而记录写在 n—c 键上 
 
 ## 10. 证据索引
 
+**两个基准点**,因为证据分在两棵树里:
+
+- **⊞** = `../benchmark-uspto-50k/`(与 omgkit 仓库**同级,不在仓库内** ——
+  它带着上百 MB 语料与逐条结果)
+- **⊡** = omgkit 仓库根
+
 | 说法 | 出处 |
 |---|---|
-| 命中率、效率、归因 | `benchmark-uspto-50k/results/summary.json` |
-| 逐 outcome 质量审计 | `results/mass_audit.json` / `.jsonl`;`scripts/audit_mass.py` |
-| 294 条分层 | `results/rdkit_failures.jsonl`;`scripts/classify_rdkit_failures.py` |
-| 环大小扫描 + 组分括号 | `results/intra_salt.json`;`scripts/measure_intra_salt.py` |
-| 盐的订正 | `results/salt_claim.json`;`scripts/audit_salt_claim.py` |
-| 分子内 301 条 | `results/intramolecular.json`;`scripts/scan_intramolecular.py` |
-| 键归属 70 条 | `results/bond_ownership.json`、`compare_runs.json`;`scripts/scan_bond_ownership.py`、`compare_runs.py` |
-| 方向键键级 2 条 | `results/compare_dirbond.json`;Rust 判据 `a_direction_written_on_an_aromatic_bond_still_matches` |
-| 归因对账 | `summary.json` 的 `miss_attribution_gap`(现为 0);`scripts/summarize.py` |
-| 不动点 | `harness/check_canonical_fixpoint.py`;Rust 判据 `canonical_smiles_is_a_fixed_point` |
-| 24 种写法 | Rust 判据(SMARTS 手性探针集) |
-| 论证长文 | `benchmark-uspto-50k/docs/why-one-graph.md` |
-| 案例 | `benchmark-uspto-50k/docs/cases.md` |
+| 命中率、效率、归因 | ⊞ `results/summary.json` |
+| 逐 outcome 质量审计 | ⊞ `results/mass_audit.json` / `.jsonl`;`scripts/audit_mass.py` |
+| 294 条分层 | ⊞ `results/rdkit_failures.jsonl`;`scripts/classify_rdkit_failures.py` |
+| 环大小扫描 + 组分括号 | ⊞ `results/intra_salt.json`;`scripts/measure_intra_salt.py` |
+| 盐的订正 | ⊞ `results/salt_claim.json`;`scripts/audit_salt_claim.py` |
+| 分子内 301 条 | ⊞ `results/intramolecular.json`;`scripts/scan_intramolecular.py` |
+| 键归属 70 条 | ⊞ `results/bond_ownership.json`、`compare_runs.json`;`scripts/scan_bond_ownership.py`、`compare_runs.py` |
+| 方向键键级 2 条 | ⊞ `results/compare_dirbond.json`;⊡ 判据 `a_direction_written_on_an_aromatic_bond_still_matches` |
+| 归因对账 | ⊞ `results/summary.json` 的 `miss_attribution_gap`(现为 0);`scripts/summarize.py` |
+| 不动点 | ⊡ `harness/check_canonical_fixpoint.py`;判据 `canonical_smiles_is_a_fixed_point` |
+| 24 种写法 | ⊡ 判据(SMARTS 手性探针集) |
+| 论证长文 | ⊞ `docs/why-one-graph.md` |
+| 案例 | ⊞ `docs/cases.md` |
 
-**每条实现层面的说法都有一条"撤掉修就变红"的判据在仓库里**,这一点建议写进
-Data & Software Availability。
+§6 各小节标题里的裸路径同样以 **⊞** 为基准。
+
+**每条实现层面的说法都有一条"撤掉修就变红"的判据在 omgkit 仓库里**,这一点
+建议写进 Data & Software Availability。⊞ 那一侧目前**不在任何仓库中**,投稿前
+需要决定怎么存档(单独建仓,或随附件提交)。
 
 ---
 

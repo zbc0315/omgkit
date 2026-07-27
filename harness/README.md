@@ -1157,6 +1157,10 @@ Rust 侧补的判据 `canonical_smiles_is_a_fixed_point` 第一版只 `parse`,�
 正向与逆向各跑一遍,与 RDKit 的 `RunReactants` 逐条对比命中与耗时。完整结论、
 公平性口径与复现步骤写在那个目录的 README,这里只记**判据本身**的几处教训。
 
+那个目录**不在本仓库内**,与本仓库同级(`../benchmark-uspto-50k/`)—— 它带着
+上百 MB 的语料与逐条结果,不适合与库同仓。目录自足:脚本一律以自己所在位置
+定 ROOT,搬到哪都能跑。
+
 ### 一、裁判要选对手的规范式,不能选自己的
 
 命中与否一律用 **RDKit 的规范 SMILES** 判:omgkit 的产物先写成 SMILES,
