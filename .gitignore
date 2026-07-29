@@ -26,3 +26,7 @@ __pycache__/
 *.py[cod]
 .venv/
 .DS_Store
+docs/dev/design-full.md
+docs/dev/correctness-full.md
+site/
+.venv-docs/

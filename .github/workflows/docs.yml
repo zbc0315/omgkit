@@ -1,0 +1,89 @@
+# 文档站:构建并部署到 GitHub Pages。
+#
+# **必须先编 wheel 再建站。** `api/python.md` 由 mkdocstrings 从 docstring 生成,
+# 而 omgkit 是 PyO3 编译扩展 —— 静态解析拿不到里面的类,griffe 得真的 import
+# 进来内省。没装上 wheel 的话构建会直接报 `Could not collect 'omgkit.Mol'`。
+#
+# 构建用 `--strict`:死链、导航里指不到的页面、i18n 漏掉的文件都会让它红。
+# 不开 strict 的话这些只是 warning,站点照样发出去,只是有一批页面静默地空着。
+
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "harness/README.md"
+      - "crates/omgkit-py/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "harness/README.md"
+      - "crates/omgkit-py/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同时只跑一个部署;新的推送把排队中的顶掉,但不打断正在跑的那个
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 装工具链
+        run: |
+          rustup show active-toolchain || rustup toolchain install stable
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      # mkdocstrings 要 import omgkit 才能生成 Python API 那一页
+      - name: 编并装 omgkit
+        run: |
+          pip install maturin
+          maturin build --release -m crates/omgkit-py/Cargo.toml --out dist
+          pip install dist/omgkit-*.whl
+          python -c "import omgkit; print('omgkit', omgkit.__version__)"
+
+      - name: 装文档依赖
+        run: pip install -r docs/requirements.txt
+
+      # docs/design.md 与 harness/README.md 留在原处,构建前复制进站点
+      - name: 同步仓库内的长文档
+        run: python docs/sync_sources.py
+
+      - name: 建站(strict)
+        run: mkdocs build --strict
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    # PR 只构建不部署 —— 否则任何人开个 PR 就能改线上站点
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

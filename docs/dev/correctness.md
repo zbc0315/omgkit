@@ -1,0 +1,130 @@
+# Correctness
+
+Chemical semantics is full of undocumented edge cases. **You cannot get them
+right by reading the specification.** So every layer here is compared, record by
+record, against an external reference implementation, over a large corpus.
+
+!!! note "Full text"
+
+    This page is an overview. The complete testing record — every judge, what it
+    guards, and the traps found while building it — is
+    [`harness/README.md`](correctness-full.md), in Chinese. It is the longest
+    document in the repository for a reason.
+
+## A judge must prove it does not pass vacuously
+
+This is the rule everything else follows from.
+
+Zero divergences is only good news **if the comparison actually ran**. "Zero
+divergences over zero comparisons" is the most convincing-looking green there
+is, and a corpus change or a convention change can produce it silently.
+
+So the judges here carry two things:
+
+**A `--self-test` mode** that injects known defects and confirms they are
+caught. Flip a stereo tag, drop an atom, add a hydrogen — if the judge still
+says *identical*, that tier of the comparison is theatre.
+
+**A `--min-checked` floor.** If the number of records actually compared falls
+below it, the run fails, even with zero divergences.
+
+### And confirm the injected defect was injected
+
+A self-test that reports *the judge missed it* is, more often than not, a
+self-test whose injection did nothing.
+
+A worked example from this repository: a byproduct judge was checked by adding
+one hydrogen to the byproduct. The balance rate only fell from 100% to 95.9%,
+which looked like a judge passing vacuously. It was not. The most common
+byproducts are HCl and H₂O; adding a hydrogen gives ClH₂ and OH₃, sanitization
+fails, and the injection function returned the input unchanged. The injection
+was a no-op on the bulk of the corpus. The fix was to count only the records
+where the injection actually changed something, and to add a second injection
+that works on every molecule.
+
+## Coverage is a table, not a feeling
+
+The hardest defects are not "a judge got it wrong" — they are the ones **in the
+gaps between judges**. One judge tests writing before sanitization, another
+tests the object after sanitization, and nothing walks the path *writing after
+sanitization*.
+
+So the coverage table matters more than any single judge:
+
+| Path | Guarded by |
+|---|---|
+| Parsing (L1) | `differential_l1*` |
+| Each sanitization stage / whole pipeline (L2) | `differential_l2_*` (compares molecule **object fields**) |
+| Writing, unsanitized | `roundtrip_smiles` + `check_ez.py` |
+| Writing, **after sanitization** | `check_write_fidelity.py` |
+| **Canonical** SMILES fidelity | `check_write_fidelity.py` + `dump_canonical` |
+| Uniqueness of the canonical ordering | `canonical_invariance` (needs no external reference) |
+| Double-bond geometry perception | `check_bond_stereo.py` |
+| SMARTS parsing (L4) | `oracle_smarts.py` |
+| SMARTS **writing** (L3) | `roundtrip_smarts` (idempotence) + `check_smarts_write.py` (semantics) |
+| Substructure matching (L5) | `oracle_matches.py` |
+| Product generation (L7) | `check_reactions.py` |
+| Closing discarded atoms (L7) | `tests/byproduct.rs` — the criterion is mass conservation, independent of the record |
+| Closing, **real corpus + external judge** | `check_byproducts.py` (with `--self-test`) |
+| Product generation, **real corpus, both directions** | `bench_reactions.py` |
+| Python bindings (L8) | `test_python.py` |
+| SMARTS **chirality** reference frame | `check_smarts_chirality.py` (with a discriminating-power check) |
+| Product-side **chirality**, four instruction kinds | `check_product_chirality.py` (with a discriminating-power check) |
+
+**When adding a path, ask this table first.** Which cell does it fall in? No
+cell means a new gap.
+
+## A deliberate divergence
+
+`check_reactions.py` reports **717 identical / 24 different**. Those 24 are not
+defects — they are a chosen semantics, and they all have the same shape:
+a template like `[C:1][O:2][C:3]>>[C:1][O:2].[C:3]` applied to a **cyclic**
+ether or lactone.
+
+```text
+substrate  [C@]12(C(OCC1C(=C)CC[C@@H]2O)=O)C          a bicyclic lactone
+external   C=C1CC[C@H](O)[C@](C)(C(=O)O)C1 . C=C1CC[C@H](O)[C](C)C1C
+           ↑ two molecules — the carbocycle is duplicated into both,
+             so atoms appear from nowhere
+omgkit     C=C1CC[C@H](O)[C@](C)(C(=O)O)C1C
+           ↑ one molecule, ring-opened, not one atom more or fewer
+```
+
+A product template describes a **fragment** of the reaction centre, not "one
+fragment, one molecule". Whether the fragments are actually separate depends on
+whether the atoms *outside* the template still connect them.
+
+The criterion that settles it is **mass conservation**: a product must not
+contain more heavy atoms than the substrate. Copying shared atoms into each
+product leaves topology, valence and stereochemistry all self-consistent — only
+the atom count is wrong, and no other judge was looking at that number. So a
+dedicated test was added for it (`products_never_invent_atoms`).
+
+**If that count of 24 changes, investigate.** Going up means a new shape has
+appeared; going down means the behaviour was reverted by accident.
+
+## Chasing a hit rate assumes the ground truth is right
+
+Real-corpus "ground truth" is what someone recorded, which is not the same as
+chemical fact. The most common gap when applying templates in reverse is an
+**underdetermined record**: the recorded reactant has no configuration marked
+while the substrate determines it completely.
+
+In that case, giving the product a configuration is **correct**. Demanding an
+exact match against the underdetermined record forces the implementation to
+throw information away. Cases like that are recorded as corpus gaps, not
+counted as misses.
+
+## Performance has gates too
+
+Where complexity matters there is a test guarding the exponent. Those guards:
+
+- measure **interleaved**, so drift in machine state hits all sizes equally
+- run at sizes large enough for the term of interest to dominate
+- have thresholds **calibrated by injecting a real defect** and confirming the
+  guard goes red
+
+That last one has its own trap. Calibrating one guard, the injected quadratic
+term produced no slowdown at all — because the shape injected was
+loop-invariant and the compiler hoisted it out of the inner loop. A threshold
+calibrated against an injection that never ran is worth nothing.
