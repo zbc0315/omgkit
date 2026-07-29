@@ -4,7 +4,7 @@
 //!
 //! 每个函数都应当是"把参数翻过去、把结果翻回来"。一旦在这里写了判断分子的
 //! 逻辑,它就只有 Python 用户能碰到,Rust 侧的全套差分测试一概盖不到 ——
-//! 那是本项目最不想要的那种代码。
+//! 那会成为整个项目里唯一没有验证覆盖的一块。
 //!
 //! # 错误一律翻成异常
 //!
@@ -200,17 +200,122 @@ pub struct PyOutcome {
     /// 带原子映射号的反应物副本。只在 `run(..., atom_mapping=True)` 时非空。
     #[pyo3(get)]
     reactants: Vec<PyMol>,
+    /// 收口出来的副产物。只在 `run(..., byproducts=True)` 且账闭合时非空。
+    #[pyo3(get)]
+    byproducts: Vec<PyMol>,
+    /// 收口的结论:`"nothing"` / `"capped"` / `"bonded(n)"` /
+    /// `"unresolved(原因)"`;没开 `byproducts` 时为 `"off"`。
+    ///
+    /// **`"unresolved(...)"` 时 `byproducts` 必然为空** —— 收不了口就不给分子,
+    /// 编一个出来比不给更糟:它拓扑合法、能净化、看不出破绽,只是错的。
+    #[pyo3(get)]
+    byproduct_verdict: String,
+    /// 收口的原子账,键为 `open_valence` / `fragment_hydrogens` / `delta_h` /
+    /// `need` / `remaining` / `delta_charge` / `fragment_charge` /
+    /// `charge_shift`。用来自己复核结论。
+    #[pyo3(get)]
+    byproduct_budget: std::collections::BTreeMap<String, i64>,
+    /// `discarded[i]` = 第 i 个输入分子里没有进入任何产物的原子下标。
+    ///
+    /// 这是**事实**,与收不收得了口无关 —— 收口失败时它照样有值,而那正是最
+    /// 需要它的时候。
+    #[pyo3(get)]
+    discarded: Vec<Vec<u32>>,
 }
 
 #[pymethods]
 impl PyOutcome {
     fn __repr__(&self) -> String {
         format!(
-            "<omgkit.Outcome {} products, {} mapped reactants>",
+            "<omgkit.Outcome {} products, {} mapped reactants, byproducts {}>",
             self.products.len(),
-            self.reactants.len()
+            self.reactants.len(),
+            self.byproduct_verdict
         )
     }
+}
+
+/// `Vec<Outcome>` → `Vec<PyOutcome>`。`run` 与 `run_on_substrate` 共用,免得
+/// 两处翻译各写一遍、然后慢慢长歪。
+fn translate_outcomes(
+    outcomes: Vec<omgkit_match::Outcome>,
+    inputs: &[MolBuilder],
+    byproducts: bool,
+) -> Vec<PyOutcome> {
+    outcomes
+        .into_iter()
+        .map(|o| {
+            let (by_mols, verdict, budget) = if byproducts {
+                let by = omgkit_match::byproduct::reconstruct(inputs, &o);
+                translate_byproducts(&by)
+            } else {
+                (Vec::new(), "off".to_string(), Default::default())
+            };
+            PyOutcome {
+                products: o
+                    .products
+                    .into_iter()
+                    .map(|inner| PyMol { inner })
+                    .collect(),
+                reactants: o
+                    .reactants
+                    .into_iter()
+                    .map(|inner| PyMol { inner })
+                    .collect(),
+                byproducts: by_mols,
+                byproduct_verdict: verdict,
+                byproduct_budget: budget,
+                discarded: o.discarded,
+            }
+        })
+        .collect()
+}
+
+/// 把一次收口的结论翻成 Python 侧的两样东西:一句话与一张账。
+fn translate_byproducts(
+    by: &omgkit_match::byproduct::Byproducts,
+) -> (Vec<PyMol>, String, std::collections::BTreeMap<String, i64>) {
+    use omgkit_match::byproduct::{Unresolved, Verdict};
+    let verdict = match by.verdict {
+        Verdict::Nothing => "nothing".to_string(),
+        Verdict::Capped => "capped".to_string(),
+        Verdict::Bonded { bonds } => format!("bonded({bonds})"),
+        Verdict::Unresolved(why) => {
+            let name = match why {
+                Unresolved::OddValence => "odd_valence",
+                Unresolved::BudgetExceedsValence => "budget_exceeds_valence",
+                Unresolved::HydrogenBudgetNegative => "hydrogen_budget_negative",
+                Unresolved::TooManyBonds => "too_many_bonds",
+                Unresolved::ProductsUnsanitizable => "products_unsanitizable",
+                Unresolved::NoPairing => "no_pairing",
+                Unresolved::FragmentUnsanitizable => "fragment_unsanitizable",
+                Unresolved::SubstrateUnkekulizable => "substrate_unkekulizable",
+                Unresolved::StrainedClosure => "strained_closure",
+                Unresolved::BudgetMismatch => "budget_mismatch",
+            };
+            format!("unresolved({name})")
+        }
+    };
+    let b = by.budget;
+    let budget = [
+        ("open_valence", i64::from(b.open_valence)),
+        ("fragment_hydrogens", i64::from(b.fragment_hydrogens)),
+        ("delta_h", i64::from(b.delta_h)),
+        ("need", i64::from(b.need)),
+        ("remaining", i64::from(b.remaining)),
+        ("delta_charge", i64::from(b.delta_charge)),
+        ("fragment_charge", i64::from(b.fragment_charge)),
+        ("charge_shift", i64::from(b.charge_shift)),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    let mols = by
+        .molecules
+        .iter()
+        .map(|m| PyMol { inner: m.clone() })
+        .collect();
+    (mols, verdict, budget)
 }
 
 /// 一条反应模板。
@@ -221,7 +326,7 @@ pub struct PyReaction {
 
 #[pymethods]
 impl PyReaction {
-    /// 反应物模板的个数。调 [`run`](Self::run) 时要给同样多的分子。
+    /// 反应物模板的个数。调 `run` 时要给同样多的分子。
     #[getter]
     fn num_reactant_templates(&self) -> usize {
         self.inner.reactants.len()
@@ -239,13 +344,18 @@ impl PyReaction {
     ///
     /// `atom_mapping` 为真时,每个结果的 `reactants` 填上带映射号的反应物副本,
     /// 产物侧对应原子打同一个号 —— 两侧合起来就是一条完整的原子映射反应。
-    #[pyo3(signature = (reactants, *, max_products = 0, atom_mapping = false))]
+    /// `byproducts` 为真时,把模板丢弃的原子收口成分子填进
+    /// `Outcome.byproducts`。默认关闭:收口要在副本上
+    /// 净化产物才算得出氢预算,不是零开销。
+    #[pyo3(signature = (reactants, *, max_products = 0, atom_mapping = false, byproducts = false))]
     fn run(
         &self,
         reactants: Vec<PyMol>,
         max_products: usize,
         atom_mapping: bool,
+        byproducts: bool,
     ) -> Vec<PyOutcome> {
+        let originals: Vec<MolBuilder> = reactants.iter().map(|m| m.inner.clone()).collect();
         let inputs: Vec<(MolBuilder, omgkit_match::MolProps)> = reactants
             .into_iter()
             .map(|m| {
@@ -253,26 +363,13 @@ impl PyReaction {
                 (m.inner, props)
             })
             .collect();
-        omgkit_match::run_reactants(&self.inner, &inputs, max_products, atom_mapping)
-            .into_iter()
-            .map(|o| PyOutcome {
-                products: o
-                    .products
-                    .into_iter()
-                    .map(|inner| PyMol { inner })
-                    .collect(),
-                reactants: o
-                    .reactants
-                    .into_iter()
-                    .map(|inner| PyMol { inner })
-                    .collect(),
-            })
-            .collect()
+        let outs = omgkit_match::run_reactants(&self.inner, &inputs, max_products, atom_mapping);
+        translate_outcomes(outs, &originals, byproducts)
     }
 
     /// 把整个反应物侧当作**一张图**上的查询来跑,而不是按位置配对。
     ///
-    /// [`run`](Self::run) 要求"第 i 个分子配第 i 个模板片段",于是模板片段数
+    /// `run` 要求"第 i 个分子配第 i 个模板片段",于是模板片段数
     /// 比分子数多时直接返回空 —— 而那正是**分子内反应**的形状:两个片段落在
     /// 同一个分子上。本方法把输入拼成一张图,让每个片段在整张图上自由找位置,
     /// 只要求各片段匹配到的原子两两不重叠。
@@ -282,13 +379,15 @@ impl PyReaction {
     /// - 盐:阳离子与阴离子是同一个分子的两个组分,模板可以同时碰到
     ///
     /// 代价是搜索空间变大,耗时不如 `run` 可预测;要稳定耗时就用 `run`。
-    #[pyo3(signature = (substrate, *, max_products = 0, atom_mapping = false))]
+    #[pyo3(signature = (substrate, *, max_products = 0, atom_mapping = false, byproducts = false))]
     fn run_on_substrate(
         &self,
         substrate: Vec<PyMol>,
         max_products: usize,
         atom_mapping: bool,
+        byproducts: bool,
     ) -> Vec<PyOutcome> {
+        let originals: Vec<MolBuilder> = substrate.iter().map(|m| m.inner.clone()).collect();
         let inputs: Vec<(MolBuilder, omgkit_match::MolProps)> = substrate
             .into_iter()
             .map(|m| {
@@ -296,21 +395,8 @@ impl PyReaction {
                 (m.inner, props)
             })
             .collect();
-        omgkit_match::run_on_substrate(&self.inner, &inputs, max_products, atom_mapping)
-            .into_iter()
-            .map(|o| PyOutcome {
-                products: o
-                    .products
-                    .into_iter()
-                    .map(|inner| PyMol { inner })
-                    .collect(),
-                reactants: o
-                    .reactants
-                    .into_iter()
-                    .map(|inner| PyMol { inner })
-                    .collect(),
-            })
-            .collect()
+        let outs = omgkit_match::run_on_substrate(&self.inner, &inputs, max_products, atom_mapping);
+        translate_outcomes(outs, &originals, byproducts)
     }
 
     fn __repr__(&self) -> String {

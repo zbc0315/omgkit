@@ -21,10 +21,12 @@
 //! 可比较的标签。而且化学特化(按元素稀有度排序、按度剪枝、环成员位图预筛)
 //! 恰恰是这里最大的性能来源 —— 通用库拿不到这些信息。
 
+pub mod byproduct;
 pub mod matcher;
 pub mod props;
 pub mod react;
 
+pub use byproduct::{reconstruct as reconstruct_byproducts, Byproducts};
 pub use matcher::{substructure_matches, MatchOptions};
 pub use props::MolProps;
 pub use react::{run_on_substrate, run_reactants, Outcome, ProductSet};

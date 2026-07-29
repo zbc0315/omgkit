@@ -195,3 +195,90 @@ fn rare_atoms_are_anchored_first() {
     );
     println!("稀有起点:{el:?}");
 }
+
+// ---------------------------------------------------------------------------
+// 副产物收口的增长曲线
+// ---------------------------------------------------------------------------
+
+/// 收口必须**线性于片段规模**。
+///
+/// # 为什么这里特别容易出事
+///
+/// 收口的一批操作天然是"按位点"的:摘哪个原子的氢、哪两处空价配对、电荷落在
+/// 哪个原子。而位点表是**每个片段原子一条**,不是每处空价一条 —— 于是"遍历
+/// 位点"这件事的代价正比于整个片段,而不是正比于真正欠着价的那几个原子。
+/// 在按键或按位点的循环里再做一次这样的遍历,就是本仓库反复警告的那个形状。
+///
+/// 差分测试抓不到这类问题:结果全对,只是慢,而且真实的离去片段都很小,
+/// 在语料上完全看不出来。
+///
+/// # 阈值拿真实缺陷标定过
+///
+/// 判据是**每原子耗时不随规模上升**,与本文件其余部分同一套。实测(release,
+/// 交错测量、取最小值):
+///
+/// | | n=800 | 1600 | 3200 | 6400 | 涨幅 |
+/// |---|---|---|---|---|---|
+/// | 现在 | 230 | 219 | 208 | 204 ns/原子 | **1.13×** |
+/// | 塞回一个提不出去的平方项 | 238 | 337 | 530 | 931 | **3.92×** |
+///
+/// 阈值卡在两者之间。**标定时踩过一个坑值得记下**:第一次把平方项塞回去时曲线
+/// 一点没动 —— 因为塞的那个形状(`if sites[i].opens == 0 { continue }`)是循环
+/// 不变量,被编译器提到内层循环外了。用"塞回去看它红不红"标定阈值时,得确认
+/// 塞的东西**真的**在跑,否则标出来的阈值毫无意义。
+#[test]
+fn closing_byproducts_is_linear_in_fragment_size() {
+    use omgkit_match::{byproduct, run_reactants};
+
+    const MAX_GROWTH: f64 = 1.6;
+    let sizes = [800usize, 1600, 3200, 6400];
+
+    // 长链酯:模板删掉 OCH2C,整条链失去落脚点成为一个很大的片段,
+    // 而且要摘一个氢、成一根键 —— 摘氢与配对两条路都走得到。
+    let prep = |n: usize| {
+        let rxn = smarts::parse_reaction("[C:1](=[O:2])[O:3][CH2]C>>[C:1](=[O:2])[OH:3]")
+            .expect("模板应能解析");
+        let mut m = smiles::parse(&format!("CC(=O)O{}", "C".repeat(n))).expect("底物应能解析");
+        sanitize(&mut m).expect("应能净化");
+        let props = MolProps::compute(&m);
+        let outs = run_reactants(&rxn, &[(m.clone(), props)], 1, false);
+        assert!(!outs.is_empty(), "n={n} 应当出产物");
+        (m, outs)
+    };
+    let cases: Vec<_> = sizes.iter().map(|&n| prep(n)).collect();
+
+    // 预热:线程会先落在能效核上再迁到性能核,频率也要爬
+    for _ in 0..2 {
+        for (m, o) in &cases {
+            let _ = byproduct::reconstruct(std::slice::from_ref(m), &o[0]);
+        }
+    }
+    // 交错测量:外层轮次、内层规模,让各档经历同样的 CPU 状态轨迹
+    let mut best = vec![Duration::MAX; sizes.len()];
+    for _ in 0..ROUNDS {
+        for (i, (m, o)) in cases.iter().enumerate() {
+            let t = Instant::now();
+            let by = byproduct::reconstruct(std::slice::from_ref(m), &o[0]);
+            best[i] = best[i].min(t.elapsed());
+            assert!(by.verdict.is_closed(), "n={} 应当收得了口", sizes[i]);
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    let per: Vec<f64> = sizes
+        .iter()
+        .zip(&best)
+        .map(|(&n, d)| d.as_nanos() as f64 / n as f64)
+        .collect();
+    for (n, p) in sizes.iter().zip(&per) {
+        println!("{n:>6} 原子  每原子 {p:.0} ns");
+    }
+    let hi = per.iter().copied().fold(f64::MIN, f64::max);
+    let lo = per.iter().copied().fold(f64::MAX, f64::min);
+    assert!(
+        hi / lo < MAX_GROWTH,
+        "每原子耗时涨了 {:.2} 倍({per:?})—— 收口里有一处正比于整个片段的操作\n\
+         被放进了按位点或按键的循环。实测参照:线性时 1.13×,塞回一个平方项时 3.92×",
+        hi / lo
+    );
+}

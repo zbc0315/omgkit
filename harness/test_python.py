@@ -227,5 +227,103 @@ class SanitizePerceivesBondStereo(unittest.TestCase):
         )
 
 
+class ByproductsAreOptOutAndLabelled(unittest.TestCase):
+    """副产物收口在绑定层的三处约定。
+
+    绑定层只做翻译,所以这里守的不是化学(那由 Rust 侧的
+    `crates/omgkit-match/tests/byproduct.rs` 守),而是**翻译本身有没有丢东西**:
+    开关默认状态、结论怎么翻成字符串、以及"未决时不给分子"这条约定有没有
+    在翻译途中被抹掉。
+    """
+
+    ESTER = "[C:1](=[O:2])[OH:3].[OH:4][C:5]>>[C:1](=[O:2])[O:4][C:5]"
+
+    def _run(self, smarts, smis, **kw):
+        rxn = omgkit.parse_reaction(smarts)
+        mols = []
+        for s in smis:
+            m = omgkit.parse_smiles(s)
+            m.sanitize()
+            mols.append(m)
+        return rxn.run(mols, **kw)
+
+    def test_default_is_off_and_says_so(self):
+        """默认不算 —— 收口要在副本上净化产物,不是零开销。
+
+        而且"没算"要与"算了但没有副产物"分得开:两者都给空列表,只有结论
+        字符串区分得了。混成一个的话,一个坏掉的实现看起来会像"这批反应
+        本来就没有副产物"。
+        """
+        (out,) = self._run(self.ESTER, ["CC(=O)O", "CCO"])
+        self.assertEqual(out.byproduct_verdict, "off")
+        self.assertEqual(out.byproducts, [])
+        self.assertEqual(out.byproduct_budget, {})
+
+    def test_water_comes_back_with_a_budget(self):
+        (out,) = self._run(self.ESTER, ["CC(=O)O", "CCO"], byproducts=True)
+        self.assertEqual(out.byproduct_verdict, "capped")
+        self.assertEqual([b.to_canonical_smiles() for b in out.byproducts], ["O"])
+        # 账要原样翻过来,不能只翻一个结论
+        self.assertEqual(out.byproduct_budget["delta_h"], 2)
+        self.assertEqual(out.byproduct_budget["remaining"], 0)
+
+    def test_unresolved_never_ships_a_molecule(self):
+        """收不了口就不给分子。
+
+        编一个出来比不给更糟:它拓扑合法、能净化、看不出破绽,只是错的。
+        这条约定在 Rust 侧成立,翻译途中也不能被绕过。
+        """
+        outs = self._run(
+            "[N+:1](=[O:2])[O-:3]>>[NH2:1]",
+            ["Cc1ccc(cc1)[N+](=O)[O-]"],
+            byproducts=True,
+        )
+        self.assertTrue(outs)
+        for o in outs:
+            if o.byproduct_verdict.startswith("unresolved"):
+                self.assertEqual(o.byproducts, [], o.byproduct_verdict)
+        self.assertTrue(
+            any(o.byproduct_verdict.startswith("unresolved") for o in outs),
+            "这条反应应当有收不了口的 outcome,否则这一档判据是空过的",
+        )
+
+    def test_both_entry_points_agree(self):
+        """`run` 与 `run_on_substrate` 对分子间底物必须给出同一个副产物。
+
+        后者把输入**拼成一张图**跑,`discarded` 的下标基准因此不同。切不回去的
+        后果不是报错,是**静默算错** —— 收口时拿拼接图的下标去索引原始分子,
+        越界的被悄悄跳过。这一整个测试类原先一次都没碰过 `run_on_substrate`,
+        缺口就是这么留下的。
+        """
+        smarts, smis = "[OH:3][C:4].[C:1][Cl]>>[C:1][O:3][C:4]", ["OCC", "CCCl"]
+        a = self._run(smarts, smis, byproducts=True)[0]
+        b = self._run_graph(smarts, smis, byproducts=True)[0]
+        self.assertEqual(a.byproduct_verdict, b.byproduct_verdict)
+        self.assertEqual(
+            [m.to_canonical_smiles() for m in a.byproducts],
+            [m.to_canonical_smiles() for m in b.byproducts],
+        )
+        self.assertEqual([m.to_canonical_smiles() for m in b.byproducts], ["Cl"])
+        # 契约:两个入口都按**输入分子**给下标
+        self.assertEqual(len(b.discarded), 2)
+
+    def _run_graph(self, smarts, smis, **kw):
+        rxn = omgkit.parse_reaction(smarts)
+        mols = []
+        for s in smis:
+            m = omgkit.parse_smiles(s)
+            m.sanitize()
+            mols.append(m)
+        return rxn.run_on_substrate(mols, **kw)
+
+    def test_discarded_is_reported_even_with_the_switch_off(self):
+        """`discarded` 是事实,不受开关影响 —— 它不是推断的产物。"""
+        (out,) = self._run("[C:1](=[O:2])[OH:3].[N:4]>>[C:1](=[O:2])[N:4]",
+                           ["CC(=O)O", "NC"])
+        self.assertEqual(len(out.discarded), 2)
+        self.assertEqual(len(out.discarded[0]), 1, "羧基那个羟基氧被丢掉了")
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

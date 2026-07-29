@@ -124,6 +124,47 @@ fn is_aromatic_atom(mol: &MolBuilder, idx: u32) -> bool {
 }
 
 /// 有效原子序数:`clamp(Z - 形式电荷, 0, 最大原子序数)`。
+/// 形式电荷从 `from` 变到 `to` 时,这个元素**能用的价**变了多少。
+///
+/// # 为什么不能写成"负电荷减一、正电荷加一"
+///
+/// 价由**有效原子序数**定(带电原子按 Z∓q 那个元素的价表算),所以电荷对价的
+/// 作用完全取决于元素:
+///
+/// | | 中性 | 带电 | 变化 |
+/// |---|---|---|---|
+/// | N⁺ | 3 | 4 | **+1** |
+/// | O⁻ | 2 | 1 | −1 |
+/// | C⁻ | 4 | 3 | −1 |
+/// | **C⁺** | 4 | 3 | **−1**(与 N⁺ 反向) |
+/// | **B⁻** | 3 | 4 | **+1**(与 O⁻ 反向) |
+///
+/// 按"负减正加"写死的话,碳正离子与硼酸根这两类会算反。返回 0 表示这个元素
+/// 没有价约束(或电荷离谱到查不出价),调用方应当把它当作"说不准"。
+#[must_use]
+pub fn valence_shift(z: u8, from: i8, to: i8) -> i32 {
+    let ovalens = valences_of(z);
+    if ovalens.len() == 1 && ovalens[0] == -1 {
+        return 0; // 无价约束的元素
+    }
+    let at = |q: i8| -> Option<i32> {
+        let eff = effective_atomic_num(z, q);
+        if eff == 0 {
+            return None;
+        }
+        let v = default_valence(eff);
+        if v < 0 {
+            None
+        } else {
+            Some(v)
+        }
+    };
+    match (at(from), at(to)) {
+        (Some(a), Some(b)) => b - a,
+        _ => 0,
+    }
+}
+
 fn effective_atomic_num(z: u8, charge: i8) -> u8 {
     let max = (element::count() - 1) as i32;
     (i32::from(z) - i32::from(charge)).clamp(0, max) as u8

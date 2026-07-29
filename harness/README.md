@@ -328,6 +328,48 @@ cargo run --release --example bench_kekulize -- <语料> permol   # 单看 kekul
 | `MolBuilder` 邻接索引与暴力扫描一致 | `omgkit-io/tests/adjacency_index.rs` |
 | 整条管线线性于分子规模 | `omgkit-chem/tests/scaling.rs` |
 
+## 收口的外部裁判:`check_byproducts.py`
+
+Rust 侧那些用例靠手写的规范 SMILES,天花板有两个:数量,以及**作者想得到的形状**。
+`capped` 那一档可以整个交给外部实现独立算 —— 断口全是单键、不涉及电荷、空价数
+正好等于要补的氢数时,没有选择余地,只有"在断口切开、断头补氢"这一件事可做。
+
+```bash
+python3 harness/check_byproducts.py <templates.jsonl> --self-test
+```
+
+当前:**25849 条比过,0 分歧**。注入缺陷验过判据有牙齿:翻手性 4/4、删原子
+2527/2527、多补一个氢 1452/1452,全部抓到。
+
+**翻手性只注得进 4 条**,这个数本身是结论:两万五千条闭合副产物里带手性中心的
+只有 4 个。所以"切点落在手性中心时要重定基"那条缺陷在这份语料上**照不出来**,
+它是靠构造判据立住的(见 `omgkit-match/tests/byproduct.rs` 的
+`a_stereocentre_at_the_cut_is_rebased`)。判据覆盖不到的地方,要自己说出来。
+
+### 还没有判据守着的几处
+
+判据覆盖面要自己说出来,不然"全绿"读起来像"全都验过了"。当前**明确没有判据**的:
+
+| 没守住的 | 为什么难写 |
+|---|---|
+| `form_bonds` 的三级优先级(提键级 > 跨分量 > 成环) | 要分辨它得有 ≥3 处空价,而那种形状上 `borrow_hydrogens` 会从**同一个原子**连摘两个氢,结果由摘氢而非优先级决定 —— 造出来的用例判别的不是它声称判别的东西 |
+| `apply_charges` 的元素优先级(卤素 > 氧硫 > 氮) | 总量由预算定死,落错原子只改写法不改账;要判别得构造"两个候选元素不同且写法可区分"的片段 |
+| `MAX_BONDS` 这个上限本身 | 它是设计决定,不是可观察行为 |
+| `build_fragment` 清 `stereo_atoms` | 要构造"参照原子落在片段之外"的双键 |
+
+前两条是**会被写进文档的设计决定**,而没有判据的设计决定其实没有生效证据 ——
+这一条记在这里,是因为下次改到那两处时不会有任何东西报警。
+
+顺带记一个**待查**:上面第一格里说的"从同一个原子连摘两个氢",是探路时撞见的,
+还没判定它是不是缺陷。
+
+`--min-checked` 是防空过的闸:真正比过的条数低于它就直接失败。语料换了、口径改了
+都可能让这一档悄悄变空,而那时"零分歧"依然成立 —— 最会骗人的一种绿。
+
+写这条判据时自证先抓到了**判据自己的**毛病:注入"多补一个氢"那一档,先置
+`NO_IMPLICIT` 再读总氢,读到的已经是 0,于是注入变成空操作,自证误报"判据抓不住"
+34%。**自证也要能自证。**
+
 ## 扩到 ChEMBL
 
 冒烟语料只够抓低级错误,真正的门禁需要全量:
@@ -470,6 +512,8 @@ python3 harness/check_write_fidelity.py /tmp/canon.tsv
 | SMARTS **写出**(L3) | `roundtrip_smarts`(幂等)+ `check_smarts_write.py`(语义) |
 | 子结构匹配(L5) | `oracle_matches.py` |
 | 产物生成(L7) | `check_reactions.py` |
+| 被丢弃原子的收口(L7) | `omgkit-match/tests/byproduct.rs`(判据是质量守恒,不依赖记录) |
+| 收口,**真实语料 + 外部裁判** | `check_byproducts.py`(自带 `--self-test`) |
 | 产物生成,**真实反应语料 + 正逆双向** | `bench_reactions.py` |
 | Python 绑定(L8) | `test_python.py` |
 | SMARTS **手性**的参照系 | `check_smarts_chirality.py`(自带区分力检查) |

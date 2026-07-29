@@ -57,4 +57,6 @@ pub use radicals::assign_radicals;
 pub use remove_hs::{is_removable, remove_hs};
 pub use rings::{fused_ring_systems, perceive_rings, RingPerception};
 pub use sssr::{ring_set, Ring};
-pub use valence::{update_property_cache, ValenceError, ValenceErrorKind, ValenceResult};
+pub use valence::{
+    update_property_cache, valence_shift, ValenceError, ValenceErrorKind, ValenceResult,
+};

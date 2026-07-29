@@ -73,6 +73,16 @@ pub struct Outcome {
     /// 调用方手上的输入就是答案,复制一份纯属浪费 —— 而一次反应可以产出上百组
     /// 结果,每组都复制一遍反应物不是小开销。
     pub reactants: Vec<MolBuilder>,
+    /// `discarded[i]` = 第 i 个输入分子里**没有进入任何产物**的原子下标,升序。
+    ///
+    /// 这是一条**事实记录,不含任何推断**:模板明说要删的原子、以及只挂在它们
+    /// 身上因而失去落脚点的原子,都在这里。产物侧看不到它们,所以不记的话这批
+    /// 原子就是凭空消失 —— 而"消失"与"被判定为不该存在"是两回事。
+    ///
+    /// 把它们收口成分子是**另一件事**,由 [`crate::byproduct::reconstruct`] 做,
+    /// 而且是推断:模板里没有"离去基团变成了什么"这条信息。两者分开是有意的 ——
+    /// 本字段永远可信,那边的结论要看它自己给出的档次。
+    pub discarded: Vec<Vec<u32>>,
 }
 
 /// 对一组反应物跑反应,返回所有结果组。
@@ -91,7 +101,7 @@ pub struct Outcome {
 /// **一、模板删掉一个原子时,只挂在它身上的东西跟着走。** 叔丁酯水解的模板写
 /// `C-C-[O:1]-[C:2]=[O:3]`,删掉的 `C-C` 是叔丁基的一个甲基加季碳;季碳上另外
 /// 两个甲基没有别的路连回保留部分,于是一并消失 —— 一次少掉 4 个重原子而不是 2 个。
-/// 这在 USPTO-50k 上有 1493 个 outcome,RDKit 的行为逐条相同。
+/// 真实反应语料里这一档数以千计,不是边角情形。
 ///
 /// **二、完全不连通的旁观组分原样交回来,不丢。** 底物写成 `内酰胺.HCl` 或
 /// `[Na+].[O-]CC(=O)OCC[O-].[K+]` 时,反离子与任何匹配到的原子都不连通,遍历
@@ -309,6 +319,9 @@ pub fn run_on_substrate(
         return Vec::new();
     }
 
+    // 拼图之前先记下各分子的原子数 —— `discarded` 要按这个切回去,见
+    // `regroup_discarded`
+    let sizes: Vec<usize> = substrate.iter().map(|(m, _)| m.num_atoms()).collect();
     let mol = concat(substrate);
     let props = MolProps::compute(&mol);
     let inputs = [(mol, props)];
@@ -354,7 +367,9 @@ pub fn run_on_substrate(
         });
         if disjoint {
             let built = build_products(reaction, &inputs, &mapping, &home, &comps);
-            out.push(stamp_atom_maps(&inputs, built, atom_mapping));
+            let mut outcome = stamp_atom_maps(&inputs, built, atom_mapping);
+            outcome.discarded = regroup_discarded(&outcome.discarded, &sizes);
+            out.push(outcome);
             if max_products != 0 && out.len() >= max_products {
                 break;
             }
@@ -555,7 +570,7 @@ type BuiltProduct = (MolBuilder, Vec<BTreeMap<u32, u32>>);
 /// 分量结构是分子自己的性质,与匹配到哪个位点无关;而 `build_products` 每出一个
 /// outcome 就要判一次"哪些分量没有被匹配到",一个底物上有几十处匹配就要重算几十遍。
 /// 算一次传下去,省下的是常数乘以 outcome 数。
-fn components(mol: &MolBuilder) -> Vec<u32> {
+pub(crate) fn components(mol: &MolBuilder) -> Vec<u32> {
     let n = mol.num_atoms();
     let mut comp = vec![u32::MAX; n];
     let mut stack: Vec<u32> = Vec::new();
@@ -960,10 +975,12 @@ fn stamp_atom_maps(
     built: Vec<BuiltProduct>,
     atom_mapping: bool,
 ) -> Outcome {
+    let discarded = discarded_atoms(reactants, &built);
     if !atom_mapping {
         return Outcome {
             products: built.into_iter().map(|(m, _)| m).collect(),
             reactants: Vec::new(),
+            discarded,
         };
     }
 
@@ -1012,7 +1029,62 @@ fn stamp_atom_maps(
     Outcome {
         products,
         reactants: mapped,
+        discarded,
     }
+}
+
+/// 把拼接图上的丢弃原子下标切回**各个输入分子**的下标。
+///
+/// [`run_on_substrate`] 把输入拼成一张图跑,于是 `discarded` 只有一条、下标是
+/// 拼接图的。可 [`Outcome::discarded`] 的契约是"第 i 个输入分子的原子下标" ——
+/// **契约不该随入口而变**:调用方拿到 `discarded` 时不该还要先知道上游走的是
+/// 哪个函数。
+///
+/// 不切回去的后果不是报错,是**静默算错**:下游拿拼接图的下标去索引原始分子,
+/// 越界的被悄悄跳过,片段少了原子,账跟着错,而每一步都跑得通。
+fn regroup_discarded(flat: &[Vec<u32>], sizes: &[usize]) -> Vec<Vec<u32>> {
+    let mut out: Vec<Vec<u32>> = sizes.iter().map(|_| Vec::new()).collect();
+    for a in flat.iter().flatten() {
+        let mut rest = *a as usize;
+        for (i, &n) in sizes.iter().enumerate() {
+            if rest < n {
+                out[i].push(u32::try_from(rest).unwrap_or(u32::MAX));
+                break;
+            }
+            rest -= n;
+        }
+    }
+    out
+}
+
+/// 每个输入分子里没有进入任何产物的原子。
+///
+/// 出处表是**按产物分量**拆开的,所以"进了产物"要对所有产物取并集再补 ——
+/// 只看某一个产物会把搬进别的片段的原子误记成丢弃。
+fn discarded_atoms(reactants: &[(MolBuilder, MolProps)], built: &[BuiltProduct]) -> Vec<Vec<u32>> {
+    let mut kept: Vec<Vec<bool>> = reactants
+        .iter()
+        .map(|(m, _)| vec![false; m.num_atoms()])
+        .collect();
+    for (_, per_reactant) in built {
+        for (ti, table) in per_reactant.iter().enumerate() {
+            for &src in table.keys() {
+                if let Some(slot) = kept[ti].get_mut(src as usize) {
+                    *slot = true;
+                }
+            }
+        }
+    }
+    kept.iter()
+        .map(|flags| {
+            flags
+                .iter()
+                .enumerate()
+                .filter(|&(_, &k)| !k)
+                .map(|(i, _)| u32::try_from(i).unwrap_or(u32::MAX))
+                .collect()
+        })
+        .collect()
 }
 
 /// 手性标记是相对**邻居存储顺序**的,而产物的存储顺序与反应物不同 ——
@@ -1086,7 +1158,7 @@ fn rebase_chirality(
 
 /// 代表**隐式氢**的哨兵。氢不是图里的节点,可它占着四面体的一个位置,
 /// 换参照系时必须算进去。取 `u32::MAX` 是因为真实原子下标不可能是它。
-const IMPLICIT_H: u32 = u32::MAX;
+pub(crate) const IMPLICIT_H: u32 = u32::MAX;
 
 /// 把反应物侧与产物侧的邻居顺序对齐成两条等长、同多重集的序列,供求宇称用。
 ///
@@ -1117,7 +1189,10 @@ const IMPLICIT_H: u32 = u32::MAX;
 ///
 /// 只处理恰好差一个、且对齐后凑满四个邻居的情形 —— "对换一次就翻转"这条规则
 /// 只对四面体成立。
-fn align_for_rebase(slots: &[Option<u32>], after: &[u32]) -> Option<(Vec<u32>, Vec<u32>)> {
+pub(crate) fn align_for_rebase(
+    slots: &[Option<u32>],
+    after: &[u32],
+) -> Option<(Vec<u32>, Vec<u32>)> {
     if let Some(before) = fill_replaced_slots(slots, after) {
         if before.len() == after.len() {
             return Some((before, after.to_vec()));
@@ -1204,7 +1279,7 @@ fn fill_replaced_slots(slots: &[Option<u32>], after: &[u32]) -> Option<Vec<u32>>
 /// `from` → `to` 置换的宇称。两者不是同一多重集时返回 `None`。
 ///
 /// n ≤ 6,O(n²) 完全够用。
-fn permutation_is_odd(from: &[u32], to: &[u32]) -> Option<bool> {
+pub(crate) fn permutation_is_odd(from: &[u32], to: &[u32]) -> Option<bool> {
     if from.len() != to.len() {
         return None;
     }
