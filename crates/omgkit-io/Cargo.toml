@@ -1,6 +1,6 @@
 [package]
 name = "omgkit-io"
-description = "omgkit 的 L1 层:SMILES / SMARTS 的解析与输出"
+description = "SMILES and SMARTS parsing and writing for omgkit"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,8 @@ repository.workspace = true
 authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
+homepage.workspace = true
+readme.workspace = true
 
 [dependencies]
 omgkit-core = { path = "../omgkit-core", version = "0.0.1" }

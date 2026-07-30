@@ -1,6 +1,6 @@
 [package]
 name = "omgkit-py"
-description = "omgkit 的 Python 绑定"
+description = "Python bindings for omgkit"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,12 @@ repository.workspace = true
 authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+# 不发到 crates.io:这是 Python 扩展的 cdylib,作为 crate 依赖没有意义,
+# 而且会和 PyPI 上的 omgkit 混淆。它的分发渠道是 wheel。
+publish = false
 
 [lib]
 # Python 扩展模块必须是 cdylib;模块名要与 `#[pymodule]` 的函数名一致。

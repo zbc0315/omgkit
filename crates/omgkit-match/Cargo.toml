@@ -1,6 +1,6 @@
 [package]
 name = "omgkit-match"
-description = "omgkit 的 L5/L7 层:子结构匹配与反应产物生成"
+description = "Substructure matching, reaction templates and byproduct reconstruction for omgkit"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,8 @@ repository.workspace = true
 authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
+homepage.workspace = true
+readme.workspace = true
 
 [dependencies]
 omgkit-core = { path = "../omgkit-core", version = "0.0.1" }

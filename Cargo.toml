@@ -26,6 +26,9 @@ edition = "2021"
 rust-version = "1.75"
 license = "BSD-3-Clause"
 repository = "https://github.com/zbc0315/omgkit"
+homepage = "https://zbc0315.github.io/omgkit/"
+# 继承时 readme 的路径相对**工作区根**;不给的话 crates.io 上是一张空白页
+readme = "README.md"
 authors = ["zbc0315 <62389427+zbc0315@users.noreply.github.com>"]
 # 索引页只认英文与固定词表:keywords 限 ASCII、每个 ≤20 字符、至多 5 个;
 # categories 必须取自 crates.io 的既定列表,拼错会在 publish 时被拒。

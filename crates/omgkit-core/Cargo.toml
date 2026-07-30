@@ -1,6 +1,6 @@
 [package]
 name = "omgkit-core"
-description = "omgkit 的核心数据结构:列式分子批、CSR 图与元素周期表"
+description = "Core data structures for omgkit: columnar molecule batches, CSR graphs and the element table"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,8 @@ repository.workspace = true
 authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
+homepage.workspace = true
+readme.workspace = true
 
 # L0 刻意保持零依赖。核心 crate 的依赖会传染给整个工作区,
 # 而这一层需要的东西(定长数组、位运算、CSR)标准库都有。
