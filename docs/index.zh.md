@@ -61,10 +61,10 @@ SMILES 写法,必须净化成同一个东西、匹配同样的查询、按同样
 
     ```toml
     [dependencies]
-    omgkit-core  = { git = "https://github.com/zbc0315/omgkit" }
-    omgkit-io    = { git = "https://github.com/zbc0315/omgkit" }
-    omgkit-chem  = { git = "https://github.com/zbc0315/omgkit" }
-    omgkit-match = { git = "https://github.com/zbc0315/omgkit" }
+    omgkit-core  = "0.0.1"
+    omgkit-io    = "0.0.1"
+    omgkit-chem  = "0.0.1"
+    omgkit-match = "0.0.1"
     ```
 
 按需取用,每一层只依赖它下面的层。完整说明见[安装](getting-started/install.md)。

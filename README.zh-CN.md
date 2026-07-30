@@ -42,10 +42,10 @@ $ pip install dist/omgkit-*.whl
 
 ```toml
 [dependencies]
-omgkit-core  = { git = "https://github.com/zbc0315/omgkit" }   # 数据结构
-omgkit-io    = { git = "https://github.com/zbc0315/omgkit" }   # SMILES / SMARTS
-omgkit-chem  = { git = "https://github.com/zbc0315/omgkit" }   # 净化
-omgkit-match = { git = "https://github.com/zbc0315/omgkit" }   # 匹配与反应
+omgkit-core  = "0.0.1"   # 数据结构
+omgkit-io    = "0.0.1"   # SMILES / SMARTS
+omgkit-chem  = "0.0.1"   # 净化
+omgkit-match = "0.0.1"   # 匹配与反应
 ```
 
 按需取用,每一层只依赖它下面的层。

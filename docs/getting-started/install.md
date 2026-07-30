@@ -35,10 +35,16 @@ engine.
 
 ```toml
 [dependencies]
-omgkit-core  = { git = "https://github.com/zbc0315/omgkit" }   # data structures
-omgkit-io    = { git = "https://github.com/zbc0315/omgkit" }   # SMILES / SMARTS
-omgkit-chem  = { git = "https://github.com/zbc0315/omgkit" }   # sanitization
-omgkit-match = { git = "https://github.com/zbc0315/omgkit" }   # matching, reactions
+omgkit-core  = "0.0.1"   # data structures
+omgkit-io    = "0.0.1"   # SMILES / SMARTS
+omgkit-chem  = "0.0.1"   # sanitization
+omgkit-match = "0.0.1"   # matching, reactions
+```
+
+Or with `cargo add`:
+
+```shell
+cargo add omgkit-core omgkit-io omgkit-chem omgkit-match
 ```
 
 | Crate | Depends on | Gives you |

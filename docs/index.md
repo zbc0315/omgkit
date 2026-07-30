@@ -68,10 +68,10 @@ to prove it does not pass vacuously. See [Correctness](dev/correctness.md).
 
     ```toml
     [dependencies]
-    omgkit-core  = { git = "https://github.com/zbc0315/omgkit" }
-    omgkit-io    = { git = "https://github.com/zbc0315/omgkit" }
-    omgkit-chem  = { git = "https://github.com/zbc0315/omgkit" }
-    omgkit-match = { git = "https://github.com/zbc0315/omgkit" }
+    omgkit-core  = "0.0.1"
+    omgkit-io    = "0.0.1"
+    omgkit-chem  = "0.0.1"
+    omgkit-match = "0.0.1"
     ```
 
 Take only the layers you need; each depends only on the ones below it.
