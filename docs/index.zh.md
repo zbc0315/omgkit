@@ -74,7 +74,6 @@ SMILES 写法,必须净化成同一个东西、匹配同样的查询、按同样
 <div class="grid cards" markdown>
 
 - **[五分钟上手](getting-started/quickstart.md)** —— 解析、净化、匹配、反应
-- **[从 RDKit 迁移](getting-started/from-rdkit.md)** —— 你已经会的操作在这里怎么写
 - **[功能与用法](guide/index.md)** —— 一个能力一页,从任务出发
 - **[Python API](api/python.md)** —— 每个可调用项,带签名
 - **[开发者帮助](dev/index.md)** —— 构建、测试,以及四道闸门

@@ -101,7 +101,6 @@ plugins:
             Developing: 开发者帮助
             Installation: 安装
             Quickstart: 五分钟上手
-            Coming from RDKit: 从 RDKit 迁移
             Python API: Python API
             Rust API: Rust API
             Building and testing: 构建与测试
@@ -130,7 +129,6 @@ nav:
   - Getting started:
       - Installation: getting-started/install.md
       - Quickstart: getting-started/quickstart.md
-      - Coming from RDKit: getting-started/from-rdkit.md
   - Guides:
       - guide/index.md
       - Reading and writing SMILES: guide/smiles.md

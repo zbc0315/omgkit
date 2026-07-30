@@ -161,6 +161,5 @@ means and when the answer is trustworthy.
 
 ## Where to go next
 
-- [Coming from RDKit](from-rdkit.md) — the same operations side by side
 - [Guides](../guide/index.md) — one page per capability
 - [Python API](../api/python.md) — every callable, with signatures

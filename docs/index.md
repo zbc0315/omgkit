@@ -83,8 +83,6 @@ Full instructions in [Installation](getting-started/install.md).
 
 - **[Quickstart](getting-started/quickstart.md)** — parse, sanitize, match and
   react in five minutes
-- **[Coming from RDKit](getting-started/from-rdkit.md)** — side-by-side for the
-  operations you already know
 - **[Guides](guide/index.md)** — one page per capability, task first
 - **[Python API](api/python.md)** — every callable, with signatures
 - **[Developing](dev/index.md)** — build, test, and the four gates
