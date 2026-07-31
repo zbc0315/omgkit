@@ -25,6 +25,7 @@ m.to_canonical_smiles()          # 'c1cccc(c1C(O)=O)N'
 | **Match substructures** | SMARTS parsing, VF2++ matching, optionally stereo-aware, SMARTS writing for molecules and reactions |
 | **Apply reaction templates** | Product generation with optional atom-atom mapping |
 | **Reconstruct byproducts** | The water an esterification drops, rebuilt as a real molecule — or an explicit *cannot tell* when the record itself does not balance |
+| **Draw structures** | 2D coordinates and SVG/PNG/JPEG output, in two drawing styles — with an explicit report of anything it could not draw well |
 | **Work in batches** | A columnar `MolBatch` with zero-copy per-molecule views |
 
 ## What makes it different

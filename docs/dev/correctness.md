@@ -70,6 +70,7 @@ So the coverage table matters more than any single judge:
 | Python bindings (L8) | `test_python.py` |
 | SMARTS **chirality** reference frame | `check_smarts_chirality.py` (with a discriminating-power check) |
 | Product-side **chirality**, four instruction kinds | `check_product_chirality.py` (with a discriminating-power check) |
+| Drawing (L9) | `omgkit-depict --example audit` over the whole corpus — see below |
 
 **When adding a path, ask this table first.** Which cell does it fall in? No
 cell means a new gap.
@@ -128,3 +129,82 @@ That last one has its own trap. Calibrating one guard, the injected quadratic
 term produced no slowdown at all — because the shape injected was
 loop-invariant and the compiler hoisted it out of the inner loop. A threshold
 calibrated against an injection that never ran is worth nothing.
+
+## Drawing: six decidable properties, run over the whole corpus
+
+A picture cannot be judged by "does it look right". What *can* be decided is
+whether it says something false about the molecule. Six properties, all run
+over `harness/corpus/large.smi` — 8831 molecules × 2 styles:
+
+```shell
+cargo run -p omgkit-depict --release --example audit -- harness/corpus/large.smi
+```
+
+| Property | Precondition |
+|---|---|
+| Writing-independent: any SMILES for the same molecule draws the same primitives | none |
+| Ring double bonds: both lines land inside a ring that contains the bond | layout not degraded |
+| Wedges reach the canvas: as many wedge primitives as `Depiction` recorded | none |
+| Wedges read back: every drawn stereocentre reads back as its recorded configuration | none |
+| Bond lengths all equal | layout not degraded |
+| Nothing drawn outside the canvas | none |
+
+The two preconditions are not excuses. A degraded layout has no reliable shape
+to begin with — and *that it degraded* is already reported in
+`Depiction::degraded`, so the caller is not being told a comfortable lie.
+
+### Hand-picked molecules only cover the model you already have
+
+Two whole classes of defect got through unit judges before the corpus run found
+them:
+
+- "ring double bonds stay inside the ring" listed eight molecules, all
+  single-ring or ortho-fused — so **bridged shared bonds**, where both rings
+  sit on the *same* side, were never exercised.
+- "a wedge starts at the stereocentre it describes" listed three molecules,
+  none with a P(V) centre — so a wedge assigned to a **double bond**, which the
+  renderer silently drops while `unwedged` stays empty, was never exercised.
+
+Neither needed a new idea to find. They needed a corpus.
+
+### The audit nearly passed vacuously itself
+
+Its writing-independence check first verifies that the rewritten SMILES is
+still the same molecule. That guard used the storage-order writer, so almost
+every molecule compared unequal and was **skipped** — the check reported 3
+violations out of 17662 while doing nearly nothing. With the canonical writer
+it reports 132. The audit now counts how many comparisons actually happened and
+fails loudly if the answer is zero.
+
+### One class of defect no unit test can see
+
+The violation count moved between runs of the **same binary on the same
+corpus**: 141, 142, 141. `HashMap`'s hasher is seeded randomly per process, so
+iteration order changes, and the layout summed positions in that order —
+last-bit differences flipped branches.
+
+For a drawing library that is a hard failure: regenerate a figure and it
+silently changes. All `HashMap`/`HashSet` in `omgkit-depict` are now
+`BTreeMap`/`BTreeSet`, and three consecutive runs give the same number.
+
+**A unit test cannot catch this** — within one process the seed is fixed. It
+takes running the audit twice.
+
+### Current standing
+
+Five properties: **0 violations**. Writing-independence: **132 / 17662
+(0.7%)**, and those are not a systemic layout instability. Fitting each failing
+pair with its best rigid transform:
+
+| Lines still differing | Pairs |
+|---|---|
+| 0 | 2 — pose only |
+| **1** | **35 — one substituent points a different way** |
+| 2–4 | 4 |
+
+Nine cases in ten come down to a single bond; the canonical orientation step
+then flips the whole picture to minimise its key, which is why the primitive
+count reads "all different". The remaining root cause is localised to
+substituent placement (ring systems themselves come out point-for-point
+identical) and is documented in `harness/README.md`, along with the hypotheses
+already ruled out.

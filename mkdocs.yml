@@ -137,6 +137,7 @@ nav:
       - Reaction templates: guide/reactions.md
       - Byproduct reconstruction: guide/byproducts.md
       - Batches: guide/batches.md
+      - Drawing structures: guide/depict.md
   - API reference:
       - Python API: api/python.md
       - Rust API: api/rust.md

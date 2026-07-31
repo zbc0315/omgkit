@@ -32,6 +32,11 @@ which crate the code lives in.
 
     The columnar representation, and what it is for.
 
+- **[Drawing structures](depict.md)**
+
+    2D coordinates and SVG/PNG/JPEG output, the two drawing styles, and what
+    gets reported when a structure cannot be drawn well.
+
 </div>
 
 ## The one idea behind all of them

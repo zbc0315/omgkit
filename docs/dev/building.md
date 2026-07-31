@@ -84,6 +84,33 @@ judge is guarding are documented in
     The way to verify a change to that rule is not to read it — it is to clone
     the repository somewhere else and run `cargo test`.
 
+## Drawing: the gallery and the corpus audit
+
+`omgkit-depict` has a third tier of its own — the properties a picture must
+satisfy, run over the whole corpus rather than a hand-picked list:
+
+```shell
+# six decidable properties over 8831 molecules × 2 styles
+cargo run -p omgkit-depict --release --example audit -- harness/corpus/large.smi
+
+# eyeball it: 17 molecules × 2 styles × svg/png/jpg
+cargo run -p omgkit-depict --release --features raster --example draw -- out/
+
+# side by side with RDKit at the same bond length
+python3 harness/compare_rdkit.py out/
+```
+
+!!! warning "Run the audit twice"
+
+    One class of defect only shows up across processes: `HashMap` iteration
+    order is seeded per run, so anything that sums positions in that order can
+    silently give a different picture each time. Two runs that disagree is the
+    only way to see it — no unit test can, because the seed is fixed within a
+    process.
+
+The `raster` feature is optional on purpose: without it the crate has **no
+external dependencies** and emits SVG only.
+
 ## Documentation
 
 ```shell

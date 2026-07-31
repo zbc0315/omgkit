@@ -1,6 +1,6 @@
 [package]
 name = "omgkit-depict"
-description = "2D coordinate generation for omgkit: structure diagram layout for drawing"
+description = "2D coordinates and structure drawing for omgkit: SVG with no dependencies, PNG/JPEG behind a feature"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
