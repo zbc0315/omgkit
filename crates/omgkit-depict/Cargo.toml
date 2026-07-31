@@ -1,0 +1,56 @@
+[package]
+name = "omgkit-depict"
+description = "2D coordinate generation for omgkit: structure diagram layout for drawing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+omgkit-core = { path = "../omgkit-core", version = "0.0.1" }
+# 规范秩:布局的每一处平局都按它打破,这是"同一分子的任何写法给出同一张图"
+# 的来源。没有它,坐标就会依赖输入的原子顺序。
+omgkit-io = { path = "../omgkit-io", version = "0.0.1" }
+# 环感知:稠环系统的划分是环系统布局的前提
+omgkit-chem = { path = "../omgkit-chem", version = "0.0.1" }
+
+# 位图输出是**可选的**。默认构建零外部依赖,只出 SVG。
+#
+# 版本是按 MSRV 挑的,不是随手取最新:
+#   resvg 0.46+ 要 Rust 1.87、image 0.25.10 要 1.88、jpeg-encoder 0.7 要 1.87,
+#   全都高过本工作区的 1.75。resvg 0.45.1 声明 1.67.1、jpeg-encoder 0.6.1
+#   声明 1.61 —— 所以开了这个 feature 也不必抬 MSRV。
+#
+# 换新版本前先看它的 rust_version,别只看有没有新功能。
+[dependencies.resvg]
+version = "0.45"
+optional = true
+default-features = false
+features = ["text", "system-fonts"]
+
+[dependencies.jpeg-encoder]
+version = "0.6"
+optional = true
+
+[features]
+default = []
+## 输出 PNG / JPEG。带入 resvg 与 jpeg-encoder 两个依赖。
+raster = ["dep:resvg", "dep:jpeg-encoder"]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+omgkit-io = { path = "../omgkit-io", version = "0.0.1" }
+
+# 这个例子要出 PNG/JPEG,没有 raster feature 就编不过。声明出来,
+# 免得默认的 `cargo clippy --all-targets` 因为它而红。
+[[example]]
+name = "draw"
+required-features = ["raster"]
