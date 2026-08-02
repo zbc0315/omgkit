@@ -98,6 +98,9 @@ cargo run -p omgkit-depict --release --features raster --example draw -- out/
 
 # side by side with RDKit at the same bond length
 python3 harness/compare_rdkit.py out/
+
+# one page per picture, for flipping through
+python3 harness/make_pdf.py out/ gallery.pdf --diag
 ```
 
 !!! warning "Run the audit twice"

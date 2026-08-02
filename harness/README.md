@@ -16,6 +16,7 @@
 | `corpus/smarts.txt` | SMARTS 语料(776 条) | RDKit 的 PAINS / 官能团层级 / RLewis 库,同上 |
 | `check_product_chirality.py` | 裁判产物侧手性(见下)。用例写死在文件里 —— 反应语料在这条路上触发面是 0 | — |
 | `compare_rdkit.py` | 把 omgkit 与 RDKit 画的同一个分子并排出图,供人眼比对 | — |
+| `make_pdf.py` | 把一个目录里的图拼成多页 PDF,一页一张,方便翻着看 | — |
 | `corpus/reactions.txt` | 反应模板语料(20 条),**没有一条在产物侧写手性** | 本项目自写 |
 | `baseline/` | 生成的基准 —— 跑外部实现产出的,不是抄来的文件 | 派生数据 |
 
