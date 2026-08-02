@@ -88,28 +88,36 @@ pub fn to_svg(scene: &Scene, style: &Style) -> String {
                      text-anchor=\"middle\" dominant-baseline=\"central\" fill=\"#000\">",
                     at.x, at.y, style.font_family, size
                 ));
+                // 每一段自带 `dy`,当前基线偏移显式记着。
+                //
+                // **不能用空的 `<tspan dy=…>` 复位。** SVG 的 `dy` 是加在这一段
+                // 的**字符**上的,段里没有字符就没有东西可加,基线复不回去 ——
+                // 于是下标后面的正文一直吊在下标的高度上。实测:氨基在右侧写成
+                // `H₂N` 时,`N` 比 `H` 低了一截,而这两个字母本该在同一条基线上。
+                //
+                // 抬升/下沉与字号缩放用的是 [`label`](crate::label) 里的同一组
+                // 常数 —— 那边按它们算标签占多大,这边按它们画,两边必须一致。
+                let mut cur = 0.0_f64;
                 for r in runs {
-                    match r {
-                        Run::Normal(t) => s.push_str(&escape(t)),
-                        // 下标下沉、上标抬升,尺寸缩到 60% —— 与 label 模块
-                        // 算宽度时用的是同一组常数
-                        Run::Sub(t) => s.push_str(&format!(
-                            "<tspan font-size=\"{:.2}\" dy=\"{:.2}\">{}</tspan>\
-                             <tspan dy=\"{:.2}\"></tspan>",
-                            size * 0.6,
-                            size * 0.16,
-                            escape(t),
-                            -size * 0.16
-                        )),
-                        Run::Sup(t) => s.push_str(&format!(
-                            "<tspan font-size=\"{:.2}\" dy=\"{:.2}\">{}</tspan>\
-                             <tspan dy=\"{:.2}\"></tspan>",
-                            size * 0.6,
-                            -size * 0.36,
-                            escape(t),
-                            size * 0.36
-                        )),
-                    }
+                    let (text, want, fs) = match r {
+                        Run::Normal(t) => (t, 0.0, *size),
+                        Run::Sub(t) => (
+                            t,
+                            size * crate::label::SUB_DROP,
+                            size * crate::label::SUB_SUP_SCALE,
+                        ),
+                        Run::Sup(t) => (
+                            t,
+                            -size * crate::label::SUP_RISE,
+                            size * crate::label::SUB_SUP_SCALE,
+                        ),
+                    };
+                    s.push_str(&format!(
+                        "<tspan font-size=\"{fs:.2}\" dy=\"{:.2}\">{}</tspan>",
+                        want - cur,
+                        escape(text)
+                    ));
+                    cur = want;
                 }
                 s.push_str("</text>\n");
             }
@@ -245,6 +253,68 @@ mod tests {
         let a = svg("N[C@@H](C)O", &Style::ACS_1996);
         let b = svg("N[C@H](C)O", &Style::ACS_1996);
         assert_ne!(a, b, "两个对映体画出了完全相同的图");
+    }
+
+    #[test]
+    fn normal_text_stays_on_the_main_baseline() {
+        // **下标之后的正文必须回到主基线上。**
+        //
+        // 先前是用一个空的 `<tspan dy=…>` 复位的,而 SVG 的 `dy` 是加在这一段
+        // 的**字符**上的 —— 段里没有字符就没有东西可加,基线复不回去,于是
+        // 下标后面的正文一直吊在下标那个高度。实测:氨基在右侧写成 `H₂N` 时,
+        // `N` 比 `H` 低了一截,而这两个字母本该在同一条基线上。
+        //
+        // 这条把每一段的 `dy` 累加起来,要求正文段落落在偏移 0 上。
+        for smi in [
+            "NCc1ccccc1", // 苄胺:键从右边来,氨基写成 H₂N,下标夹在中间
+            "CC(=O)Nc1ccc(O)cc1",
+            "[NH4+]",  // 上标在末尾
+            "[13CH4]", // 同位素在开头
+            "OS(=O)(=O)O",
+        ] {
+            let out = svg(smi, &Style::ACS_1996);
+            assert!(
+                !out.contains("></tspan>"),
+                "{smi}:出现了空的 <tspan> —— 它的 dy 不会生效"
+            );
+            for t in out.split("<text ").skip(1) {
+                let body = t.split('>').skip(1).collect::<Vec<_>>().join(">");
+                let body = body.split("</text>").next().expect("有结束标签");
+                let mut cur = 0.0_f64;
+                for seg in body.split("<tspan ").skip(1) {
+                    let dy: f64 = seg
+                        .split("dy=\"")
+                        .nth(1)
+                        .and_then(|x| x.split('"').next())
+                        .and_then(|x| x.parse().ok())
+                        .expect("每段都要有 dy");
+                    cur += dy;
+                    let fs: f64 = seg
+                        .split("font-size=\"")
+                        .nth(1)
+                        .and_then(|x| x.split('"').next())
+                        .and_then(|x| x.parse().ok())
+                        .expect("每段都要有 font-size");
+                    let text = seg
+                        .split('>')
+                        .nth(1)
+                        .and_then(|x| x.split('<').next())
+                        .unwrap_or("");
+                    if text.is_empty() {
+                        continue;
+                    }
+                    // 正文段(没缩小字号的)必须在主基线上
+                    if (fs - Style::ACS_1996.atom_label_pt).abs() < 1e-6 {
+                        assert!(
+                            cur.abs() < 1e-6,
+                            "{smi}:正文 {text:?} 画在了偏移 {cur:.2} 上,不在主基线"
+                        );
+                    } else {
+                        assert!(cur.abs() > 1e-6, "{smi}:上下标 {text:?} 却没有偏移");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

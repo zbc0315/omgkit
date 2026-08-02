@@ -23,11 +23,11 @@ use omgkit_core::{element, AtomFlags, MolBuilder};
 use crate::style::Style;
 
 /// 上标/下标相对正文的字号比例。排版通例,与期刊规范无关,故不进 [`Style`]。
-const SUB_SUP_SCALE: f64 = 0.6;
+pub(crate) const SUB_SUP_SCALE: f64 = 0.6;
 /// 上标基线相对正文基线的抬升,单位 em。
-const SUP_RISE: f64 = 0.36;
+pub(crate) const SUP_RISE: f64 = 0.36;
 /// 下标基线相对正文基线的下沉,单位 em。
-const SUB_DROP: f64 = 0.14;
+pub(crate) const SUB_DROP: f64 = 0.14;
 /// Helvetica 的大写字高,单位 em(AFM `CapHeight` 718)。
 const CAP_HEIGHT: f64 = 0.718;
 
