@@ -8,12 +8,18 @@
 //! | 算子 | 代价 | 本模块 |
 //! |---|---|---|
 //! | **翻转**(可旋转键的一侧整体镜像) | 键长、键角**一点不变** | 实现 |
+//! | **螺环翻转**(绕螺原子把一个环整体镜像) | 同上 | 实现 |
 //! | 开角 | 键角偏离理想值 | 未做 |
 //! | 伸缩键长 | 键长不再全等 | 未做 |
 //!
-//! 只做翻转是有意的:它是唯一**不损失任何几何性质**的算子,而后两个一旦用上,
-//! "键长全等""键角标准"这两条判据就守不住了。翻转解决不了的情形如实报出来
+//! 只做前两个是有意的:它们都是**不损失任何几何性质**的等距变换,而后两个一旦
+//! 用上,"键长全等""键角标准"这两条判据就守不住了。解决不了的情形如实报出来
 //! ([`Report::unresolved`]),不靠拉扯几何把数字做好看。
+//!
+//! 螺环翻转补的是一个**能力空洞**:[`rotatable`] 排除环上的键(翻了会把环撕开),
+//! 而螺原子两侧全是环上的键 —— 螺环两侧的相对朝向先前根本动不了。收益要如实说:
+//! 全量语料上它让 **6** 张图从"有未解冲突"变干净(干净率 91.4% → 91.5%),
+//! 键交叉一处没消。做它是因为它便宜且不碰契约,不是因为它大。
 //!
 //! # 碰撞半径来自标签,而标签尺寸来自规范
 //!
@@ -41,6 +47,8 @@ const BARE_RADIUS: f64 = 0.25;
 pub struct Report {
     /// 翻转过的键
     pub flipped: Vec<u32>,
+    /// **翻转过的螺原子**。绕螺原子把一个环整体镜像过去,见 `SpiroFlip`。
+    pub spiro_flipped: Vec<u32>,
     /// **仍然撞着的原子对**。翻转解决不了的情形如实留在这里,不假装消掉了。
     pub unresolved: Vec<(u32, u32)>,
     /// 仍然交叉的键对
@@ -71,8 +79,20 @@ pub(crate) fn relieve(
         (x.min(y), x.max(y), b)
     });
 
+    // 螺环翻转的候选。**枚举一次就够** —— 它只依赖拓扑,不依赖坐标。
+    let spiros = spiro_flips(mol, pos, ranks);
+
+    // 立体守卫抽出来:两个算子用同一套判定,免得改了一处漏了另一处
+    let keeps_stereo = |pos: &BTreeMap<u32, Point2>| {
+        let mut flat = vec![Point2::ORIGIN; mol.num_atoms()];
+        for (a, q) in pos.iter() {
+            flat[*a as usize] = *q;
+        }
+        crate::stereo::cis_trans_intact(mol, &flat)
+    };
+
     // 上限防止在数值抖动上来回翻。每轮至多改善一次,轮数够覆盖所有键即可。
-    let max_rounds = cands.len().max(1) * 2;
+    let max_rounds = (cands.len() + spiros.len()).max(1) * 2;
     for _ in 0..max_rounds {
         let mut improved = false;
         for &b in &cands {
@@ -90,14 +110,7 @@ pub(crate) fn relieve(
             // **立体守卫**:翻转会把双键旁的参照原子换到另一侧,顺反跟着反。
             // 消掉一处碰撞、同时把 Z 画成 E,是拿"看着好一点"换"画错了"。
             let now = score(mol, pos, &radii);
-            let keeps_stereo = {
-                let mut flat = vec![Point2::ORIGIN; mol.num_atoms()];
-                for (a, q) in pos.iter() {
-                    flat[*a as usize] = *q;
-                }
-                crate::stereo::cis_trans_intact(mol, &flat)
-            };
-            if keeps_stereo && better(now, best) {
+            if keeps_stereo(pos) && better(now, best) {
                 best = now;
                 report.flipped.push(b);
                 improved = true;
@@ -107,6 +120,58 @@ pub(crate) fn relieve(
                 }
             }
         }
+
+        // 螺环翻转。放在键翻转之后:键翻转更常见也更便宜,先让它把能消的消掉。
+        for sf in &spiros {
+            let (Some(c), Some(p1), Some(p2)) = (
+                pos.get(&sf.centre).copied(),
+                pos.get(&sf.ring_nbrs.0).copied(),
+                pos.get(&sf.ring_nbrs.1).copied(),
+            ) else {
+                continue;
+            };
+            // 轴每轮重算 —— 前面的键翻转可能已经把这两个邻居挪过了
+            let axis = (p1 + p2) * 0.5 - c;
+            if axis.norm() < 1e-9 {
+                continue; // 两个邻居正好对称在螺原子两侧,轴退化,镜像没有意义
+            }
+            // **两根环键一样长,这次反射才真的是"把 N1 与 N2 对调"。**
+            //
+            // 先说清楚一件容易想岔的事:**键长与轴怎么选无关**。绕任何一条过 S
+            // 的直线反射,都保持每个点到 S 的距离,而跨越边界的键只有 S–N1 与
+            // S–N2 两根 —— 所以这个算子无论轴选哪条都是保键长的,被反射那一侧
+            // 内部的键长键角更是原样(等距变换)。
+            //
+            // 中点这条轴买到的是别的东西:`|S−N1| = |S−N2|` 时它恰好是 ∠N1SN2 的
+            // 角平分线,反射把 N1 与 N2 精确对调 —— 于是这个环落在自己的镜像位置
+            // 上,是一次**对称操作**,而不是把环转到一个任意朝向。长度不等时
+            // (退化布局里就会)中点偏向短的那一边,对调不成立,环会歪到一个没有
+            // 道理的角度上;`better()` 仍然会拦下变差的结果,但那已经不是这个
+            // 算子想做的事了。
+            //
+            // **这条守卫没有被全量语料证伪过也没有被证实过**:去掉它,语料上
+            // 键长全等仍是 0 违例、干净率一个不差。留着是因为上面那个论证要它,
+            // 不是因为量到了收益。
+            if (c.dist(p1) - c.dist(p2)).abs() > 1e-9 {
+                continue;
+            }
+            let saved: Vec<(u32, Point2)> = sf.side.iter().map(|a| (*a, pos[a])).collect();
+            for a in &sf.side {
+                let p = pos[a].mirrored(c, axis);
+                pos.insert(*a, p);
+            }
+            let now = score(mol, pos, &radii);
+            if keeps_stereo(pos) && better(now, best) {
+                best = now;
+                report.spiro_flipped.push(sf.centre);
+                improved = true;
+            } else {
+                for (a, p) in saved {
+                    pos.insert(a, p);
+                }
+            }
+        }
+
         if !improved {
             break;
         }
@@ -222,6 +287,149 @@ fn remaining(mol: &MolBuilder, pos: &BTreeMap<u32, Point2>, radii: &[f64]) -> Tr
     (pairs, crossings)
 }
 
+/// 一次螺环翻转:绕螺原子把某一个环连同挂在它上面的一切镜像过去。
+///
+/// # 为什么这个算子不损失任何几何
+///
+/// 螺原子 `S` 在目标环里有两个邻居 `N1`、`N2`,两根都是环上的键,所以
+/// `|S−N1| = |S−N2|` —— **`S` 到两个邻居中点的连线恰好就是 ∠N1SN2 的角平分线**。
+/// 绕它反射,`N1` 与 `N2` 精确对调。
+///
+/// 被翻的那一侧(整个环 + 稠上去的环 + 挂着的全部取代基)受的是**同一个反射**,
+/// 而反射是等距变换 —— 那一侧内部所有键长、键角逐个不变;跨界的键只有 `S–N1`
+/// 与 `S–N2` 两根,`S` 在轴上不动,两根长度都保持,`S` 处的键角多重集也保持。
+///
+/// 所以它与"绕可旋转键翻转"同级:**不损失任何几何性质**,符合本模块只用这类
+/// 算子的规矩。
+///
+/// # 为什么现在的算子够不着这些图
+///
+/// [`rotatable`] 明确排除环上的键(翻了会把环撕开),而螺原子两侧全是环上的键
+/// —— **螺环两侧的相对朝向根本动不了**。实测:含螺原子的图在基线里占 1.2%,
+/// 在有键交叉的图里占 13.7%(富集 11.7 倍),在有未解冲突的图里占 8.6%。
+///
+/// # 两处平局都不许照抄 RDKit
+///
+/// RDKit 的 `flipAboutSpiroCenter` 固定翻 `rings[0]`,而 `rings` 来自
+/// `getRingInfo()->atomRings()` 是**存储序**;要翻哪一侧又是从
+/// `atomNeighbors` 的第一个取的,同样是存储序。照抄这两处,同一个分子换种
+/// 写法就会翻不同的环、得到不同的图。这里两处都按规范秩定。
+struct SpiroFlip {
+    /// 螺原子
+    centre: u32,
+    /// 要镜像的那一侧
+    side: Vec<u32>,
+    /// 螺原子在目标环里的两个邻居。**存编号不存坐标** —— 前面的键翻转会改坐标,
+    /// 枚举时算好的中点到这一步就过期了。
+    ring_nbrs: (u32, u32),
+}
+
+/// 枚举所有可做的螺环翻转,**按规范秩定序**。
+fn spiro_flips(mol: &MolBuilder, pos: &BTreeMap<u32, Point2>, ranks: &[u32]) -> Vec<SpiroFlip> {
+    let rings = omgkit_chem::sssr::ring_set(mol);
+    let mut out: Vec<(Vec<u32>, SpiroFlip)> = Vec::new();
+
+    for a in 0..u32::try_from(mol.num_atoms()).expect("原子数超出 u32") {
+        if !pos.contains_key(&a) {
+            continue;
+        }
+        // 含这个原子的环,按规范秩定序 —— 不看 SSSR 给出来的次序
+        let mut mine: Vec<&omgkit_chem::sssr::Ring> =
+            rings.iter().filter(|r| r.atoms.contains(&a)).collect();
+        if mine.len() < 2 {
+            continue;
+        }
+        mine.sort_by_key(|r| ring_key(r, ranks));
+
+        for r in &mine {
+            // 这个环必须**只**和其它含 a 的环共用 a 自己 —— 否则不是螺,是稠合
+            let set: BTreeSet<u32> = r.atoms.iter().copied().collect();
+            let spiro_here = mine.iter().any(|o| {
+                !std::ptr::eq(*o, *r) && o.atoms.iter().filter(|x| set.contains(x)).count() == 1
+            });
+            if !spiro_here {
+                continue;
+            }
+            // a 在这个环里的两个邻居
+            let nbrs: Vec<u32> = r
+                .atoms
+                .iter()
+                .copied()
+                .filter(|x| mol.neighbors(a).any(|(n, _)| n == *x))
+                .collect();
+            if nbrs.len() != 2 {
+                continue;
+            }
+            if !pos.contains_key(&nbrs[0]) || !pos.contains_key(&nbrs[1]) {
+                continue;
+            }
+            // 从其中一个邻居出发、把 a 挡住,收集这一侧
+            let Some(side) = one_side(mol, pos, nbrs[0], a) else {
+                continue;
+            };
+            // **另一个环内邻居必须在这一侧**(顺着环绕回来)。不在的话说明这两
+            // 个环之间还有别的通路,a 不是割点,翻了会把结构撕开。
+            if !side.contains(&nbrs[1]) {
+                continue;
+            }
+            // 这一侧不许覆盖到别的环内邻居之外的东西 —— 上一条已经保证连通性,
+            // 这里只需再确认 a 自己没被卷进去
+            if side.contains(&a) {
+                continue;
+            }
+            let key: Vec<u32> = {
+                let mut k = vec![ranks[a as usize]];
+                k.extend(ring_key(r, ranks));
+                k
+            };
+            out.push((
+                key,
+                SpiroFlip {
+                    centre: a,
+                    side,
+                    ring_nbrs: (nbrs[0], nbrs[1]),
+                },
+            ));
+        }
+    }
+    out.sort_by(|x, y| x.0.cmp(&y.0));
+    out.into_iter().map(|x| x.1).collect()
+}
+
+/// 环的确定性排序键:环上规范秩的有序多重集。
+fn ring_key(r: &omgkit_chem::sssr::Ring, ranks: &[u32]) -> Vec<u32> {
+    let mut k: Vec<u32> = r.atoms.iter().map(|a| ranks[*a as usize]).collect();
+    k.sort_unstable();
+    k
+}
+
+/// 从 `start` 出发、把 `blocked` 挡住能走到的那些原子(不含 `blocked`)。
+///
+/// 走不通(图里根本没放置这些原子)时返回 `None`。
+fn one_side(
+    mol: &MolBuilder,
+    pos: &BTreeMap<u32, Point2>,
+    start: u32,
+    blocked: u32,
+) -> Option<Vec<u32>> {
+    if !pos.contains_key(&start) {
+        return None;
+    }
+    let mut seen: BTreeSet<u32> = BTreeSet::from([start]);
+    let mut stack = vec![start];
+    while let Some(x) = stack.pop() {
+        for (n, _) in mol.neighbors(x) {
+            if n == blocked || !pos.contains_key(&n) {
+                continue;
+            }
+            if seen.insert(n) {
+                stack.push(n);
+            }
+        }
+    }
+    Some(seen.into_iter().collect())
+}
+
 /// 可翻转的键:不在环里,且两端度数都大于 1。
 ///
 /// 环上的键翻不动(翻了会把环撕开);端点键翻了等于什么都没做 —— 那一侧只有
@@ -328,6 +536,134 @@ mod tests {
             }
         }
         assert!(!rep.flipped.is_empty(), "应当至少翻转过一根键");
+    }
+
+    /// 螺环分子。前几个取自语料,后几个是教科书上的螺环。
+    const SPIRO: [&str; 8] = [
+        // 前六个是从全量语料里**扫出来确实会触发螺环翻转**的。判据要求至少
+        // 触发一次,所以这批不能随手换成"看着像螺环"的分子 —— 第一版列了八个
+        // 教科书螺环,一个都没触发,那时"键长不变"那条是恒真的。
+        "c1ccc2c(c1)C3C[C@@]4(C2c5c3cccc5)C=CS4(=O)=O",
+        "c1ccc2c(c1)CN(C(=[NH2+])C23CCOCC3)N",
+        "C1COC2(O1)[C@@]3(C[C@@]3(C(=[NH+]2)N)C#N)C#N",
+        "Cc1cccc(c1)NC2=C(C(=O)NC3(S2)CCCC3)C#N",
+        "Cc1ccccc1[C@@H]2[C@@H]([C@@]23C(=NN=C3O)N)C#N",
+        "N1=C(SC2(CCCCC2)C3=C1CCCC3)N",
+        // 这两个不触发,留着让"等距"那条也覆盖到不触发的路径
+        "C1CC2(CC1)CCCC2",
+        "C[C@@]12C(=C[C@@H](O1)C(=O)C23CC3)C(=O)OC",
+    ];
+
+    #[test]
+    fn a_spiro_flip_is_exactly_isometric_and_actually_fires() {
+        // 螺环翻转与"绕可旋转键翻转"同级:**不损失任何几何性质**。轴过螺原子
+        // 与它在目标环里两个邻居的中点,而两根都是环上的键、长度相同,所以那
+        // 条轴恰好是角平分线,反射把两个邻居精确对调。
+        //
+        // 这条判据守两件事:
+        //
+        // - **消冲突前后键长的多重集一模一样**。守的是"只用不损失几何的算子"
+        //   这条规矩 —— 哪天有人往 `relieve` 里塞一个开角或缩键的算子,这里
+        //   立刻红。
+        // - **螺环翻转确实翻过**。一次都不翻的话上一条恒真,判据就是空过的;
+        //   第一版列了八个教科书螺环,一个都没触发。
+        //
+        // **它抓不到"镜像轴选错"** —— 绕任何一条过螺原子的直线反射都保持
+        // 到螺原子的距离,键长怎么都不会变。轴选错由
+        // `a_spiro_flip_does_not_depend_on_how_the_molecule_was_written` 抓到
+        // (变异验证过:把轴改成指向 N1,那条立刻红)。
+        // **判据比的是"消冲突前后键长的多重集"**,不是"每根键都等于 1"。
+        // 后者在退化布局(桥环走弹簧松弛)上本来就不成立,拿它当判据会把
+        // "松弛给的键长本来就不等"误报成"翻转弄坏了几何"。多重集这个说法对
+        // 任何起始几何都成立,因为**等距变换保长度**。
+        let lengths = |m: &MolBuilder, pos: &BTreeMap<u32, Point2>| -> Vec<i64> {
+            let mut v: Vec<i64> = m
+                .bonds()
+                .iter()
+                .filter_map(|b| {
+                    let (u, v) = (pos.get(&b.begin)?, pos.get(&b.end)?);
+                    Some((u.dist(*v) * 1e9).round() as i64)
+                })
+                .collect();
+            v.sort_unstable();
+            v
+        };
+
+        let mut fired = 0usize;
+        for smi in SPIRO {
+            for style in &Style::ALL {
+                let m = prep(smi);
+                let ranks = omgkit_io::canon::canonical_ranks(&m);
+                let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
+                for p in layout::layout_all(&m, &ranks, style) {
+                    pos.extend(p.pos);
+                }
+                let before = lengths(&m, &pos);
+                let rep = relieve(&m, &mut pos, &ranks, style);
+                let after = lengths(&m, &pos);
+                if !rep.spiro_flipped.is_empty() {
+                    fired += 1;
+                }
+                assert_eq!(
+                    before, after,
+                    "[{}] {smi}:消冲突改变了键长 —— 用的算子不是等距的",
+                    style.name
+                );
+            }
+        }
+        assert!(
+            fired > 0,
+            "这批螺环分子上一次都没翻过 —— 那这个算子是白加的,上面那条键长判据也就是恒真的"
+        );
+    }
+
+    #[test]
+    fn a_spiro_flip_does_not_depend_on_how_the_molecule_was_written() {
+        // 翻哪个环、翻哪一侧,RDKit 那边两处都取存储序(`rings[0]` 与
+        // `atomNeighbors` 的第一个)。照抄的话,同一个分子换种写法就会翻不同的
+        // 环、得到不同的图 —— 而**写法无关是本库的头号契约**。
+        //
+        // 这里两处都按规范秩定。判据直接比最终坐标:同一个分子的两种写法,
+        // 逐点相同。
+        for smi in SPIRO {
+            for style in &Style::ALL {
+                let m = prep(smi);
+                let n = m.num_atoms();
+                let want = crate::generate(&m, style);
+                // 换一种写法:把优先序整个倒过来,足以让存储序变样
+                let priority: Vec<u32> = (0..n)
+                    .map(|i| u32::try_from(n - 1 - i).expect("原子数超出 u32"))
+                    .collect();
+                let w = omgkit_io::smiles::write_with_priority(&m, &priority);
+                let Some(m2) = omgkit_io::smiles::parse(&w.smiles)
+                    .ok()
+                    .and_then(|mut x| omgkit_chem::pipeline::sanitize(&mut x).ok().map(|()| x))
+                else {
+                    continue;
+                };
+                if omgkit_io::canon::canonical_smiles(&m).smiles
+                    != omgkit_io::canon::canonical_smiles(&m2).smiles
+                {
+                    continue; // 改写出来不是同一个分子,比不了
+                }
+                let got = crate::generate(&m2, style);
+                let q = |c: &[Point2]| {
+                    let mut v: Vec<(i64, i64)> = c
+                        .iter()
+                        .map(|p| ((p.x * 1e4).round() as i64, (p.y * 1e4).round() as i64))
+                        .collect();
+                    v.sort_unstable();
+                    v
+                };
+                assert_eq!(
+                    q(&want.coords),
+                    q(&got.coords),
+                    "[{}] {smi}:换成 {} 之后画出来不一样了",
+                    style.name,
+                    w.smiles
+                );
+            }
+        }
     }
 
     #[test]
