@@ -246,6 +246,42 @@ silently changes. All `HashMap`/`HashSet` in `omgkit-depict` are now
 **A unit test cannot catch this** — within one process the seed is fixed. It
 takes running the audit twice.
 
+### A bond that stops too far from its label
+
+Bond lines stop short of an atom label so they do not run through the letters.
+They used to stop at the label box's **circumscribed circle**. A circle
+contains the box, so a line can never touch the text — at the cost of stopping
+far too early **in whichever direction the box is narrow**. Approaching a wide
+label vertically wastes exactly `hypot(w,h) − h`. Over 129330 labelled bond
+ends in the corpus:
+
+| | |
+|---|---:|
+| average over-trim | **0.075 bond lengths** |
+| over-trimmed by more than 0.1 | 28259 (**21.9%**) |
+| worst | **0.39 bond lengths** — `[NH2+]`, nearly 40% of a bond of white space |
+
+It now intersects the axis-aligned box along the bond direction (the label is
+set `text-anchor="middle"`, so the box is centred on the atom). Bonds whose two
+labels together exceed the bond length dropped from **2.77% to 1.26%** of
+283604 bonds.
+
+**Two judges are needed here; either one alone can be fooled:**
+
+| Judge | Guards | How it is fooled alone |
+|---|---|---|
+| `a_bond_stops_at_the_label_box_not_at_its_circumscribed_circle` | tight enough | make `trim` cut nothing — it looks better, and the letters get struck through |
+| `no_drawn_line_runs_across_an_atom_label` | far enough | go back to the circumscribed circle — still green |
+
+Mutation-verified and orthogonal: the circle only reddens the first; cutting
+nothing reddens both.
+
+The remaining 1.26% genuinely do not fit — an ACS label is 0.69 bond lengths,
+and `O⁻—N⁺` needs 1.375 of clearance. A flip cannot help (the bond length is
+fixed), so it is not a violation; it is counted separately as **1818 pictures
+(10.3%) with a label that does not fit on its bond**. Reducing it further needs
+per-glyph boxes, the way RDKit's `StringRect` does it.
+
 ### Two atoms on one point invent a ring that is not there
 
 When two atoms land on the same point their bonds meet end to end, and the

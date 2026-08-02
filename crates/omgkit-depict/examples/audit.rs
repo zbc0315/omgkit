@@ -145,6 +145,15 @@ fn main() {
                     })
                     .or_default() += 1usize;
             }
+            // **两端标签加起来比一个键还长的键**,单独记一档。
+            //
+            // 它不是"画错了",是 ACS 规范下标签本来就占 0.69 个键长 —— `O⁻—N⁺`
+            // 两端要 1.375 个键长的净空,一个键长塞不下,`trim` 只能压缩兜底,
+            // 于是线端点落进字里。翻转动不了它(键长是定死的),所以不进违例列;
+            // 但也不能不报 —— 那正是"画不好要说出来"该覆盖的东西。
+            if squeezed_bonds(&m, &d, style) > 0 {
+                *quality.entry("—— 有标签在键上塞不下").or_default() += 1usize;
+            }
             *quality
                 .entry(if !d.degraded.is_empty() {
                     "退化(桥环等)"
@@ -214,6 +223,48 @@ fn prep(smi: &str) -> Option<MolBuilder> {
     omgkit_chem::pipeline::sanitize(&mut m).ok()?;
     omgkit_io::stereo::perceive_bond_stereo(&mut m);
     Some(m)
+}
+
+/// 两端标签加起来比这根键还长的键有几根。
+///
+/// 口径与 `render::trim` 的压缩兜底一致:沿键的方向量到标签盒边,加上 margin,
+/// 两端之和超过键长的九成就算塞不下。
+fn squeezed_bonds(m: &MolBuilder, d: &omgkit_depict::Depiction, style: &Style) -> usize {
+    use omgkit_depict::label::{label_for, Label};
+    use omgkit_depict::render::h_side;
+
+    let labels: Vec<Option<Label>> = (0..u32::try_from(m.num_atoms()).expect("原子数超出 u32"))
+        .map(|a| label_for(m, a, style, h_side(m, a, &d.coords)))
+        .collect();
+    m.bonds()
+        .iter()
+        .filter(|b| {
+            let (pa, pb) = (d.coords[b.begin as usize], d.coords[b.end as usize]);
+            let len = pa.dist(pb);
+            if len < 1e-9 {
+                return false;
+            }
+            let dir = (pb - pa) * (1.0 / len);
+            let need = |l: &Option<Label>| {
+                l.as_ref().map_or(0.0, |l| {
+                    // 居中的轴对齐盒,沿 dir 到盒边
+                    let (ax, ay) = (dir.x.abs(), dir.y.abs());
+                    let tx = if ax > 1e-12 {
+                        l.half_w / ax
+                    } else {
+                        f64::INFINITY
+                    };
+                    let ty = if ay > 1e-12 {
+                        l.half_h / ay
+                    } else {
+                        f64::INFINITY
+                    };
+                    tx.min(ty) + style.margin()
+                })
+            };
+            need(&labels[b.begin as usize]) + need(&labels[b.end as usize]) >= len * 0.9
+        })
+        .count()
 }
 
 /// 形状指纹:两两距离排序后的多重集。与原子编号、平移、旋转、镜像都无关。
