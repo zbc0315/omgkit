@@ -18,7 +18,7 @@
 //! [`Style::margin_width_pt`] 定 —— 这是规范的一部分。
 
 use omgkit_chem::sssr::Ring;
-use omgkit_core::{BondOrder, MolBuilder};
+use omgkit_core::{BondFlags, BondOrder, MolBuilder};
 
 use crate::geom::Point2;
 use crate::label::{label_for, HSide, Label, Run};
@@ -546,7 +546,7 @@ fn trim(
 /// | 键 | 第二条线 |
 /// |---|---|
 /// | 只属于一个环 | 偏向**环内**(射线法判,不是"和环心同侧") |
-/// | 稠合处的共用键 | 进双键最多的那个环(通常就是芳环),不跨骑 |
+/// | 稠合处的共用键 | 进**芳香**的那个环;都芳香或都不芳香时取双键最多的。不跨骑 |
 /// | 链上、一端是端点 | 对称:醛、端烯、累积双键的通例 |
 /// | 链上、两端都有取代基 | 偏向取代基多的一侧(顺式那一侧) |
 ///
@@ -586,7 +586,7 @@ fn offset_dir(
         // 是外侧。实测语料里 45 处两者判反。
         let (plus, minus) = (mid + normal * probe, mid - normal * probe);
         // 每个能收下这条线的环记一档,挑一个最该进的
-        let mut cands: Vec<(usize, usize, i64, i64, f64)> = Vec::new();
+        let mut cands: Vec<(usize, usize, usize, i64, i64, f64)> = Vec::new();
         for r in &mine {
             let poly: Vec<Point2> = r.atoms.iter().map(|a| pts[*a as usize]).collect();
             let side = match (
@@ -607,19 +607,28 @@ fn offset_dir(
                 .iter()
                 .filter(|b| orders[**b as usize] == BondOrder::Double)
                 .count();
+            // **芳香的环排在最前。** "双键最多"只是芳香性的代理:kekulé 化之后
+            // 芳环的交替双键通常就是最多的那个,所以两条规则几乎总是一致 ——
+            // 全量语料 1092 根稠合处的共用双键里只有 3 根分歧。但代理会在
+            // "非芳环的双键比隔壁芳环还多"时给出错的答案,而芳香标记是直接的。
+            let aromatic = r
+                .bonds
+                .iter()
+                .all(|x| mol.bonds()[*x as usize].flags.contains(BondFlags::AROMATIC));
             let c = poly.iter().fold(Point2::ORIGIN, |s, p| s + *p) * (1.0 / poly.len() as f64);
             #[allow(clippy::cast_possible_truncation)]
             cands.push((
-                usize::MAX - doubles,       // 双键多的排前
+                usize::from(!aromatic),     // 芳环排前
+                usize::MAX - doubles,       // 再看双键多的
                 r.atoms.len(),              // 并列取小环
                 (c.x * 1e6).round() as i64, // 再并列按形心定序 —— 坐标与写法无关
                 (c.y * 1e6).round() as i64,
                 side,
             ));
         }
-        cands.sort_by_key(|a| (a.0, a.1, a.2, a.3));
+        cands.sort_by_key(|a| (a.0, a.1, a.2, a.3, a.4));
         if let Some(best) = cands.first() {
-            return normal * best.4;
+            return normal * best.5;
         }
         // 一个环都收不下(自交的退化环)—— 不猜,交给下面的通用规则
     }
@@ -999,6 +1008,87 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn a_fused_double_bond_goes_into_the_aromatic_ring() {
+        // 稠合处共用的双键,第二条线该画进**芳香**的那个环 —— 那一圈的交替
+        // 单双键要靠它接上。
+        //
+        // 先前的规则是"双键最多的那个环"。它是芳香性的**代理**:kekulé 化之后
+        // 芳环的交替双键通常就是最多的,所以两条规则几乎总是一致 —— 全量语料
+        // 1092 根稠合处的共用双键里只有 **3** 根分歧。代理会在"非芳环的双键比
+        // 隔壁芳环还多"时给出错的答案。
+        //
+        // 下面这三个就是量出来的那三根。判据不是我挑的分子,是扫出来的。
+        for smi in [
+            "[H]/N=c/1\\[nH]c-2c(s1)CSc3c2cccc3",
+            "c1cc2ccc3c(c2nc1)N=C[C@H](C3=O)C(=O)[O-]",
+            "COCc1[nH]c2c(n1)-c3c(nc(o3)N)[C@H]2c4ccc(cc4)Cl",
+        ] {
+            for style in &Style::ALL {
+                let m = prep(smi);
+                let d = generate(&m, style);
+                let s = scene(&m, &d, style);
+                let bnd = bounds(&d.coords, &m, style);
+                let pts: Vec<Point2> = d
+                    .coords
+                    .iter()
+                    .map(|p| to_canvas(*p, bnd, style.bond_length_pt))
+                    .collect();
+                let rings = omgkit_chem::sssr::ring_set(&m);
+                let orders = drawn_orders(&m);
+                let mut checked = 0usize;
+                for (bi, b) in m.bonds().iter().enumerate() {
+                    if orders[bi] != BondOrder::Double {
+                        continue;
+                    }
+                    let bn = u32::try_from(bi).unwrap();
+                    let mine: Vec<&omgkit_chem::sssr::Ring> =
+                        rings.iter().filter(|r| r.bonds.contains(&bn)).collect();
+                    if mine.len() < 2 {
+                        continue;
+                    }
+                    let arom = |r: &omgkit_chem::sssr::Ring| {
+                        r.bonds
+                            .iter()
+                            .all(|x| m.bonds()[*x as usize].flags.contains(BondFlags::AROMATIC))
+                    };
+                    // 只查"一芳一不芳"的共用键 —— 都芳香时这条判据说不出高下
+                    let (aro, non): (
+                        Vec<&&omgkit_chem::sssr::Ring>,
+                        Vec<&&omgkit_chem::sssr::Ring>,
+                    ) = mine.iter().partition(|r| arom(r));
+                    if aro.len() != 1 || non.is_empty() {
+                        continue;
+                    }
+                    let (pa, pb) = (pts[b.begin as usize], pts[b.end as usize]);
+                    let ls = lines_of_bond(&s, pa, pb);
+                    let Some(inner) = ls
+                        .iter()
+                        .find(|(u, v)| u.dist(pa) > 1e-6 || v.dist(pb) > 1e-6)
+                        .copied()
+                    else {
+                        continue;
+                    };
+                    let mid = (inner.0 + inner.1) * 0.5;
+                    let poly: Vec<Point2> = aro[0].atoms.iter().map(|a| pts[*a as usize]).collect();
+                    assert!(
+                        crate::geom::point_in_polygon(mid, &poly),
+                        "[{}] {smi}:键 {}–{} 的第二条线没画进芳环里",
+                        style.name,
+                        b.begin,
+                        b.end
+                    );
+                    checked += 1;
+                }
+                assert!(
+                    checked > 0,
+                    "[{}] {smi}:一根「一芳一不芳」的共用双键都没查到 —— 判据空过了",
+                    style.name
+                );
+            }
+        }
     }
 
     #[test]
