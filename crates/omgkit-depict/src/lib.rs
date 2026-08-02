@@ -51,8 +51,11 @@ pub mod refine;
 pub mod render;
 pub mod rings;
 pub mod stereo;
+
 pub mod style;
 pub mod svg;
+/// 桥环骨架的预存坐标表。见模块文档。
+mod templates;
 
 use std::collections::BTreeMap;
 

@@ -262,6 +262,12 @@ fn centroid(pts: impl Iterator<Item = Point2>) -> Point2 {
 /// 键长拉向 [`BOND_LEN`],非键原子互斥。给不出标准键角,也不保证消得掉重叠 ——
 /// 这正是调用方要把它记进 [`Degradation`] 的原因。
 fn relax(mol: &MolBuilder, atoms: &[u32], ranks: &[u32], rings: &[&Ring]) -> BTreeMap<u32, Point2> {
+    // **先查表。** 松弛是局部下降,5 个初值本身就常常给出自交的解 —— 实测最常见
+    // 的 8 个骨架里 5 个自交,双环[2.2.2]辛烷和金刚烷都在内。表里存的是同一个
+    // `quality` 口径下搜得久得多的结果,见 [`crate::templates`]。
+    if let Some(p) = crate::templates::lookup(mol, atoms, ranks) {
+        return p;
+    }
     // **原子按规范秩排序,不按存储下标。** 初值、乃至浮点求和的次序都因此固定,
     // 于是同一个分子的任何写法得到同一张图。
     //
@@ -733,5 +739,132 @@ mod tests {
             .collect();
         ds.sort_unstable();
         ds
+    }
+}
+
+/// 桥环骨架坐标表的**生成器**。平时不跑。
+///
+/// ```shell
+/// cargo test -p omgkit-depict --release --lib -- --ignored regenerate_templates --nocapture
+/// ```
+///
+/// 把输出贴进 [`crate::templates`]。与 `harness/gen_elements.py` 生成
+/// `element_data.rs` 是同一个路子:**生成脚本进版本库,产物也进版本库**,
+/// 谁都能重跑一遍核对。
+#[cfg(test)]
+mod generator {
+    use super::*;
+    use crate::geom::Point2;
+
+    const TOP: usize = 24;
+    const TRIES: usize = 20_000;
+
+    fn splitmix(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_templates() {
+        // 一、扫语料,按出现次数排出最常见的桥环骨架
+        let text = std::fs::read_to_string("../../harness/corpus/large.smi").unwrap();
+        let mut freq: BTreeMap<String, usize> = BTreeMap::new();
+        for line in text.lines() {
+            let smi = line.split_whitespace().next().unwrap_or("");
+            if smi.is_empty() {
+                continue;
+            }
+            let Ok(mut m) = omgkit_io::smiles::parse(smi) else {
+                continue;
+            };
+            if omgkit_chem::pipeline::sanitize(&mut m).is_err() {
+                continue;
+            }
+            if m.num_atoms() < 2 {
+                continue;
+            }
+            let ranks = omgkit_io::canon::canonical_ranks(&m);
+            let rs = omgkit_chem::sssr::ring_set(&m);
+            for sys in group(&omgkit_chem::rings::fused_ring_systems(&m), &rs) {
+                let (_, deg) = layout_local(&m, &sys, &ranks);
+                if deg.is_none() {
+                    continue;
+                }
+                if let Some(k) = crate::templates::skeleton_of(&m, &sys.atoms, &ranks) {
+                    *freq.entry(k).or_default() += 1;
+                }
+            }
+        }
+        let mut v: Vec<(String, usize)> = freq.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+        // 二、对每个骨架跑带扰动的多起点,按现成的 Quality 挑最好的
+        println!("// 本表由 rings.rs 的 `regenerate_templates` 生成,勿手改。");
+        println!("pub(crate) const TABLE: &[(&str, &[(f64, f64)])] = &[");
+        let mut kept = 0usize;
+        for (skel, n) in v.iter().take(TOP) {
+            let Ok(mut m) = omgkit_io::smiles::parse(skel) else {
+                continue;
+            };
+            if omgkit_chem::pipeline::sanitize(&mut m).is_err() {
+                continue;
+            }
+            let ranks = omgkit_io::canon::canonical_ranks(&m);
+            let atoms: Vec<u32> = (0..u32::try_from(m.num_atoms()).unwrap()).collect();
+            let mut sorted = atoms.clone();
+            sorted.sort_by_key(|a| (ranks[*a as usize], *a));
+            let cnt = sorted.len();
+            let idx: BTreeMap<u32, usize> =
+                sorted.iter().enumerate().map(|(i, a)| (*a, i)).collect();
+            let bonded: Vec<(usize, usize)> = m
+                .bonds()
+                .iter()
+                .filter_map(|b| Some((*idx.get(&b.begin)?, *idx.get(&b.end)?)))
+                .collect();
+
+            let rs = omgkit_chem::sssr::ring_set(&m);
+            let sys = group(&omgkit_chem::rings::fused_ring_systems(&m), &rs);
+            let Some(s) = sys.iter().max_by_key(|s| s.atoms.len()) else {
+                continue;
+            };
+            let base = relax(&m, &s.atoms, &ranks, &s.rings);
+            let mut best = (quality(&m, &base, &ranks), base);
+
+            let mut st = 0x51ED_270B_D5AB_C0DEu64 ^ (cnt as u64);
+            let r = BOND_LEN * cnt as f64 / std::f64::consts::TAU;
+            for _ in 0..TRIES {
+                let mut p = vec![Point2::ORIGIN; cnt];
+                for (i, q) in p.iter_mut().enumerate() {
+                    let j = (splitmix(&mut st) % 1000) as f64 / 1000.0 - 0.5;
+                    let t = std::f64::consts::TAU * (i as f64 + j * 3.0) / cnt as f64;
+                    let rad = r * (1.0 + ((splitmix(&mut st) % 1000) as f64 / 1000.0 - 0.5) * 0.6);
+                    *q = Point2::new(rad, 0.0).rotated(t);
+                }
+                let out = settle(p, cnt, &bonded, &sorted);
+                let q = quality(&m, &out, &ranks);
+                if q < best.0 {
+                    best = (q, out);
+                }
+            }
+            // 按**骨架自己的规范秩**存坐标,查表时才对得上
+            let mut by_rank: Vec<(u32, Point2)> = best
+                .1
+                .iter()
+                .map(|(a, p)| (ranks[*a as usize], *p))
+                .collect();
+            by_rank.sort_by_key(|x| x.0);
+            print!("    (\"{skel}\", &[");
+            for (_, p) in &by_rank {
+                print!("({:.6}, {:.6}), ", p.x, p.y);
+            }
+            println!("]),   // 出现 {n} 次,自交 {}", best.0 .0);
+            kept += 1;
+        }
+        println!("];");
+        println!("// 共 {kept} 条");
     }
 }
