@@ -9,17 +9,23 @@
 //! |---|---|---|
 //! | **翻转**(可旋转键的一侧整体镜像) | 键长、键角**一点不变** | 实现 |
 //! | **螺环翻转**(绕螺原子把一个环整体镜像) | 同上 | 实现 |
+//! | **度 4 置换**(把两个分支对调) | 同上 | 实现 |
 //! | 开角 | 键角偏离理想值 | 未做 |
 //! | 伸缩键长 | 键长不再全等 | 未做 |
 //!
-//! 只做前两个是有意的:它们都是**不损失任何几何性质**的等距变换,而后两个一旦
-//! 用上,"键长全等""键角标准"这两条判据就守不住了。解决不了的情形如实报出来
-//! ([`Report::unresolved`]),不靠拉扯几何把数字做好看。
+//! 只做前三个是有意的:它们都是**不损失任何几何性质**的等距变换(轴过某个不动的
+//! 原子,反射保持到它的距离),而后两个一旦用上,"键长全等""键角标准"这两条
+//! 判据就守不住了。解决不了的情形如实报出来([`Report::unresolved`]),不靠
+//! 拉扯几何把数字做好看。
 //!
-//! 螺环翻转补的是一个**能力空洞**:可翻转的键排除环上的键(翻了会把环撕开),
-//! 而螺原子两侧全是环上的键 —— 螺环两侧的相对朝向先前根本动不了。收益要如实说:
-//! 全量语料上它让 **6** 张图从"有未解冲突"变干净(干净率 91.4% → 91.5%),
-//! 键交叉一处没消。做它是因为它便宜且不碰契约,不是因为它大。
+//! 后两个各补一个**能力空洞**,收益都要如实说(全量语料 17662 个分子×规范):
+//!
+//! | 算子 | 补的空洞 | 转干净 | 键交叉 |
+//! |---|---|---:|---:|
+//! | 螺环翻转 | 可翻转的键排除环上的键,螺环两侧的相对朝向动不了 | **+6** | 0 |
+//! | 度 4 置换 | 垂直于翻转轴的那一对邻居,怎么翻都换不过来 | **+25** | −2 |
+//!
+//! 干净率 91.4% → **91.6%**。做它们是因为便宜且不碰契约,不是因为它们大。
 //!
 //! # 碰撞半径来自标签,而标签尺寸来自规范
 //!
@@ -49,6 +55,8 @@ pub struct Report {
     pub flipped: Vec<u32>,
     /// **翻转过的螺原子**。绕螺原子把一个环整体镜像过去,见 `SpiroFlip`。
     pub spiro_flipped: Vec<u32>,
+    /// **做过分支对调的度 4 原子**,见 `PairSwap`。
+    pub swapped: Vec<u32>,
     /// **仍然撞着的原子对**。翻转解决不了的情形如实留在这里,不假装消掉了。
     pub unresolved: Vec<(u32, u32)>,
     /// 仍然交叉的键对
@@ -79,8 +87,9 @@ pub(crate) fn relieve(
         (x.min(y), x.max(y), b)
     });
 
-    // 螺环翻转的候选。**枚举一次就够** —— 它只依赖拓扑,不依赖坐标。
+    // 螺环翻转与度 4 置换的候选。**枚举一次就够** —— 只依赖拓扑,不依赖坐标。
     let spiros = spiro_flips(mol, pos, ranks);
+    let swaps = pair_swaps(mol, pos, ranks);
 
     // 立体守卫抽出来:两个算子用同一套判定,免得改了一处漏了另一处
     let keeps_stereo = |pos: &BTreeMap<u32, Point2>| {
@@ -92,7 +101,7 @@ pub(crate) fn relieve(
     };
 
     // 上限防止在数值抖动上来回翻。每轮至多改善一次,轮数够覆盖所有键即可。
-    let max_rounds = (cands.len() + spiros.len()).max(1) * 2;
+    let max_rounds = (cands.len() + spiros.len() + swaps.len()).max(1) * 2;
     for _ in 0..max_rounds {
         let mut improved = false;
         for &b in &cands {
@@ -164,6 +173,46 @@ pub(crate) fn relieve(
             if keeps_stereo(pos) && better(now, best) {
                 best = now;
                 report.spiro_flipped.push(sf.centre);
+                improved = true;
+            } else {
+                for (a, p) in saved {
+                    pos.insert(a, p);
+                }
+            }
+        }
+
+        // 度 4 置换。排最后:它最贵(每个结点六对),而前两个算子能消的先消掉。
+        for sw in &swaps {
+            let (Some(c), Some(pa), Some(pb)) = (
+                pos.get(&sw.centre).copied(),
+                pos.get(&sw.ends.0).copied(),
+                pos.get(&sw.ends.1).copied(),
+            ) else {
+                continue;
+            };
+            let axis = (pa + pb) * 0.5 - c;
+            if axis.norm() < 1e-9 {
+                continue; // 两个邻居正对着,轴退化
+            }
+            // 两根键一样长,反射才真的是"把 A 与 B 对调" —— 与螺环那条同一个道理
+            if (c.dist(pa) - c.dist(pb)).abs() > 1e-9 {
+                continue;
+            }
+            let saved: Vec<(u32, Point2)> = sw
+                .sides
+                .0
+                .iter()
+                .chain(sw.sides.1.iter())
+                .map(|a| (*a, pos[a]))
+                .collect();
+            for a in sw.sides.0.iter().chain(sw.sides.1.iter()) {
+                let p = pos[a].mirrored(c, axis);
+                pos.insert(*a, p);
+            }
+            let now = score(mol, pos, &radii);
+            if keeps_stereo(pos) && better(now, best) {
+                best = now;
+                report.swapped.push(sw.centre);
                 improved = true;
             } else {
                 for (a, p) in saved {
@@ -430,6 +479,98 @@ fn one_side(
     Some(seen.into_iter().collect())
 }
 
+/// 一次度 4 置换:把中心原子的两个分支对调。
+///
+/// # 为什么它是翻转够不着的
+///
+/// 绕键 `C–D` 翻转,镜像的是远侧那一整块,轴是 `C–D` 这条线 —— 它对调的是
+/// **关于这条轴对称的那一对**邻居。垂直于轴的那一对怎么翻都换不过来。
+/// RDKit 的注释把这一点说得很明白,并且据此只把这个算子用在度 4 的结点上:
+/// 度 3 时绕第三根键翻转正好就能对调另外两根,用不着单独的算子。
+///
+/// # 它同样不损失几何
+///
+/// 轴过中心 `C`,反射保持每个点到 `C` 的距离,所以四根键的长度都不变;
+/// 被反射的两块内部是等距变换,块与块之间也是同一个反射 —— 距离全保。
+/// `|CA| = |CB|` 时轴恰好是 ∠ACB 的角平分线,`A` 与 `B` 精确对调,
+/// `C` 处的键角多重集也保持,这才是"置换"该有的样子。
+///
+/// # 判据不照抄 RDKit
+///
+/// `findBondsPairsToPermuteDeg4` 用 `fabs(dp) < 1e-3` 判两根键是否垂直,
+/// **硬假设度 4 结点画成 90° 十字**。omgkit 的 `chains::allocate` 在已占方向
+/// ≥2 时是劈最大空隙,`free_direction` 还会按 ±30° 躲让 —— 十字没有保证。
+/// 照抄那个点积判据会静默掉进 `else` 分支,返回的恰好是**本来就能被翻转达到**
+/// 的那一对,算子等于白做。
+///
+/// 这里改成**六对全枚举**,让 [`better`] 自己判优:冗余的那几对至多是空转,
+/// 不会给出错的结果。
+struct PairSwap {
+    /// 中心原子
+    centre: u32,
+    /// 要对调的两个邻居
+    ends: (u32, u32),
+    /// 两个分支各自的原子
+    sides: (Vec<u32>, Vec<u32>),
+}
+
+/// 枚举所有可做的度 4 置换,**按规范秩定序**。
+fn pair_swaps(mol: &MolBuilder, pos: &BTreeMap<u32, Point2>, ranks: &[u32]) -> Vec<PairSwap> {
+    let mut out: Vec<(Vec<u32>, PairSwap)> = Vec::new();
+    for c in 0..u32::try_from(mol.num_atoms()).expect("原子数超出 u32") {
+        if mol.degree(c) != 4 || !pos.contains_key(&c) {
+            continue;
+        }
+        // 中心原子完全不在环上 —— 与 RDKit 的守卫同一条,但它在这里只是个**便宜
+        // 的前置过滤**,不是安全底线。真正兜底的是下面那句"两块必须不相交":
+        // 去掉这一句,判据 `a_deg4_swap_never_tears_the_structure_apart` 照样绿,
+        // 因为重叠的那些对会被显式查出来跳掉。
+        //
+        // 留着它是因为便宜(一次遍历换掉一堆无用的 `one_side` 搜索),而不是
+        // 因为少了它会出错 —— 这一点变异验证说得很清楚。
+        if mol
+            .neighbors(c)
+            .any(|(_, bi)| mol.bonds()[bi as usize].flags.contains(BondFlags::IN_RING))
+        {
+            continue;
+        }
+        let mut nbrs: Vec<u32> = mol.neighbors(c).map(|(x, _)| x).collect();
+        nbrs.sort_by_key(|x| (ranks[*x as usize], *x));
+        nbrs.dedup();
+        if nbrs.len() != 4 {
+            continue;
+        }
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                let (a, b) = (nbrs[i], nbrs[j]);
+                let (Some(sa), Some(sb)) = (one_side(mol, pos, a, c), one_side(mol, pos, b, c))
+                else {
+                    continue;
+                };
+                // 两块必须**不相交**,而且都不含中心
+                let set_a: BTreeSet<u32> = sa.iter().copied().collect();
+                if sa.contains(&c) || sb.contains(&c) || sb.iter().any(|x| set_a.contains(x)) {
+                    continue;
+                }
+                out.push((
+                    vec![
+                        ranks[c as usize],
+                        ranks[a as usize].min(ranks[b as usize]),
+                        ranks[a as usize].max(ranks[b as usize]),
+                    ],
+                    PairSwap {
+                        centre: c,
+                        ends: (a, b),
+                        sides: (sa, sb),
+                    },
+                ));
+            }
+        }
+    }
+    out.sort_by(|x, y| x.0.cmp(&y.0));
+    out.into_iter().map(|x| x.1).collect()
+}
+
 /// 可翻转的键:不在环里,且两端度数都大于 1。
 ///
 /// 环上的键翻不动(翻了会把环撕开);端点键翻了等于什么都没做 —— 那一侧只有
@@ -566,6 +707,104 @@ mod tests {
         "C1CC2(CC1)CCCC2",
         "C[C@@]12C(=C[C@@H](O1)C(=O)C23CC3)C(=O)OC",
     ];
+
+    /// 度 4 置换会触发的分子。**从全量语料扫出来的**,不是挑的。
+    const SWAP: [&str; 6] = [
+        "[O-][N+](=O)O[Cu](O[N+]([O-])=O)([N+]1=C2C=CC=CC2=CC=C1)[N+]3=C4C=CC=CC4=CC=C3",
+        "[O-]S([O-])(=O)=O.C1CN[Cr+3]23(N1)(NCCN2)NCCN3",
+        "BrC1=CC=C(NC(=N)NC(=N)NC2=CC=C(C=C2)S(=O)(=O)NC3=CN=CC=N3)C=C1",
+        "C([C@@H]1[C@H]([C@@H]([C@@H]([C@@H]([NH2+]1)S(=O)(=O)[O-])O)O)O)O",
+        "C[C](O)([CH](C(O)=O)C1=CC=CC=C1)C2=CC=CC=C2",
+        "C[C]1(CS(O)(=O)=O)[CH]2CC[C]1(C)C(=O)[CH]2Br",
+    ];
+
+    #[test]
+    fn a_deg4_swap_is_exactly_isometric_and_actually_fires() {
+        // 度 4 置换与前两个算子同级:轴过中心原子,反射保持每个点到中心的距离,
+        // 四根键的长度都不变;被反射的两块内部是等距变换,块与块之间是同一个
+        // 反射 —— 距离全保。
+        //
+        // 与螺环那条同样的分工:这里守"整个消冲突不改键长的多重集"与"它确实
+        // 触发过",守不到"轴选错"(绕任何一条过中心的直线反射都保键长)。
+        let lengths = |m: &MolBuilder, pos: &BTreeMap<u32, Point2>| -> Vec<i64> {
+            let mut v: Vec<i64> = m
+                .bonds()
+                .iter()
+                .filter_map(|b| {
+                    let (u, v) = (pos.get(&b.begin)?, pos.get(&b.end)?);
+                    Some((u.dist(*v) * 1e9).round() as i64)
+                })
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        let mut fired = 0usize;
+        for smi in SWAP {
+            for style in &Style::ALL {
+                let m = prep(smi);
+                let ranks = omgkit_io::canon::canonical_ranks(&m);
+                let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
+                for p in layout::layout_all(&m, &ranks, style) {
+                    pos.extend(p.pos);
+                }
+                let before = lengths(&m, &pos);
+                let rep = relieve(&m, &mut pos, &ranks, style);
+                let after = lengths(&m, &pos);
+                if !rep.swapped.is_empty() {
+                    fired += 1;
+                }
+                assert_eq!(
+                    before, after,
+                    "[{}] {smi}:消冲突改变了键长 —— 用的算子不是等距的",
+                    style.name
+                );
+            }
+        }
+        assert!(
+            fired > 0,
+            "这批分子上度 4 置换一次都没触发 —— 那它是白加的,上面那条键长判据也是恒真的"
+        );
+    }
+
+    #[test]
+    fn a_deg4_swap_never_tears_the_structure_apart() {
+        // **两个分支必须不相交。** 中心原子只要沾上环,从某个邻居出发的搜索就会
+        // 顺着环绕回来,把另一个分支整个吞进去 —— 两块重叠,交集里的原子被反射
+        // 两次(等于没动),结构当场撕开,而键长判据未必看得出来。
+        //
+        // RDKit 的守卫是"度 4 且完全不在环上",这里守的是同一件事,但直接查
+        // 枚举出来的两块**确实不相交**,而不是相信那个代理条件。
+        for smi in SWAP
+            .iter()
+            .chain(["C1CC2(CC1)CCCC2", "CC(C)(C)C(C)(C)C", "C1CCC2(CC1)CCCCC2"].iter())
+        {
+            for style in &Style::ALL {
+                let m = prep(smi);
+                let ranks = omgkit_io::canon::canonical_ranks(&m);
+                let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
+                for p in layout::layout_all(&m, &ranks, style) {
+                    pos.extend(p.pos);
+                }
+                for sw in pair_swaps(&m, &pos, &ranks) {
+                    let a: BTreeSet<u32> = sw.sides.0.iter().copied().collect();
+                    let b: BTreeSet<u32> = sw.sides.1.iter().copied().collect();
+                    let both: Vec<u32> = a.intersection(&b).copied().collect();
+                    assert!(
+                        both.is_empty(),
+                        "[{}] {smi}:中心 {} 的两个分支重叠在 {both:?} 上",
+                        style.name,
+                        sw.centre
+                    );
+                    assert!(
+                        !a.contains(&sw.centre) && !b.contains(&sw.centre),
+                        "[{}] {smi}:分支里含了中心原子 {}",
+                        style.name,
+                        sw.centre
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_spiro_flip_is_exactly_isometric_and_actually_fires() {
