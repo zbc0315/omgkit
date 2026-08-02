@@ -178,6 +178,60 @@ violations out of 17662 while doing nearly nothing. With the canonical writer
 it reports 132. The audit now counts how many comparisons actually happened and
 fails loudly if the answer is zero.
 
+### …and then a second time: the shuffler was the identity one time in nine
+
+Writing-independence is checked by **rewriting the SMILES and drawing it
+again**. The rewrite worked by handing the writer a priority order, and that
+order was built from a multiplicative hash:
+
+```rust
+(0..n).map(|i| (i * 2_654_435_761 * k) % (n * 7 + 13))
+```
+
+**For many `n` that is not a permutation at all.** Atoms collide onto the same
+priority, the sort degenerates to the identity, and the "rewritten" SMILES is
+character-for-character the original. Measured over the whole corpus:
+
+| | |
+|---|---:|
+| rewrite identical to the original | **2874 / 26493 = 10.85%** |
+| fixed points in the priority order | 18.28% (a uniform permutation gives ~1/n) |
+
+Benzene came out as `c1ccccc1` all three times; ethanol as `CCO`. **The crate's
+headline contract was being verified by a shuffler that did nothing one time in
+nine.**
+
+It is now splitmix64 + Fisher–Yates, retried up to 8 seeds until the canonical
+labelling actually changes — if `canonical_ranks` comes back identical, the
+storage order never moved and the comparison would be free.
+
+| | old hash | real permutation |
+|---|---:|---:|
+| real violations found | 137 | **257** |
+| cases never compared at all | **1156 (6.5%)** | **2** |
+
+**More than half the violations were invisible.**
+
+This also exposed a reporting defect in the judge itself: "could not check" was
+being counted in the violations column. Swapping in a *worse* shuffler
+therefore pushed the violation count from 259 up to 1293 — and all 1156 of the
+increase were cases it had failed to check. **A bigger number looked like more
+diligence and meant the opposite.** It now reports three separate rows: cases
+checked, cases that got the full five comparisons, and cases never checked.
+
+The shuffler has its own guard (`check_the_shuffler`, run at the top of `main`
+rather than under `#[cfg(test)]`, because `cargo test` does not run an
+example's tests). Mutation-verified: putting the multiplicative hash back
+panics immediately with `n=2 seed=0: that is not a permutation`.
+
+!!! warning "The numbers below predate the fix"
+
+    Every figure in the sections that follow — 129, 125, 134 — was measured
+    with the defective shuffler and reflects only what it could see. They
+    remain valid as **relative** comparisons between successive changes, which
+    is what they were for. They are not the absolute level; see
+    [Current standing](#current-standing).
+
 ### One class of defect no unit test can see
 
 The violation count moved between runs of the **same binary on the same
@@ -284,9 +338,27 @@ collisions 1189 → 1167, crossings 281 → 278, clean 91.3% → **91.4%**.
 
 ### Current standing
 
-Six properties, five at **0 violations**. Writing-independence: **134 / 17662
-(0.8%)**, and those are not a systemic layout instability. Fitting each failing
-pair with its best rigid transform:
+```
+property              checked   violations
+inside the canvas       17662            0
+writing-independent     17660          257
+  … full 5 rewrites     17405            0
+  … never checked           2            0
+no atoms coincident     17662           76
+wedges readable           602            0
+wedges drawn              602            0
+ring double bonds       12731            0
+no pinched angle        16155          287
+bond lengths equal      16155            0
+```
+
+Writing-independence is **257 / 17662 (1.5%)**. That is higher than the 134
+recorded earlier — **not because the pictures got worse, but because replacing
+the shuffler exposed the half that had been invisible** (see above).
+
+The attribution below was done on the old set of 45 pairs. It has **not been
+redone** on the new 257 and is pending recheck. Fitting each failing pair with
+its best rigid transform:
 
 | Lines still differing | Pairs |
 |---|---|

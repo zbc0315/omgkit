@@ -37,10 +37,56 @@ use omgkit_depict::{
     style::Style,
 };
 
-/// 换几种写法比对。取 3 —— 再多也只是重复同一类扰动。
-const WRITINGS: usize = 3;
+/// 换几种写法比对。
+///
+/// **每一种都必须真的换了存储序,否则这条判据是空过的。** 先前用乘法哈希凑
+/// 优先序,实测有 **10.85%** 的改写原样返回(全量语料 2874/26493 次),苯、
+/// 乙醇这类分子三次"改写"产出的 SMILES 字符串**一模一样** —— 本 crate 的头号
+/// 契约就是被这样一个九分之一空过的搅拌器在验的。
+///
+/// 换成货真价实的置换之后每一次都算数,于是可以多试几种。
+const WRITINGS: usize = 5;
+
+/// 每种写法最多试几个种子,去找一个**确实换了存储序**的改写。
+///
+/// 找不到不算失败:苯那样的分子,所有写法产出的字符串本来就相同 —— 那是
+/// 分子太对称,不是判据不给力。这种情形要如实计数,不能悄悄当成通过。
+const SEED_TRIES: usize = 8;
+
+/// 开跑前先验搅拌器本身。
+///
+/// 这条判据守的是**判据的判据**:头号契约靠改写写法来验,改写器要是退化成恒等,
+/// 整条判据就静悄悄地空过了 —— 而审计照样打印一个漂亮的数字。先前那个乘法哈希
+/// 正是这样,10.85% 的改写原样返回。
+///
+/// 放在 `main` 开头而不是 `#[cfg(test)]` 里:`cargo test` 默认不跑 example 的
+/// 测试,写在那儿等于没写。
+fn check_the_shuffler() {
+    for n in [2usize, 3, 5, 8, 13, 30, 100] {
+        let mut identical = 0usize;
+        for seed in 0..64u64 {
+            let p = shuffled(n, seed);
+            let mut sorted = p.clone();
+            sorted.sort_unstable();
+            assert!(
+                sorted.into_iter().eq(0..u32::try_from(n).expect("n 不大")),
+                "n={n} seed={seed}:搅出来的根本不是一个置换"
+            );
+            if p.iter().enumerate().all(|(i, x)| *x as usize == i) {
+                identical += 1;
+            }
+        }
+        // n=2 只有两种置换,恒等占一半是应该的;再大就必须极少见
+        let allowed = if n <= 3 { 40 } else { 2 };
+        assert!(
+            identical <= allowed,
+            "n={n}:64 个种子里有 {identical} 个搅出恒等置换 —— 这样的搅拌器验不了写法无关"
+        );
+    }
+}
 
 fn main() {
+    check_the_shuffler();
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "harness/corpus/large.smi".into());
@@ -224,8 +270,7 @@ fn checks(
     style: &Style,
     clean: bool,
 ) -> Vec<Check> {
-    vec![
-        writing_independent(m, d, s, style, clean),
+    let mut v = vec![
         ring_double_bonds(m, d, s, style, clean),
         wedges_reach_canvas(d, s),
         wedges_read_back(m, d),
@@ -233,7 +278,10 @@ fn checks(
         inside_canvas(s),
         no_atom_sits_on_another(m, d),
         no_angle_is_pinched(m, d, clean),
-    ]
+    ];
+    // 写法无关出三行:判据本身、比满没有、以及有没有查成 —— 见其文档注释
+    v.extend(writing_independent(m, d, s, style, clean));
+    v
 }
 
 /// 键角不许被压到 90° 以下。
@@ -310,34 +358,98 @@ fn no_atom_sits_on_another(m: &MolBuilder, d: &omgkit_depict::Depiction) -> Chec
     ("原子不重合", true, None)
 }
 
+/// 确定性的伪随机置换(splitmix64 + Fisher–Yates)。
+///
+/// **不许拿乘法哈希凑。** `(i * K * k) % M` 那种写法在很多 `n` 上根本不是置换:
+/// 一堆原子挤到同一个优先级,排序退化成恒等,改写出来的 SMILES 与原文一字不差。
+/// 这里给的是货真价实的均匀置换,而且只由 `seed` 决定 —— 与进程、与迭代顺序
+/// 都无关,同一份语料每次运行搅出同一批写法。
+fn shuffled(n: usize, seed: u64) -> Vec<u32> {
+    let mut state = seed;
+    let mut next = move || -> u64 {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    let mut p: Vec<u32> = (0..u32::try_from(n).unwrap_or(u32::MAX)).collect();
+    for i in (1..n).rev() {
+        let j = usize::try_from(next() % (i as u64 + 1)).unwrap_or(0);
+        p.swap(i, j);
+    }
+    p
+}
+
+/// 字符串的确定性哈希(FNV-1a),让不同分子拿到不同的置换。
+///
+/// 不用 `DefaultHasher`:它的种子由标准库决定,跨版本不保证稳定,而这里要的是
+/// **换一台机器、换一个版本都搅出同一批写法**。
+fn seed_of(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// 换写法画出来必须一模一样。
+///
+/// 返回三行,因为**"查出来的缺陷"和"根本没查成"是两回事,不许混进一个数**:
+///
+/// | 行 | 「查到」列的含义 |
+/// |---|---|
+/// | `写法无关` | 至少比成过一次的 case;「违例」列才是真缺陷 |
+/// | `写法无关·比满` | 凑够了 [`WRITINGS`] 次真比较的 case |
+/// | `写法无关·没查成` | **一次都没比成**的 case |
+///
+/// 先前把"没查成"记进违例列,于是换一个更差的搅拌器反而让违例数从 259 涨到
+/// 1293 —— 涨的那 1156 全是查不动的 case。数字越大看着越像在认真查,实际上
+/// 恰恰相反。
 fn writing_independent(
     m: &MolBuilder,
     d0: &omgkit_depict::Depiction,
     s: &Scene,
     style: &Style,
     clean: bool,
-) -> Check {
+) -> [Check; 3] {
     let want = fingerprint(s);
     let n = m.num_atoms();
-    // 真正比过几次、因为"换出来不是同一个分子"跳过了几次 —— 一次都没比过的话
-    // 这一条是空过的,必须看得见
-    let (mut compared, mut skipped) = (0usize, 0usize);
+    let canon = omgkit_io::canon::canonical_smiles(m).smiles;
+    // 原分子的规范标号。改写之后若逐位相同,说明**存储序压根没变**,这一次
+    // 比较是白比的 —— 必须查出来,不能记进 compared。
+    let ranks0 = omgkit_io::canon::canonical_ranks(m);
+    let base = seed_of(&canon);
+
+    // 真正比过几次、因为"换出来不是同一个分子"跳过了几次、以及试遍种子都换不
+    // 出新写法几次。一次都没比过的话这一条是空过的,必须看得见。
+    let (mut compared, mut skipped, mut unshuffled) = (0usize, 0usize, 0usize);
     for k in 1..=WRITINGS {
-        // 用一个与规范秩无关的优先序把写法搅乱。乘法哈希,足够打散又完全确定。
-        let priority: Vec<u32> = (0..n)
-            .map(|i| u32::try_from((i * 2_654_435_761 * k) % (n * 7 + 13)).unwrap_or(0))
-            .collect();
-        let w = omgkit_io::smiles::write_with_priority(m, &priority);
-        let Some(m2) = prep(&w.smiles) else { continue };
+        // 试几个种子,直到搅出一个确实换了存储序的写法
+        let mut found: Option<(String, MolBuilder)> = None;
+        for t in 0..SEED_TRIES {
+            let seed = base
+                .wrapping_add((k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+                .wrapping_add((t as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+            let w = omgkit_io::smiles::write_with_priority(m, &shuffled(n, seed));
+            let Some(m2) = prep(&w.smiles) else { continue };
+            if omgkit_io::canon::canonical_ranks(&m2) == ranks0 {
+                continue; // 存储序没变,换个种子再来
+            }
+            found = Some((w.smiles, m2));
+            break;
+        }
+        let Some((smiles, m2)) = found else {
+            unshuffled += 1;
+            continue;
+        };
         // 换出来的必须还是同一个分子,否则比的是两个东西。
         //
         // **要用规范式比。** `write` 按存储序写,而 m2 的存储序正是被打乱过的
         // 那一套 —— 拿它去比,几乎每个分子都会判成"不是同一个"而跳过,这一条
         // 就静悄悄地什么都没查。
-        if omgkit_io::canon::canonical_smiles(m).smiles
-            != omgkit_io::canon::canonical_smiles(&m2).smiles
-        {
+        if canon != omgkit_io::canon::canonical_smiles(&m2).smiles {
             skipped += 1;
             continue;
         }
@@ -374,30 +486,48 @@ fn writing_independent(
             } else {
                 "坐标相同,键级或落点不同"
             };
-            return (
-                "写法无关",
-                true,
-                Some(format!(
-                    "[{layer}|{}] 写成 {} 之后有 {diff}/{} 处图元不同",
-                    if clean {
-                        "布局干净"
-                    } else {
-                        "布局已退化"
-                    },
-                    w.smiles,
-                    want.len()
-                )),
-            );
+            return [
+                (
+                    "写法无关",
+                    true,
+                    Some(format!(
+                        "[{layer}|{}] 写成 {smiles} 之后有 {diff}/{} 处图元不同",
+                        if clean {
+                            "布局干净"
+                        } else {
+                            "布局已退化"
+                        },
+                        want.len()
+                    )),
+                ),
+                ("写法无关·比满", compared == WRITINGS, None),
+                ("写法无关·没查成", false, None),
+            ];
         }
     }
-    if compared == 0 {
-        return (
+    // **"没查成"单独记一行,不进违例列。** 混进违例列会让"换个更差的搅拌器"
+    // 看着像查得更狠 —— 实测旧哈希的 1293 里有 1156 就是这么来的。
+    //
+    // 但两种"没查成"的分量完全不同,只有后一种是良性的:
+    //
+    // - `skipped`:改写出来**不是同一个分子** —— 那是改写器坏了,要吵。
+    // - `unshuffled`:分子太对称,所有写法产出同一个串(苯就是) —— 判据
+    //   无能为力,如实计数即可。
+    let broke_the_molecule = compared == 0 && skipped > 0;
+    [
+        (
             "写法无关",
-            false,
-            Some(format!("{skipped} 种改写全都不是同一个分子,这条没查成")),
-        );
-    }
-    ("写法无关", true, None)
+            compared > 0,
+            broke_the_molecule.then(|| {
+                format!(
+                    "{skipped} 次改写出来不是同一个分子(另有 {unshuffled} 次换不出新存储序)\
+                     —— 改写器坏了,不是画错了"
+                )
+            }),
+        ),
+        ("写法无关·比满", compared == WRITINGS, None),
+        ("写法无关·没查成", compared == 0, None),
+    ]
 }
 
 /// 环上双键的两条线都要落在某个含它的环里。
