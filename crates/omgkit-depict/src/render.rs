@@ -175,13 +175,12 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
                         to: bb,
                         width: w,
                     });
-                    // 第二条线两端各缩进一点,是画双键的通例:免得与相邻的键撞角
-                    let s = (bb - a) * 0.12;
-                    items.push(Primitive::Line {
-                        from: a + n + s,
-                        to: bb + n - s,
-                        width: w,
-                    });
+                    // 第二条线两端**斜切**到与相邻键接上,见 [`mitre_end`]。
+                    // 相邻键取不到(端基、共线)时退回按固定比例缩进。
+                    let fallback = (bb - a) * 0.12;
+                    let from = mitre_end(mol, bg, en, &pts, n).unwrap_or(a + n + fallback);
+                    let to = mitre_end(mol, en, bg, &pts, n).unwrap_or(bb + n - fallback);
+                    items.push(Primitive::Line { from, to, width: w });
                 }
             }
             BondOrder::Triple => {
@@ -371,6 +370,79 @@ pub fn h_side(mol: &MolBuilder, atom: u32, coords: &[Point2]) -> HSide {
 }
 
 /// 把键的两端各缩短一点,停在标签外。
+/// 双键内侧线在 `e` 这一端该收到哪里:与**相邻键的角平分线**求交。
+///
+/// # 为什么不能按固定比例缩进
+///
+/// 先前两端各缩固定的 12%。那个数只在某一种夹角下恰好对 —— 苯环上正确的
+/// 缩进量是 `s / (2 × 边心距) = 0.18 / (2 × 0.866) = 10.4%`,差 1.6 个百分点,
+/// 内侧线的端点因此偏离顶点角平分线 **0.2 pt**,接头处露白。夹角越偏离
+/// 120°,差得越多。
+///
+/// 做法与 RDKit 的 `DrawMol::doubleBondEnd` 一致:取 `e` 的一个邻居 `t`
+/// (在偏移那一侧),`e` 处的角平分线是 `‖e→t‖ + ‖e→o‖` 的方向,内侧线是过
+/// `e+n`、方向 `e→o` 的直线,两者的交点就是端点。规则多边形上这恰好落在
+/// "环心 → 顶点"那条射线上。
+///
+/// # 挑哪个邻居不能看存储下标
+///
+/// `e` 可能有好几个邻居在偏移那一侧。挑序只要沾上存储下标,同一个分子换种
+/// 写法内侧线就会切在不同的地方 —— 而写法无关是头号契约。这里按**量化后的
+/// 投影值**排,再拿量化坐标兜底平局;坐标此时已经规范化过,与写法无关。
+fn mitre_end(mol: &MolBuilder, e: u32, o: u32, pts: &[Point2], n: Point2) -> Option<Point2> {
+    let pe = pts[e as usize];
+    let po = pts[o as usize];
+    let to_o = (po - pe).normalized();
+    if to_o.norm() < 1e-9 {
+        return None;
+    }
+    // 偏移那一侧的邻居,投影最大的那个
+    #[allow(clippy::cast_possible_truncation)]
+    let t = mol
+        .neighbors(e)
+        .map(|(x, _)| x)
+        .filter(|x| *x != o)
+        .filter_map(|x| {
+            let d = pts[x as usize] - pe;
+            if d.norm() < 1e-9 {
+                return None;
+            }
+            let dir = d.normalized();
+            // 与 n 同侧才算数:异侧的邻居给出的角平分线指向外面
+            if dir.dot(n) <= 0.0 {
+                return None;
+            }
+            let p = pts[x as usize];
+            Some((
+                (dir.dot(n) * 1e9).round() as i64,
+                (p.x * 1e9).round() as i64,
+                (p.y * 1e9).round() as i64,
+                x,
+            ))
+        })
+        .max()?
+        .3;
+
+    let to_t = (pts[t as usize] - pe).normalized();
+    let bis = to_o + to_t;
+    if bis.norm() < 1e-9 {
+        return None; // 共线,角平分线退化
+    }
+    let bis = bis.normalized();
+    // 内侧线:过 pe+n,方向 to_o。求 u 使 pe + u·bis 落在这条线上:
+    //   (u·bis − n) × to_o = 0  ⟹  u = (n × to_o) / (bis × to_o)
+    let denom = bis.cross(to_o);
+    if denom.abs() < 1e-9 {
+        return None;
+    }
+    let u = n.cross(to_o) / denom;
+    // 切过头的话不如不切 —— 内侧线会反向
+    if !u.is_finite() || u <= 0.0 || u > pe.dist(po) {
+        return None;
+    }
+    Some(pe + bis * u)
+}
+
 /// 这个二度原子的两根键是不是几乎连成一条直线。
 ///
 /// # 为什么这种原子必须画出符号
@@ -927,6 +999,63 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn a_ring_double_bond_inner_line_meets_the_neighbouring_bonds() {
+        // 环内双键的第二条线两端要**斜切**到与相邻键接上,而不是按一个拍脑袋的
+        // 定值往里缩。
+        //
+        // 苯环是规则六边形,这件事有闭式解:内侧线平行于环边、向内偏 `s`,它与
+        // 两端顶点的**角平分线**(规则多边形里就是"环心到顶点"那条射线)的交点,
+        // 正是一个相似的小六边形的顶点 —— 到环心的距离按 `(边心距 − s)/边心距`
+        // 等比缩小。端点落不到那条射线上,画出来就是内侧线比相邻键短一截或者
+        // 戳出去一点,接头处露白。
+        //
+        // 先前是两端各缩固定的 12%。六边形上正确的缩进量是
+        // `s / (2 × 边心距) = 0.18 / (2 × 0.866) = 10.4%`,差 1.6 个百分点。
+        for style in &Style::ALL {
+            let m = prep("c1ccccc1");
+            let d = generate(&m, style);
+            let s = scene(&m, &d, style);
+            let bnd = bounds(&d.coords, &m, style);
+            let pts: Vec<Point2> = d
+                .coords
+                .iter()
+                .map(|p| to_canvas(*p, bnd, style.bond_length_pt))
+                .collect();
+            let centre =
+                pts.iter().fold(Point2::ORIGIN, |acc, p| acc + *p) * (1.0 / pts.len() as f64);
+
+            let mut checked = 0usize;
+            for (bi, b) in m.bonds().iter().enumerate() {
+                if drawn_orders(&m)[bi] != BondOrder::Double {
+                    continue;
+                }
+                let (pa, pb) = (pts[b.begin as usize], pts[b.end as usize]);
+                let ls = lines_of_bond(&s, pa, pb);
+                assert_eq!(ls.len(), 2, "环内双键该画两条线");
+                // 主线是与 pa/pb 重合的那条,另一条是内侧线
+                let inner = ls
+                    .iter()
+                    .find(|(u, v)| u.dist(pa) > 1e-6 || v.dist(pb) > 1e-6)
+                    .copied()
+                    .expect("该有一条内侧线");
+                for (end, vertex) in [(inner.0, pa), (inner.1, pb)] {
+                    // 端点必须落在"环心 → 顶点"这条射线上
+                    let ray = (vertex - centre).normalized();
+                    let off = end - centre;
+                    let perp = off.x * ray.y - off.y * ray.x;
+                    assert!(
+                        perp.abs() < 1e-6,
+                        "[{}] 苯环内侧线的端点偏离顶点角平分线 {perp:.4} pt —— 接头处对不上",
+                        style.name
+                    );
+                }
+                checked += 1;
+            }
+            assert_eq!(checked, 3, "苯环该有三根凯库勒双键");
+        }
     }
 
     #[test]
