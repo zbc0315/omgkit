@@ -101,7 +101,7 @@ pub(crate) fn place_neighbours(
         .collect();
     let mut out = Vec::with_capacity(todo.len());
     for (&atom, theta) in todo.iter().zip(dirs) {
-        let theta = free_direction(center, theta, &taken, &drawn);
+        let theta = free_direction(center, theta, &occupied, &taken, &drawn);
         let at = center + Point2::new(BOND_LEN, 0.0).rotated(theta);
         taken.push(at);
         drawn.push((center, at));
@@ -129,7 +129,13 @@ pub(crate) fn place_neighbours(
 ///
 /// 按 30° 一档往两边试,与整张图的栅格一致;五档之内都腾不开就退回 `ideal`,
 /// 交给消冲突,消不掉再如实报进 `unresolved`。
-fn free_direction(center: Point2, ideal: f64, taken: &[Point2], drawn: &[(Point2, Point2)]) -> f64 {
+fn free_direction(
+    center: Point2,
+    ideal: f64,
+    occupied: &[f64],
+    taken: &[Point2],
+    drawn: &[(Point2, Point2)],
+) -> f64 {
     const STEP: f64 = std::f64::consts::FRAC_PI_6;
     /// 多近算重合。取键长的十分之一 —— 真正分得开的两个位置至少差半个键长。
     const TOL: f64 = 0.1;
@@ -138,19 +144,41 @@ fn free_direction(center: Point2, ideal: f64, taken: &[Point2], drawn: &[(Point2
         let p = at(t);
         !taken.iter().any(|q| p.dist(*q) < TOL)
     };
+    // 挪出来的方向落在哪一侧,决定键角是变宽还是变窄。**60° 不只是难看** ——
+    // 链上出现一个 60° 的拐角,看着像旁边有个三元环,那是让人读错结构。
+    //
+    // 但**不能因此把窄的那一侧拒掉**:被拒的那个方向往往是唯一不撞的,拒了
+    // 就换来一处碰撞。实测硬拒的代价是未解冲突 +494、干净率 −2.8 个百分点,
+    // 只换来 107 处窄角 —— 亏的。
+    //
+    // 所以只调顺序不拒绝:同样偏离一档时,先试角度更宽的那一侧。
+    let narrowest = |t: f64| {
+        occupied
+            .iter()
+            .map(|o| {
+                let d = (t - o).rem_euclid(std::f64::consts::TAU);
+                d.min(std::f64::consts::TAU - d)
+            })
+            .fold(std::f64::consts::TAU, f64::min)
+    };
     // 新键与已画的键交叉。共端点不算 —— 那是相邻的键,`segments_cross` 已经放过。
     let uncrossed = |t: f64| {
         let p = at(t);
         !drawn.iter().any(|(u, v)| segments_cross(center, p, *u, *v))
     };
 
-    // 候选:理想方向,然后按 30° 一档往两边铺开
-    let mut cands = Vec::with_capacity(11);
-    cands.push(ideal);
-    for k in 1..=5 {
-        cands.push(ideal + STEP * f64::from(k));
-        cands.push(ideal - STEP * f64::from(k));
+    // 候选:理想方向,然后按 30° 一档往两边铺开。同一档里角度宽的排前面。
+    let mut ranked: Vec<(u32, i64, f64)> = vec![(0, 0, ideal)];
+    for k in 1..=5u32 {
+        for sign in [1.0, -1.0] {
+            let t = ideal + STEP * f64::from(k) * sign;
+            #[allow(clippy::cast_possible_truncation)]
+            let wide = -(narrowest(t) * 1e6).round() as i64; // 取负 → 宽的排前
+            ranked.push((k, wide, t));
+        }
     }
+    ranked.sort_by_key(|c| (c.0, c.1));
+    let cands: Vec<f64> = ranked.into_iter().map(|c| c.2).collect();
 
     // 两轮:先要"既不重合也不交叉",都腾不开就退而只求"不重合"。
     // **重合排在交叉前面** —— 重合会凭空造出一个假环,交叉只是难读。
@@ -242,6 +270,43 @@ fn largest_gap(sorted: &[f64]) -> (f64, f64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn avoiding_a_taken_spot_does_not_pinch_the_angle_to_sixty_degrees() {
+        // 位置被占了要挪,而挪的方向落在哪一侧决定键角是变宽还是变窄。
+        // **60° 不只是难看** —— 链上出现一个 60° 的拐角,看着像旁边有个三元环,
+        // 那是让人读错结构。同样偏离一档时先试宽的那一侧就能躲开。
+        //
+        // 实测:氮芥的两条 `N—CH₂—CH₂—Cl` 臂上量到过 60.1°。
+        for smi in [
+            "CC(CCCN(CCCl)CCCl)NC1=C2C=CC(=CC2=NC=C1)Cl",
+            "ClCCN(CCCl)CCCl",
+            "CC(C)(C)CC(C)(C)C",
+        ] {
+            for style in &Style::ALL {
+                let mut m = omgkit_io::smiles::parse(smi).unwrap();
+                omgkit_chem::pipeline::sanitize(&mut m).unwrap();
+                let d = crate::generate(&m, style);
+                for a in 0..u32::try_from(m.num_atoms()).unwrap() {
+                    let nbrs: Vec<u32> = m.neighbors(a).map(|(n, _)| n).collect();
+                    if nbrs.len() != 2 {
+                        continue;
+                    }
+                    let c = d.coords[a as usize];
+                    let u = (d.coords[nbrs[0] as usize] - c).normalized();
+                    let v = (d.coords[nbrs[1] as usize] - c).normalized();
+                    let deg = u.dot(v).clamp(-1.0, 1.0).acos().to_degrees();
+                    assert!(
+                        deg > 89.0,
+                        "[{}] {smi}:{}–{a}–{} 的夹角只有 {deg:.1}°",
+                        style.name,
+                        nbrs[0],
+                        nbrs[1]
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn no_two_atoms_are_drawn_on_the_same_point() {
         // **重合是最糟的一种画错。** 两个原子叠在一起时,它们各自的键首尾相接,

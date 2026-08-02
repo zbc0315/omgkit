@@ -144,6 +144,7 @@ cargo run -p omgkit-depict --release --example audit -- harness/corpus/large.smi
 |---|---|
 | Writing-independent: any SMILES for the same molecule draws the same primitives | none |
 | No two atoms drawn on the same point | none |
+| No bond angle below 90° at an atom of degree ≤3 | layout not degraded |
 | Ring double bonds: both lines land inside a ring that contains the bond | layout not degraded |
 | Wedges reach the canvas: as many wedge primitives as `Depiction` recorded | none |
 | Wedges read back: every drawn stereocentre reads back as its recorded configuration | none |
@@ -265,6 +266,21 @@ angle — the one at the articulation point. An out-of-tree experiment clears al
 crossings**, or it trades a phantom ring for a crossing) and giving up "bond
 angle equals its ideal" — which no audit property guards today. **Not
 implemented.**
+
+### A 60° angle is not merely ugly
+
+Stepping round by 30° to dodge a taken spot can land two steps out, giving a 60°
+kink — which reads as a three-membered ring that is not there. Measured on a
+nitrogen mustard's `N—CH₂—CH₂—Cl` arms: 60.1°.
+
+**Rejecting** the pinched directions outright was tried: narrow angles 334 →
+227, at a cost of 494 more unresolved collisions and 2.8 points of clean rate.
+The rejected direction is often the only one that does not collide. Not worth
+it.
+
+Reordering instead — at the same step size, try the side that widens the angle
+first — improves everything at once with no trade: narrow angles 334 → **287**,
+collisions 1189 → 1167, crossings 281 → 278, clean 91.3% → **91.4%**.
 
 ### Current standing
 

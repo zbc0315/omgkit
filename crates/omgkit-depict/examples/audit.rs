@@ -232,7 +232,48 @@ fn checks(
         bond_lengths_equal(m, d, clean),
         inside_canvas(s),
         no_atom_sits_on_another(m, d),
+        no_angle_is_pinched(m, d, clean),
     ]
+}
+
+/// 键角不许被压到 90° 以下。
+///
+/// **60° 不只是难看** —— 链上出现一个 60° 的拐角,看着像旁边有个三元环,那是
+/// 让人读错结构。取代基避让(`chains::free_direction`)按 30° 一档挪,挪两档
+/// 就成了 60°,所以这条必须守着。
+///
+/// 只对没退化的布局下判断:桥环松弛出来的坐标本来就不成形状。
+fn no_angle_is_pinched(m: &MolBuilder, d: &omgkit_depict::Depiction, clean: bool) -> Check {
+    if !clean {
+        return ("键角不过窄", false, None);
+    }
+    const FLOOR: f64 = 89.0;
+    for a in 0..u32::try_from(m.num_atoms()).expect("原子数超出 u32") {
+        let nbrs: Vec<u32> = m.neighbors(a).map(|(n, _)| n).collect();
+        // 四配位的理想角就是 90°,五配位更小 —— 这条只管度数 ≤ 3 的
+        if nbrs.len() < 2 || nbrs.len() > 3 {
+            continue;
+        }
+        let c = d.coords[a as usize];
+        for i in 0..nbrs.len() {
+            for j in (i + 1)..nbrs.len() {
+                let u = (d.coords[nbrs[i] as usize] - c).normalized();
+                let v = (d.coords[nbrs[j] as usize] - c).normalized();
+                let deg = u.dot(v).clamp(-1.0, 1.0).acos().to_degrees();
+                if deg < FLOOR {
+                    return (
+                        "键角不过窄",
+                        true,
+                        Some(format!(
+                            "原子 {a} 处 {}–{a}–{} 的夹角只有 {deg:.1}°",
+                            nbrs[i], nbrs[j]
+                        )),
+                    );
+                }
+            }
+        }
+    }
+    ("键角不过窄", true, None)
 }
 
 /// 两个原子不许画在同一点上。
