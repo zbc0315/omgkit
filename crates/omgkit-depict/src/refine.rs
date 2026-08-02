@@ -484,19 +484,32 @@ fn far_side(mol: &MolBuilder, pos: &BTreeMap<u32, Point2>, b: u32) -> Option<Vec
     let mut out: Vec<u32> = seen.into_iter().collect();
     out.sort_unstable();
 
+    // 另一侧:从 `blocked` 出发、同样不跨这根键能走到的那些原子。
+    //
+    // **不能拿 `pos` 取补集。** `relieve` 跑在所有分量合并之后的 `pos` 上
+    // (分量之间也可能撞上),补集因此会**跨过分量边界** —— 翻一根键会把另一个
+    // 不相干的片段整个镜像走。实测这种翻转从没被 `better()` 接受过(它必然
+    // 制造碰撞),所以图上看不出问题;但 `far_side` 返回的东西本身就是错的,
+    // 判据 `a_flip_never_reaches_into_another_fragment` 一上来就把它照出来了。
+    let mut other_seen: BTreeSet<u32> = BTreeSet::from([blocked]);
+    let mut stack = vec![blocked];
+    while let Some(a) = stack.pop() {
+        for (n, bi) in mol.neighbors(a) {
+            if bi == b || !pos.contains_key(&n) {
+                continue;
+            }
+            if other_seen.insert(n) {
+                stack.push(n);
+            }
+        }
+    }
+    let mut other: Vec<u32> = other_seen.into_iter().collect();
+    other.sort_unstable();
+
     // 取更少的那一侧。平局(两侧一样多)时按**这一侧最小的规范秩**定 ——
     // 拿存储下标定就又把写法依赖引回来了。
-    let placed = pos.len();
-    if out.len() * 2 > placed {
-        let other: Vec<u32> = {
-            let mine: BTreeSet<u32> = out.iter().copied().collect();
-            let mut o: Vec<u32> = pos.keys().copied().filter(|a| !mine.contains(a)).collect();
-            o.sort_unstable();
-            o
-        };
-        if !other.is_empty() {
-            return Some(other);
-        }
+    if out.len() > other.len() && !other.is_empty() {
+        return Some(other);
     }
     Some(out)
 }
@@ -684,6 +697,67 @@ mod tests {
                     b.begin,
                     b.end
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn a_flip_never_reaches_into_another_fragment() {
+        // `relieve` 跑在**所有分量合并之后**的 `pos` 上(分量之间也可能撞上),
+        // 而 `far_side` 取的是"原子更少的那一侧" —— 更少的那一侧算不出来时它
+        // 返回 `pos` 的**补集**,那个补集会跨过分量边界。
+        //
+        // 真翻下去就是:动一根键,把**另一个不相干的片段**整个镜像走。
+        //
+        // 实测这件事在全量语料上**没有发生过**(280 个多分量的图,用分离轴定理
+        // 判,没有一个分量互相穿插):这种翻转会制造碰撞,`better()` 把它挡掉了。
+        // 所以它是个**潜在陷阱**,不是活着的缺陷 —— 但机制在那里,钉住它。
+        for smi in [
+            "[Na+].[Cl-]",
+            "CCCCCCCC.c1ccccc1",
+            "CC(=O)Oc1ccccc1C(=O)O.CC(C)(C)c1ccccc1",
+            "[O-]S([O-])(=O)=O.CCCCCCCCCC",
+            "c1ccccc1.c1ccccc1.CCCC",
+        ] {
+            for style in &Style::ALL {
+                let m = prep(smi);
+                let ranks = omgkit_io::canon::canonical_ranks(&m);
+                let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
+                for p in layout::layout_all(&m, &ranks, style) {
+                    pos.extend(p.pos);
+                }
+                // 原子 → 分量号
+                let n = u32::try_from(m.num_atoms()).unwrap();
+                let mut comp = vec![usize::MAX; n as usize];
+                let mut c = 0usize;
+                for s in 0..n {
+                    if comp[s as usize] != usize::MAX {
+                        continue;
+                    }
+                    let mut st = vec![s];
+                    comp[s as usize] = c;
+                    while let Some(x) = st.pop() {
+                        for (y, _) in m.neighbors(x) {
+                            if comp[y as usize] == usize::MAX {
+                                comp[y as usize] = c;
+                                st.push(y);
+                            }
+                        }
+                    }
+                    c += 1;
+                }
+                for b in 0..u32::try_from(m.num_bonds()).unwrap() {
+                    let Some(side) = far_side(&m, &pos, b) else {
+                        continue;
+                    };
+                    let want = comp[m.bonds()[b as usize].begin as usize];
+                    let spans: BTreeSet<usize> = side.iter().map(|a| comp[*a as usize]).collect();
+                    assert!(
+                        spans.len() == 1 && spans.contains(&want),
+                        "[{}] {smi}:翻键 {b} 会动到别的片段(涉及分量 {spans:?},键在 {want})",
+                        style.name
+                    );
+                }
             }
         }
     }

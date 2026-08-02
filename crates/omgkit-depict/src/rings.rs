@@ -369,7 +369,7 @@ fn relax_from(
     // 铺开。前四个初值都是"所有原子摆在一个圆上",拓扑上太像,弹簧下降往往
     // 收敛到同一批坏极小;这个起手的形状不一样,实测它才是降幅的主要来源。
     if seed >= 4 {
-        if let Some(p) = polygon_seed(mol, atoms, rings, ranks, &idx, seed == 5) {
+        if let Some(p) = polygon_seed(mol, atoms, rings, ranks, &idx) {
             return settle(p, n, &bonded, atoms);
         }
     }
@@ -436,7 +436,6 @@ fn polygon_seed(
     rings: &[&Ring],
     ranks: &[u32],
     idx: &BTreeMap<u32, usize>,
-    widest_gap: bool,
 ) -> Option<Vec<Point2>> {
     // 起手环:先按大小,再按规范秩 —— 平局不许看存储下标
     let first = rings
@@ -472,19 +471,8 @@ fn polygon_seed(
             .filter(|(_, _, j)| placed[*j])
             .min()
             .map(|(_, _, j)| j)?;
-        let dir = if widest_gap {
-            // 放进锚点周围**最大的那个空隙**。已占的方向就是它那些已放好的
-            // 邻居,空隙取最大的那个,新原子摆在正中间。
-            let mut occ: Vec<f64> = mol
-                .neighbors(atoms[anchor])
-                .filter_map(|(nb, _)| idx.get(&nb).copied())
-                .filter(|j| placed[*j])
-                .map(|j| (p[j] - p[anchor]).angle())
-                .collect();
-            occ.sort_by(|x, y| x.partial_cmp(y).expect("坐标不含 NaN"));
-            widest(&occ)
-        } else {
-            // 背离已放好那堆的质心
+        // 背离已放好那堆的质心
+        let dir = {
             let (mut c, mut k) = (Point2::ORIGIN, 0.0_f64);
             for (j, on) in placed.iter().enumerate() {
                 if *on {
@@ -510,28 +498,6 @@ fn polygon_seed(
         }
     }
     Some(p)
-}
-
-/// 已排序角度里最大空隙的中点。空表给 0。
-fn widest(sorted: &[f64]) -> f64 {
-    let n = sorted.len();
-    if n == 0 {
-        return 0.0;
-    }
-    if n == 1 {
-        return sorted[0] + std::f64::consts::PI;
-    }
-    let mut best = (
-        sorted[n - 1],
-        sorted[0] + std::f64::consts::TAU - sorted[n - 1],
-    );
-    for i in 0..n - 1 {
-        let g = sorted[i + 1] - sorted[i];
-        if g > best.1 {
-            best = (sorted[i], g);
-        }
-    }
-    best.0 + best.1 / 2.0
 }
 
 /// 从 0 号原子出发的 BFS 序。邻接表按下标升序,而下标已经是规范秩序,
