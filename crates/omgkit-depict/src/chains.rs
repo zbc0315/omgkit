@@ -90,15 +90,58 @@ pub(crate) fn place_neighbours(
     let dirs = allocate(&occupied, todo.len(), ideal, zig);
 
     debug_assert_eq!(dirs.len(), todo.len(), "方向数必须与待放邻居数相等");
-    todo.iter()
-        .zip(dirs)
-        .map(|(&atom, theta)| Placed {
+
+    // 已经占住的位置。新原子**不许落在上面** —— 见 [`free_direction`]。
+    let mut taken: Vec<Point2> = pos.values().copied().collect();
+    let mut out = Vec::with_capacity(todo.len());
+    for (&atom, theta) in todo.iter().zip(dirs) {
+        let theta = free_direction(center, theta, &taken);
+        let at = center + Point2::new(BOND_LEN, 0.0).rotated(theta);
+        taken.push(at);
+        out.push(Placed {
             atom,
-            at: center + Point2::new(BOND_LEN, 0.0).rotated(theta),
+            at,
             // 子代取反,直链就走出锯齿
             zig: -zig,
-        })
-        .collect()
+        });
+    }
+    out
+}
+
+/// 从 `ideal` 出发,找一个不会与已放好的原子重合的方向。
+///
+/// # 为什么宁可歪着也不重合
+///
+/// 两个原子叠在同一点上时,它们各自的键首尾相接 —— **图上就多出一个分子里
+/// 没有的环**,而读者没有任何办法看出那个环是假的。角度偏离理想值只是难看,
+/// 不会让人读错结构。
+///
+/// 实测:一个三萜的两个甲基落在同一个栅格点上,图上凭空出现一个三元环,三条
+/// 边正好都是一个键长。全语料上这种重合占 6%,而且距离全是**正好 0**:布局
+/// 走的是 30° 栅格上的单位步长,两条支路撞到同一个格点是系统性的,不是浮点抖动。
+///
+/// 按 30° 一档往两边试,与整张图的栅格一致;五档之内都腾不开就退回 `ideal`,
+/// 交给消冲突,消不掉再如实报进 `unresolved`。
+fn free_direction(center: Point2, ideal: f64, taken: &[Point2]) -> f64 {
+    const STEP: f64 = std::f64::consts::FRAC_PI_6;
+    /// 多近算重合。取键长的十分之一 —— 真正分得开的两个位置至少差半个键长。
+    const TOL: f64 = 0.1;
+    let free = |t: f64| {
+        let p = center + Point2::new(BOND_LEN, 0.0).rotated(t);
+        !taken.iter().any(|q| p.dist(*q) < TOL)
+    };
+    if free(ideal) {
+        return ideal;
+    }
+    for k in 1..=5 {
+        for s in [1.0, -1.0] {
+            let t = ideal + s * STEP * f64::from(k);
+            if free(t) {
+                return t;
+            }
+        }
+    }
+    ideal
 }
 
 /// 一个原子周围相邻两根键的理想夹角(弧度)。
@@ -183,6 +226,39 @@ fn largest_gap(sorted: &[f64]) -> (f64, f64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn no_two_atoms_are_drawn_on_the_same_point() {
+        // **重合是最糟的一种画错。** 两个原子叠在一起时,它们各自的键首尾相接,
+        // 图上就多出一个分子里没有的环 —— 读者没有任何办法看出那个环是假的。
+        //
+        // 实测:下面第一个三萜的两个甲基落在同一个栅格点上,图上凭空出现一个
+        // 三元环,三条边正好都是一个键长。全语料上这种重合曾占 6%,而且距离
+        // 全是**正好 0** —— 布局走的是 30° 栅格上的单位步长,两条支路撞到同
+        // 一个格点是系统性的,不是浮点抖动。
+        for smi in [
+            "CC([CH]1CC[C]2(CC[C]3(C)[C]4(C)[CH](CC[CH]3[CH]12)[C]1(C)[CH](CC4)C([CH](CC1)O)(C)C)CO)=C",
+            "[O-][N+](=O)C1=CC(=CC=C1Cl)S(=O)(=O)C2=CC=C(Cl)C(=C2)[N+]([O-])=O",
+            "CC(C)(C)c1ccccc1",
+            "CC(=O)Oc1ccccc1C(=O)O",
+        ] {
+            for style in &Style::ALL {
+                let mut m = omgkit_io::smiles::parse(smi).unwrap();
+                omgkit_chem::pipeline::sanitize(&mut m).unwrap();
+                let d = crate::generate(&m, style);
+                for i in 0..d.coords.len() {
+                    for j in (i + 1)..d.coords.len() {
+                        let dist = d.coords[i].dist(d.coords[j]);
+                        assert!(
+                            dist > 0.1,
+                            "[{}] {smi}:原子 {i} 与 {j} 相距 {dist:.4} 个键长 —— 画在同一点上了",
+                            style.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn an_sp_atom_is_drawn_straight() {
         // 氰基的碳、炔碳、累积双键的中心碳都是 sp 杂化,键角 **180°**。它们的

@@ -200,7 +200,42 @@ fn checks(
         wedges_read_back(m, d),
         bond_lengths_equal(m, d, clean),
         inside_canvas(s),
+        no_atom_sits_on_another(m, d),
     ]
+}
+
+/// 两个原子不许画在同一点上。
+///
+/// 重合本身会被消冲突报成"未解冲突",但那个说法太轻:两个原子叠在一起时,
+/// 它们各自的键看起来首尾相接,**图上就多出一个分子里没有的环**。读者没有
+/// 任何办法看出那个环是假的 —— 这比"挤了一点"严重得多。
+fn no_atom_sits_on_another(m: &MolBuilder, d: &omgkit_depict::Depiction) -> Check {
+    const TOL: f64 = 0.05; // 单位是键长
+    for i in 0..d.coords.len() {
+        for j in (i + 1)..d.coords.len() {
+            let dist = d.coords[i].dist(d.coords[j]);
+            if dist < TOL {
+                let reported = d
+                    .unresolved
+                    .iter()
+                    .any(|(a, b)| (*a as usize, *b as usize) == (i, j));
+                return (
+                    "原子不重合",
+                    true,
+                    Some(format!(
+                        "原子 {i} 与 {j} 相距 {dist:.4} 个键长{}",
+                        if reported {
+                            "(已报未解冲突)"
+                        } else {
+                            "**而且没报出来**"
+                        }
+                    )),
+                );
+            }
+        }
+    }
+    let _ = m;
+    ("原子不重合", true, None)
 }
 
 /// 换写法画出来必须一模一样。

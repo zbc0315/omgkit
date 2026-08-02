@@ -143,6 +143,7 @@ cargo run -p omgkit-depict --release --example audit -- harness/corpus/large.smi
 | Property | Precondition |
 |---|---|
 | Writing-independent: any SMILES for the same molecule draws the same primitives | none |
+| No two atoms drawn on the same point | none |
 | Ring double bonds: both lines land inside a ring that contains the bond | layout not degraded |
 | Wedges reach the canvas: as many wedge primitives as `Depiction` recorded | none |
 | Wedges read back: every drawn stereocentre reads back as its recorded configuration | none |
@@ -190,10 +191,28 @@ silently changes. All `HashMap`/`HashSet` in `omgkit-depict` are now
 **A unit test cannot catch this** — within one process the seed is fixed. It
 takes running the audit twice.
 
+### Two atoms on one point invent a ring that is not there
+
+When two atoms land on the same point their bonds meet end to end, and the
+picture gains a ring the molecule does not have. A reader has no way to tell it
+is fake. One triterpene drew a three-membered ring whose three sides were each
+exactly one bond length.
+
+This was **1064 / 17662 (6.0%)**, and every distance was *exactly* zero — the
+layout walks unit steps on a 30° lattice, so two branches hitting the same
+lattice point is systematic, not floating-point noise. All of the sampled cases
+were reported in `unresolved`, so "say what you could not draw" held; but
+"unresolved collision" badly understates *a ring that is not there*.
+
+The fix is to check whether a position is already taken before placing a
+substituent there, and step round by 30° if it is. An angle off its ideal is
+merely ugly; it does not make anyone misread the structure. **89 cases remain**
+(0.5%), all of them where five steps were not enough to find room.
+
 ### Current standing
 
-Five properties: **0 violations**. Writing-independence: **132 / 17662
-(0.7%)**, and those are not a systemic layout instability. Fitting each failing
+Six properties, five at **0 violations**. Writing-independence: **134 / 17662
+(0.8%)**, and those are not a systemic layout instability. Fitting each failing
 pair with its best rigid transform:
 
 | Lines still differing | Pairs |
