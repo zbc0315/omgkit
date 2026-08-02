@@ -154,6 +154,16 @@ fn main() {
             if squeezed_bonds(&m, &d, style) > 0 {
                 *quality.entry("—— 有标签在键上塞不下").or_default() += 1usize;
             }
+            // **骨架原子被摆成 180°**,单独记一档。
+            //
+            // 渲染这边会给它补一个符号,否则图上根本看不见它(两根键连成一条
+            // 直线,顶点没有拐角)。补符号是对的 —— 但那 154 处两根**单键**碰巧
+            // 共线的骨架碳,坐标本身就不对:sp3 碳该是 120°,是取代基避让一档
+            // 一档挪出来的。补了符号图能读了,布局的毛病却被盖住了,所以这里
+            // 单独报一笔。真正的累积双键(sp,本来就该 180°)只占 42/300。
+            if accidental_collinear(&m, &d) > 0 {
+                *quality.entry("—— 有骨架原子被摆成 180°").or_default() += 1usize;
+            }
             *quality
                 .entry(if !d.degraded.is_empty() {
                     "退化(桥环等)"
@@ -223,6 +233,34 @@ fn prep(smi: &str) -> Option<MolBuilder> {
     omgkit_chem::pipeline::sanitize(&mut m).ok()?;
     omgkit_io::stereo::perceive_bond_stereo(&mut m);
     Some(m)
+}
+
+/// 被摆成 180° 而**本来不该是 180°** 的骨架原子有几个。
+///
+/// sp 原子(有三键、或两根双键)本来就该 180°,不算。剩下的是布局把 sp3 摆直了
+/// —— 渲染那边会补个符号让它看得见,但坐标本身的毛病要单独报,不许被补符号盖住。
+fn accidental_collinear(m: &MolBuilder, d: &omgkit_depict::Depiction) -> usize {
+    use omgkit_core::BondOrder;
+    use omgkit_depict::render::is_collinear;
+
+    (0..u32::try_from(m.num_atoms()).expect("原子数超出 u32"))
+        .filter(|a| {
+            if !is_collinear(m, *a, &d.coords) {
+                return false;
+            }
+            // sp 判据与 `chains::ideal_angle` 同源:有三键、或两根双键
+            let mut doubles = 0usize;
+            let mut triple = false;
+            for (_, bi) in m.neighbors(*a) {
+                match m.bonds()[bi as usize].order {
+                    BondOrder::Triple => triple = true,
+                    BondOrder::Double => doubles += 1,
+                    _ => {}
+                }
+            }
+            !(triple || doubles >= 2)
+        })
+        .count()
 }
 
 /// 两端标签加起来比这根键还长的键有几根。

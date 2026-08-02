@@ -246,6 +246,41 @@ silently changes. All `HashMap`/`HashSet` in `omgkit-depict` are now
 **A unit test cannot catch this** — within one process the seed is fixed. It
 takes running the audit twice.
 
+### An atom whose two bonds form a straight line is invisible
+
+The central carbon of an allene, `CH₃CH=C=CHCH₃`, is sp — 180°. The geometry
+was right (`an_sp_atom_is_drawn_straight` guards it) **but nothing was drawn at
+that carbon**: no corner at the vertex, and both double bonds put their second
+line on the same side, so the whole thing read as a cis-diene.
+
+RDKit's comment is literally "allenes need a C". Its test (`isLinearAtom`) is
+geometric: degree 2, **both bonds the same order**, direction dot product
+< −0.95 (about 162°). The same-order condition matters — the alkyne carbons of
+`R—C≡C—R` have a single and a triple bond, and the three parallel lines already
+mark them.
+
+omgkit now uses the same test, and draws both double bonds symmetric about
+their axis. Both halves are needed: symmetric without the symbol still hides
+the carbon, and the symbol without symmetry still reads as cis. One judge
+covers both, mutation-verified — the two mutations trip *different* assertions.
+
+**Measuring it turned up something more important.** Of 300 collinear atoms in
+the corpus, only 42 are real cumulated double bonds:
+
+| | count |
+|---|---:|
+| skeleton carbon, two **single** bonds that happen to be collinear | **154** |
+| skeleton carbon, other bond orders | 40 |
+| already had a label | 64 |
+| skeleton carbon, cumulated double bond (the intended case) | 42 |
+
+Those 154 have **wrong coordinates**: an sp³ carbon should be at 120°, and the
+substituent-avoidance step walked it there 30° at a time (up to five steps, so
+120 + 60 = 180 is reachable). Drawing the symbol makes the picture readable and
+hides the layout defect, so it is counted separately: **148 pictures (0.8%)
+with a skeleton atom placed at 180°**. That is a layout bug on the books, not a
+rendering one.
+
 ### A bond that stops too far from its label
 
 Bond lines stop short of an atom label so they do not run through the letters.

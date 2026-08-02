@@ -171,8 +171,6 @@ impl Label {
 #[must_use]
 pub fn label_for(mol: &MolBuilder, atom: u32, style: &Style, h_side: HSide) -> Option<Label> {
     let a = mol.atoms()[atom as usize];
-    let hs = total_hs(mol, atom);
-
     let plain_carbon = a.atomic_num == 6
         && a.formal_charge == 0
         && a.isotope == 0
@@ -181,7 +179,24 @@ pub fn label_for(mol: &MolBuilder, atom: u32, style: &Style, h_side: HSide) -> O
     if plain_carbon {
         return None;
     }
+    Some(build(mol, atom, style, h_side))
+}
 
+/// 同 [`label_for`],但**骨架碳也画出来**。
+///
+/// 给的是"这个原子必须看得见"的情形。目前只有一处:两根键几乎共线的二度原子
+/// —— 相邻两根键连成一条直线,顶点没有拐角,图上根本看不出那里有个原子。
+/// 丙二烯 `CH₃CH=C=CHCH₃` 的中心碳是 sp、键角 180°,不画符号的话整个分子读起来
+/// 像顺式二烯。RDKit 也是这么办的(`DrawMol::getAtomSymbol`,注释原话是
+/// "allenes need a C")。
+#[must_use]
+pub fn label_forced(mol: &MolBuilder, atom: u32, style: &Style, h_side: HSide) -> Label {
+    build(mol, atom, style, h_side)
+}
+
+fn build(mol: &MolBuilder, atom: u32, style: &Style, h_side: HSide) -> Label {
+    let a = mol.atoms()[atom as usize];
+    let hs = total_hs(mol, atom);
     let symbol = element::by_atomic_num(a.atomic_num).map_or("*", |e| e.symbol);
 
     let mut runs: Vec<Run> = Vec::new();
@@ -232,11 +247,11 @@ pub fn label_for(mol: &MolBuilder, atom: u32, style: &Style, h_side: HSide) -> O
     let top = CAP_HEIGHT / 2.0 + if has_sup { SUP_RISE } else { 0.0 };
     let bottom = CAP_HEIGHT / 2.0 + if has_sub { SUB_DROP } else { 0.0 };
 
-    Some(Label {
+    Label {
         runs,
         half_w: width_em * em / 2.0,
         half_h: top.max(bottom) * em,
-    })
+    }
 }
 
 /// 形式电荷的上标文本:`+` / `-` / `2+` / `3-`。

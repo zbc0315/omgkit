@@ -115,7 +115,12 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
     let labels: Vec<Option<Label>> = (0..mol.num_atoms())
         .map(|i| {
             let a = u32::try_from(i).expect("原子数超出 u32");
-            label_for(mol, a, style, h_side(mol, a, &depiction.coords))
+            let side = h_side(mol, a, &depiction.coords);
+            // 共线的二度原子即便是骨架碳也要画出来 —— 见 [`is_collinear`]
+            label_for(mol, a, style, side).or_else(|| {
+                is_collinear(mol, a, &depiction.coords)
+                    .then(|| crate::label::label_forced(mol, a, style, side))
+            })
         })
         .collect();
 
@@ -366,6 +371,40 @@ pub fn h_side(mol: &MolBuilder, atom: u32, coords: &[Point2]) -> HSide {
 }
 
 /// 把键的两端各缩短一点,停在标签外。
+/// 这个二度原子的两根键是不是几乎连成一条直线。
+///
+/// # 为什么这种原子必须画出符号
+///
+/// 相邻两根键连成直线时,顶点处没有拐角 —— **图上根本看不出那里有个原子**。
+/// 丙二烯 `CH₃CH=C=CHCH₃` 的中心碳是 sp、键角 180°,不画符号的话整张图就是
+/// 一条直线加几条平行短线,读起来像顺式二烯,而中心碳无影无踪。
+///
+/// 判据取几何而不取杂化:`ideal_angle` 已经把 sp 原子摆成 180°,但消冲突之后
+/// 别的原子也可能碰巧共线,那时同样看不见。RDKit 的 `isLinearAtom` 是同一个
+/// 口径(点积 < −0.95,约 162°),并且同样要求**两根键的键级相同** ——
+/// `R—C≡C—R` 的炔碳两侧一单一叁,三条平行线本来就把它标出来了,不用再画符号。
+///
+/// 判据要数"有多少原子是靠补符号才看得见的",所以这个函数是公开的。
+pub fn is_collinear(mol: &MolBuilder, a: u32, coords: &[Point2]) -> bool {
+    /// 多共线算共线。取 −0.95 与 RDKit 一致(约 162°)。
+    const COS: f64 = -0.95;
+
+    let nbrs: Vec<(u32, u32)> = mol.neighbors(a).collect();
+    if nbrs.len() != 2 {
+        return false;
+    }
+    if mol.bonds()[nbrs[0].1 as usize].order != mol.bonds()[nbrs[1].1 as usize].order {
+        return false;
+    }
+    let c = coords[a as usize];
+    let u = coords[nbrs[0].0 as usize] - c;
+    let v = coords[nbrs[1].0 as usize] - c;
+    if u.norm() < 1e-9 || v.norm() < 1e-9 {
+        return false;
+    }
+    u.normalized().dot(v.normalized()) < COS
+}
+
 /// 从标签盒的中心沿方向 `d` 走到盒边的距离。`d` 要是单位向量。
 ///
 /// # 为什么不能拿外接圆凑
@@ -513,7 +552,17 @@ fn offset_dir(
         // 一个环都收不下(自交的退化环)—— 不猜,交给下面的通用规则
     }
 
-    if mol.degree(b.begin) == 1 || mol.degree(b.end) == 1 {
+    // 端基双键对称:醛、端烯的通例。
+    //
+    // **共线的原子也要对称。** 累积双键 `C=C=C` 的两根键若都把第二条线偏到同
+    // 一侧,画出来就是一条直线配两条同侧短线 —— 读起来是顺式二烯。两根键各自
+    // 跨轴对称画,才是累积双键的通例。RDKit 的 `calcDoubleBondLines` 把
+    // `isLinearAtom` 与端基放在同一个分支里,口径一致。
+    if mol.degree(b.begin) == 1
+        || mol.degree(b.end) == 1
+        || is_collinear(mol, b.begin, pts)
+        || is_collinear(mol, b.end, pts)
+    {
         return Point2::ORIGIN;
     }
 
@@ -564,6 +613,67 @@ mod tests {
             .iter()
             .filter(|i| matches!(i, Primitive::Text { .. }))
             .count()
+    }
+
+    #[test]
+    fn a_collinear_atom_is_drawn_instead_of_vanishing() {
+        // 两根键连成一条直线时顶点处没有拐角,**图上根本看不出那里有个原子**。
+        // 丙二烯的中心碳是 sp、键角 180°,不画符号的话整张图是一条直线加几条
+        // 平行短线 —— 读起来像顺式二烯,中心碳无影无踪。
+        //
+        // 这条同时守两件事:符号画出来了,而且两根双键各自**跨轴对称**。少一件
+        // 都还是读错:只画符号不对称,两条同侧短线仍然像顺式;只对称不画符号,
+        // 中心碳照样看不见。
+        for (smi, centre) in [("CC=C=CC", 2u32), ("CC(C)=C=O", 3), ("C=C=C", 1)] {
+            for style in &Style::ALL {
+                let m = prep(smi);
+                let d = generate(&m, style);
+                let s = scene(&m, &d, style);
+                let bnd = bounds(&d.coords, &m, style);
+                let here = to_canvas(d.coords[centre as usize], bnd, style.bond_length_pt);
+
+                assert!(
+                    is_collinear(&m, centre, &d.coords),
+                    "[{}] {smi}:原子 {centre} 该被判成共线",
+                    style.name
+                );
+                let drawn = s.items.iter().any(|it| match it {
+                    Primitive::Text { at, .. } => at.dist(here) < 0.5,
+                    _ => false,
+                });
+                assert!(
+                    drawn,
+                    "[{}] {smi}:共线的原子 {centre} 一个符号都没画,图上看不见它",
+                    style.name
+                );
+
+                // 中心那两根键的两条线必须对轴对称
+                for (nb, bi) in m.neighbors(centre) {
+                    if m.bonds()[bi as usize].order != BondOrder::Double {
+                        continue;
+                    }
+                    let pa = to_canvas(d.coords[centre as usize], bnd, style.bond_length_pt);
+                    let pb = to_canvas(d.coords[nb as usize], bnd, style.bond_length_pt);
+                    let ls = lines_of_bond(&s, pa, pb);
+                    assert_eq!(
+                        ls.len(),
+                        2,
+                        "[{}] {smi}:键 {centre}–{nb} 该画两条线,实得 {}",
+                        style.name,
+                        ls.len()
+                    );
+                    let axis = (pb - pa).normalized();
+                    let n = Point2::new(-axis.y, axis.x);
+                    let side = |(u, v): (Point2, Point2)| ((u + v) * 0.5 - (pa + pb) * 0.5).dot(n);
+                    let (s0, s1) = (side(ls[0]), side(ls[1]));
+                    assert!(
+                        s0 * s1 < 0.0 && (s0 + s1).abs() < 0.1 * s0.abs().max(1e-9),
+                        "[{}] {smi}:键 {centre}–{nb} 的两条线没跨轴对称(偏移 {s0:.3} 与 {s1:.3})",
+                        style.name
+                    );
+                }
+            }
+        }
     }
 
     #[test]
