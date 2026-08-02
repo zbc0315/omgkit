@@ -209,6 +209,27 @@ substituent there, and step round by 30° if it is. An angle off its ideal is
 merely ugly; it does not make anyone misread the structure. **89 cases remain**
 (0.5%), all of them where five steps were not enough to find room.
 
+### Crossing bonds: 2.2%, and most of them cannot be moved
+
+Two bonds crossing is a defect in a structure diagram. **381 / 17662 (2.2%)**
+of pictures have at least one, all reported in `Depiction::crossings`.
+
+Two attempts, both near-useless, recorded so nobody repeats them:
+
+- **Avoid already-drawn bonds when placing a substituent** — fixed exactly one
+  case (382 → 381). By the time the BFS places it, the bond it will cross
+  usually is not drawn yet. The check earns its keep elsewhere: atom
+  coincidences dropped 89 → 74.
+- **Rank crossings above collision depth in the score** — they already were;
+  the code was misread. Running it the other way round raised crossings from
+  381 to 415 with no reduction in collisions.
+
+What remains splits cleanly: **320 involve no terminal bond** — the flip
+operator can reach them, but no flip improves the score — and **61 involve a
+terminal bond**, which a flip provably cannot move (mirroring a leaf across its
+own bond is a no-op). Fixing those needs an operator the design deliberately
+does not have yet.
+
 ### Current standing
 
 Six properties, five at **0 violations**. Writing-independence: **134 / 17662

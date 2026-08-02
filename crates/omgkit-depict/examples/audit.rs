@@ -71,7 +71,27 @@ fn main() {
             let s = scene(&m, &d, style);
             let tag = format!("{}:{lineno}:{smi}", style.name);
             let clean = d.degraded.is_empty() && d.unresolved.is_empty();
-            // 画得干不干净也要报 —— 判据只说"没画错",不说"画得好"
+            // 画得干不干净也要报 —— 判据只说"没画错",不说"画得好"。
+            // 交叉单独记一笔:下面那串 if-else 里它排在退化和未解冲突后面,
+            // 只统计"只有交叉"的话,真实的交叉数会被前两档吃掉。
+            if !d.crossings.is_empty() {
+                *quality.entry("—— 其中有键交叉").or_default() += 1usize;
+                // 交叉的键里有没有端基键 —— 端基键消冲突翻不动(翻一个端基
+                // 等于没翻),要修得另想办法。先量清楚够不够本。
+                let terminal = d.crossings.iter().any(|(b1, b2)| {
+                    [b1, b2].iter().any(|b| {
+                        let bd = &m.bonds()[**b as usize];
+                        m.degree(bd.begin) == 1 || m.degree(bd.end) == 1
+                    })
+                });
+                *quality
+                    .entry(if terminal {
+                        "——   涉及端基键的"
+                    } else {
+                        "——   两端都不是端基的"
+                    })
+                    .or_default() += 1usize;
+            }
             *quality
                 .entry(if !d.degraded.is_empty() {
                     "退化(桥环等)"
@@ -97,7 +117,11 @@ fn main() {
     }
 
     println!("语料 {path}:解析成功 {n_ok},跳过 {n_skip}\n");
-    let tot: usize = quality.values().sum();
+    let tot: usize = quality
+        .iter()
+        .filter(|(k, _)| !k.starts_with('—'))
+        .map(|(_, v)| *v)
+        .sum();
     println!("出图质量({tot} 个分子×规范):");
     for (k, v) in &quality {
         println!("  {k:<16} {v:>6}  {:>5.1}%", 100.0 * *v as f64 / tot as f64);

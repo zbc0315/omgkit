@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 
 use omgkit_core::{BondOrder, MolBuilder};
 
-use crate::geom::{Point2, BOND_LEN};
+use crate::geom::{segments_cross, Point2, BOND_LEN};
 use crate::style::Style;
 
 /// 起点原子第一根键的方向。
@@ -91,13 +91,20 @@ pub(crate) fn place_neighbours(
 
     debug_assert_eq!(dirs.len(), todo.len(), "方向数必须与待放邻居数相等");
 
-    // 已经占住的位置。新原子**不许落在上面** —— 见 [`free_direction`]。
+    // 已经占住的位置,以及已经画出来的键。新原子不许落在前者上、新键不许与
+    // 后者交叉 —— 见 [`free_direction`]。
     let mut taken: Vec<Point2> = pos.values().copied().collect();
+    let mut drawn: Vec<(Point2, Point2)> = mol
+        .bonds()
+        .iter()
+        .filter_map(|b| Some((*pos.get(&b.begin)?, *pos.get(&b.end)?)))
+        .collect();
     let mut out = Vec::with_capacity(todo.len());
     for (&atom, theta) in todo.iter().zip(dirs) {
-        let theta = free_direction(center, theta, &taken);
+        let theta = free_direction(center, theta, &taken, &drawn);
         let at = center + Point2::new(BOND_LEN, 0.0).rotated(theta);
         taken.push(at);
+        drawn.push((center, at));
         out.push(Placed {
             atom,
             at,
@@ -122,26 +129,35 @@ pub(crate) fn place_neighbours(
 ///
 /// 按 30° 一档往两边试,与整张图的栅格一致;五档之内都腾不开就退回 `ideal`,
 /// 交给消冲突,消不掉再如实报进 `unresolved`。
-fn free_direction(center: Point2, ideal: f64, taken: &[Point2]) -> f64 {
+fn free_direction(center: Point2, ideal: f64, taken: &[Point2], drawn: &[(Point2, Point2)]) -> f64 {
     const STEP: f64 = std::f64::consts::FRAC_PI_6;
     /// 多近算重合。取键长的十分之一 —— 真正分得开的两个位置至少差半个键长。
     const TOL: f64 = 0.1;
-    let free = |t: f64| {
-        let p = center + Point2::new(BOND_LEN, 0.0).rotated(t);
+    let at = |t: f64| center + Point2::new(BOND_LEN, 0.0).rotated(t);
+    let clear = |t: f64| {
+        let p = at(t);
         !taken.iter().any(|q| p.dist(*q) < TOL)
     };
-    if free(ideal) {
-        return ideal;
-    }
+    // 新键与已画的键交叉。共端点不算 —— 那是相邻的键,`segments_cross` 已经放过。
+    let uncrossed = |t: f64| {
+        let p = at(t);
+        !drawn.iter().any(|(u, v)| segments_cross(center, p, *u, *v))
+    };
+
+    // 候选:理想方向,然后按 30° 一档往两边铺开
+    let mut cands = Vec::with_capacity(11);
+    cands.push(ideal);
     for k in 1..=5 {
-        for s in [1.0, -1.0] {
-            let t = ideal + s * STEP * f64::from(k);
-            if free(t) {
-                return t;
-            }
-        }
+        cands.push(ideal + STEP * f64::from(k));
+        cands.push(ideal - STEP * f64::from(k));
     }
-    ideal
+
+    // 两轮:先要"既不重合也不交叉",都腾不开就退而只求"不重合"。
+    // **重合排在交叉前面** —— 重合会凭空造出一个假环,交叉只是难读。
+    if let Some(t) = cands.iter().find(|t| clear(**t) && uncrossed(**t)) {
+        return *t;
+    }
+    cands.iter().copied().find(|t| clear(*t)).unwrap_or(ideal)
 }
 
 /// 一个原子周围相邻两根键的理想夹角(弧度)。
