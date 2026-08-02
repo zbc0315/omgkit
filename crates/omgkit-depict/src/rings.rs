@@ -76,7 +76,10 @@ pub(crate) fn layout_local(
 
     if sys.rings.is_empty() {
         // 环感知说这里有环、SSSR 却一个都没给出来。不猜,直接走退化。
-        return (relax(mol, &sys.atoms, ranks), Some(bridged(&sys.atoms)));
+        return (
+            relax(mol, &sys.atoms, ranks, &sys.rings),
+            Some(bridged(&sys.atoms)),
+        );
     }
 
     // 起手环:先按大小(大环更能定住整体形状),再按规范秩 —— 不看存储下标
@@ -138,7 +141,7 @@ pub(crate) fn layout_local(
             // 剩下的环都不是邻稠 —— 桥环。整个系统交给松弛。
             // 桥环一经识别就**丢掉部分结果**,整个系统重排 —— 见 relax 的注释
             degraded = Some(bridged(&sys.atoms));
-            return (relax(mol, &sys.atoms, ranks), degraded);
+            return (relax(mol, &sys.atoms, ranks, &sys.rings), degraded);
         };
 
         fuse_on_bond(order[i], u, v, &mut pos);
@@ -258,23 +261,103 @@ fn centroid(pts: impl Iterator<Item = Point2>) -> Point2 {
 ///
 /// 键长拉向 [`BOND_LEN`],非键原子互斥。给不出标准键角,也不保证消得掉重叠 ——
 /// 这正是调用方要把它记进 [`Degradation`] 的原因。
-fn relax(mol: &MolBuilder, atoms: &[u32], ranks: &[u32]) -> BTreeMap<u32, Point2> {
+fn relax(mol: &MolBuilder, atoms: &[u32], ranks: &[u32], rings: &[&Ring]) -> BTreeMap<u32, Point2> {
     // **原子按规范秩排序,不按存储下标。** 初值、乃至浮点求和的次序都因此固定,
     // 于是同一个分子的任何写法得到同一张图。
     //
     // 这里刻意**不**接受"贪心走到一半"的部分结果当种子。那个部分结果依赖遍历
     // 顺序,拿它当初值会把写法依赖直接带进来 —— 实测:苊的两种写法就是这样
     // 给出了两个不同形状,而萘、菲、蒽因为太对称,根本触发不到,看着一切正常。
-    let mut atoms: Vec<u32> = atoms.to_vec();
-    atoms.sort_by_key(|a| (ranks[*a as usize], *a));
-    let atoms = &atoms[..];
+    let mut sorted: Vec<u32> = atoms.to_vec();
+    sorted.sort_by_key(|a| (ranks[*a as usize], *a));
+
+    // **多起点。** 松弛是局部下降,落到哪个局部极小全看初值。单一初值下
+    // 实测 177 个桥环系统里 172 个(97%)自身有键交叉 —— 那不是消冲突没做好,
+    // 消冲突根本够不着:环系统是 2-连通的刚性块,翻转动不了它内部的相对位置。
+    //
+    // 换几个初值再挑最好的,算法一个字不用改。每个初值都由规范秩派生,
+    // 挑选时的平局用量化坐标序列打破,写法无关这条不受影响。
+    let mut best: Option<(Quality, BTreeMap<u32, Point2>)> = None;
+    for seed in 0..SEEDS {
+        let out = relax_from(mol, &sorted, seed, rings, ranks);
+        let key = quality(mol, &out, ranks);
+        let take = match &best {
+            None => true,
+            Some((b, _)) => key < *b,
+        };
+        if take {
+            best = Some((key, out));
+        }
+    }
+    best.expect("SEEDS 至少为 1").1
+}
+
+/// 试几个初值。**每多一个都要有个说法**,而且要拿全量语料量过。
+///
+/// 试过第 6 个(多边形起手 + 新原子放进最大空隙):交叉多消 6 处,写法无关
+/// 却多 6 处违例。**写法无关是本库的头号契约,不拿它换**,所以没要。
+const SEEDS: usize = 5;
+
+/// 一个松弛解好不好:(系统内自交的键对数, 最大键长偏差, 量化坐标序列)。
+///
+/// **越小越好。**
+type Quality = (usize, i64, Vec<(i64, i64)>);
+
+/// 给一个松弛解打分,口径见 [`Quality`]。
+///
+/// 键长偏差排第二是因为这条路径上"键长全等"本来就不成立(实测全部 177 个
+/// 桥环系统 relax 之后偏差都 ≥20%),但同样糟的两个解里该挑偏差小的。
+/// 第三项是平局兜底:不留任意性,同一个分子的任何写法挑到同一个解。
+fn quality(mol: &MolBuilder, pos: &BTreeMap<u32, Point2>, ranks: &[u32]) -> Quality {
+    let live: Vec<(u32, Point2, Point2)> = mol
+        .bonds()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| {
+            Some((
+                u32::try_from(i).ok()?,
+                *pos.get(&b.begin)?,
+                *pos.get(&b.end)?,
+            ))
+        })
+        .collect();
+    let mut cross = 0usize;
+    for (k, (_, u1, v1)) in live.iter().enumerate() {
+        for (_, u2, v2) in &live[k + 1..] {
+            if crate::geom::segments_cross(*u1, *v1, *u2, *v2) {
+                cross += 1;
+            }
+        }
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let dev = live
+        .iter()
+        .map(|(_, u, v)| ((u.dist(*v) - BOND_LEN).abs() * 1e6).round() as i64)
+        .max()
+        .unwrap_or(0);
+    // **按规范秩排,不按原子下标。** `BTreeMap` 的迭代序是下标序,拿它当平局
+    // 兜底就把写法依赖带了进来 —— 两种写法会在同分的几个解里挑到不同的那个。
+    let mut by_rank: Vec<(u32, Point2)> =
+        pos.iter().map(|(a, p)| (ranks[*a as usize], *p)).collect();
+    by_rank.sort_by_key(|x| x.0);
+    #[allow(clippy::cast_possible_truncation)]
+    let seq: Vec<(i64, i64)> = by_rank
+        .iter()
+        .map(|(_, p)| ((p.x * 1e6).round() as i64, (p.y * 1e6).round() as i64))
+        .collect();
+    (cross, dev, seq)
+}
+
+/// 从第 `seed` 个初值出发做一遍松弛。`atoms` 已按规范秩排好。
+fn relax_from(
+    mol: &MolBuilder,
+    atoms: &[u32],
+    seed: usize,
+    rings: &[&Ring],
+    ranks: &[u32],
+) -> BTreeMap<u32, Point2> {
     let idx: BTreeMap<u32, usize> = atoms.iter().enumerate().map(|(i, a)| (*a, i)).collect();
     let n = atoms.len();
-
-    let r = BOND_LEN * n as f64 / std::f64::consts::TAU.max(1.0);
-    let mut p: Vec<Point2> = (0..n)
-        .map(|i| Point2::new(r, 0.0).rotated(std::f64::consts::TAU * i as f64 / n as f64))
-        .collect();
 
     let bonded: Vec<(usize, usize)> = mol
         .bonds()
@@ -282,9 +365,43 @@ fn relax(mol: &MolBuilder, atoms: &[u32], ranks: &[u32]) -> BTreeMap<u32, Point2
         .filter_map(|b| Some((*idx.get(&b.begin)?, *idx.get(&b.end)?)))
         .collect();
 
+    // 初值 4:**最大的那个环先摆成正多边形**,其余原子沿着已放好的邻居向外
+    // 铺开。前四个初值都是"所有原子摆在一个圆上",拓扑上太像,弹簧下降往往
+    // 收敛到同一批坏极小;这个起手的形状不一样,实测它才是降幅的主要来源。
+    if seed >= 4 {
+        if let Some(p) = polygon_seed(mol, atoms, rings, ranks, &idx, seed == 5) {
+            return settle(p, n, &bonded, atoms);
+        }
+    }
+
+    // 其余初值全部由规范秩派生,不看存储下标:
+    //   0 圆环、规范秩序      1 圆环、逆序
+    //   2 圆环、BFS 序        3 圆环、隔一个取一个(把成键的原子在圆上分开)
+    let order: Vec<usize> = match seed {
+        1 => (0..n).rev().collect(),
+        2 => bfs_order(n, &bonded),
+        3 => (0..n).step_by(2).chain((1..n).step_by(2)).collect(),
+        _ => (0..n).collect(),
+    };
+    let r = BOND_LEN * n as f64 / std::f64::consts::TAU.max(1.0);
+    let mut p: Vec<Point2> = vec![Point2::ORIGIN; n];
+    for (slot, &i) in order.iter().enumerate() {
+        p[i] = Point2::new(r, 0.0).rotated(std::f64::consts::TAU * slot as f64 / n as f64);
+    }
+
+    settle(p, n, &bonded, atoms)
+}
+
+/// 弹簧松弛本体:键长拉到 1,靠得太近的推开。400 步。
+fn settle(
+    mut p: Vec<Point2>,
+    n: usize,
+    bonded: &[(usize, usize)],
+    atoms: &[u32],
+) -> BTreeMap<u32, Point2> {
     for _ in 0..400 {
         let mut force = vec![Point2::ORIGIN; n];
-        for &(i, j) in &bonded {
+        for &(i, j) in bonded {
             let d = p[j] - p[i];
             let len = d.norm().max(1e-6);
             let f = d.normalized() * ((len - BOND_LEN) * 0.35);
@@ -308,6 +425,145 @@ fn relax(mol: &MolBuilder, atoms: &[u32], ranks: &[u32]) -> BTreeMap<u32, Point2
     }
 
     atoms.iter().copied().zip(p).collect()
+}
+
+/// 初值:系统里最大的那个环摆成正多边形,其余原子沿已放好的邻居向外铺开。
+///
+/// 放不出来(系统里一个环都没有)时返回 `None`,退回圆环初值。
+fn polygon_seed(
+    mol: &MolBuilder,
+    atoms: &[u32],
+    rings: &[&Ring],
+    ranks: &[u32],
+    idx: &BTreeMap<u32, usize>,
+    widest_gap: bool,
+) -> Option<Vec<Point2>> {
+    // 起手环:先按大小,再按规范秩 —— 平局不许看存储下标
+    let first = rings
+        .iter()
+        .filter(|r| r.atoms.iter().all(|a| idx.contains_key(a)))
+        .min_by_key(|r| (std::cmp::Reverse(r.atoms.len()), ring_key(r, ranks)))?;
+    let cyc = canonical_cycle(&first.atoms, ranks);
+
+    let n = atoms.len();
+    let mut p = vec![Point2::ORIGIN; n];
+    let mut placed = vec![false; n];
+    for (a, q) in cyc.iter().zip(regular_polygon(cyc.len(), 0.0)) {
+        let i = *idx.get(a)?;
+        p[i] = q;
+        placed[i] = true;
+    }
+
+    // 其余的沿已放好的邻居向外铺:方向取"背离已放好那堆的质心"
+    loop {
+        let next = atoms.iter().enumerate().find(|(i, a)| {
+            !placed[*i]
+                && mol
+                    .neighbors(**a)
+                    .any(|(nb, _)| idx.get(&nb).is_some_and(|j| placed[*j]))
+        });
+        let Some((i, a)) = next else { break };
+        // **锚点按规范秩挑,不看 `neighbors` 的存储序。** 有两个已放好的邻居
+        // 可选时,拿存储序挑就把写法依赖直接带了进来 —— 实测全量语料的写法
+        // 无关违例会从 129 涨到 349。
+        let anchor = mol
+            .neighbors(*a)
+            .filter_map(|(nb, _)| Some((ranks[nb as usize], nb, *idx.get(&nb)?)))
+            .filter(|(_, _, j)| placed[*j])
+            .min()
+            .map(|(_, _, j)| j)?;
+        let dir = if widest_gap {
+            // 放进锚点周围**最大的那个空隙**。已占的方向就是它那些已放好的
+            // 邻居,空隙取最大的那个,新原子摆在正中间。
+            let mut occ: Vec<f64> = mol
+                .neighbors(atoms[anchor])
+                .filter_map(|(nb, _)| idx.get(&nb).copied())
+                .filter(|j| placed[*j])
+                .map(|j| (p[j] - p[anchor]).angle())
+                .collect();
+            occ.sort_by(|x, y| x.partial_cmp(y).expect("坐标不含 NaN"));
+            widest(&occ)
+        } else {
+            // 背离已放好那堆的质心
+            let (mut c, mut k) = (Point2::ORIGIN, 0.0_f64);
+            for (j, on) in placed.iter().enumerate() {
+                if *on {
+                    c = c + p[j];
+                    k += 1.0;
+                }
+            }
+            let away = (p[anchor] - c * (1.0 / k.max(1.0))).normalized();
+            if away.norm() < 1e-9 {
+                0.0
+            } else {
+                away.angle()
+            }
+        };
+        p[i] = p[anchor] + Point2::new(BOND_LEN, 0.0).rotated(dir);
+        placed[i] = true;
+    }
+    // 还有没连上的(理论上不会 —— 环系统是连通的),摊在圆上兜底
+    for (i, on) in placed.iter().enumerate() {
+        if !on {
+            p[i] = Point2::new(BOND_LEN * n as f64, 0.0)
+                .rotated(std::f64::consts::TAU * i as f64 / n as f64);
+        }
+    }
+    Some(p)
+}
+
+/// 已排序角度里最大空隙的中点。空表给 0。
+fn widest(sorted: &[f64]) -> f64 {
+    let n = sorted.len();
+    if n == 0 {
+        return 0.0;
+    }
+    if n == 1 {
+        return sorted[0] + std::f64::consts::PI;
+    }
+    let mut best = (
+        sorted[n - 1],
+        sorted[0] + std::f64::consts::TAU - sorted[n - 1],
+    );
+    for i in 0..n - 1 {
+        let g = sorted[i + 1] - sorted[i];
+        if g > best.1 {
+            best = (sorted[i], g);
+        }
+    }
+    best.0 + best.1 / 2.0
+}
+
+/// 从 0 号原子出发的 BFS 序。邻接表按下标升序,而下标已经是规范秩序,
+/// 所以这个序也与写法无关。
+fn bfs_order(n: usize, bonded: &[(usize, usize)]) -> Vec<usize> {
+    let mut adj = vec![Vec::new(); n];
+    for &(i, j) in bonded {
+        adj[i].push(j);
+        adj[j].push(i);
+    }
+    for a in &mut adj {
+        a.sort_unstable();
+    }
+    let mut seen = vec![false; n];
+    let mut out = Vec::with_capacity(n);
+    for start in 0..n {
+        if seen[start] {
+            continue;
+        }
+        seen[start] = true;
+        let mut q = std::collections::VecDeque::from([start]);
+        while let Some(x) = q.pop_front() {
+            out.push(x);
+            for &y in &adj[x] {
+                if !seen[y] {
+                    seen[y] = true;
+                    q.push_back(y);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// 把一个局部布局整体搬到位:让 `anchor` 落在 `at`,并让整体质心朝 `dir`。
@@ -337,6 +593,68 @@ pub(crate) fn place_at(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_bridged_system_is_relaxed_from_several_starts() {
+        // 松弛是局部下降,落到哪个局部极小全看初值。单一初值下实测 177 个桥环
+        // 系统里 172 个自身有键交叉 —— 而**消冲突根本够不着**:环系统是 2-连通
+        // 的刚性块,翻转只动挂在外面的子树,动不了它内部的相对位置。
+        //
+        // 这条要求多起点确实起作用:把候选砍到一个,下面这些分子的桥环系统
+        // 内部就会出现自交。
+        let mut won = 0;
+        for smi in [
+            "CC1(C)[C@@H]2CC[C@@]1(C)C(=O)C2",                          // 樟脑
+            "CN1CC[C@]23c4c5ccc(O)c4O[C@H]2[C@@H](O)C=C[C@H]3[C@H]1C5", // 吗啡
+            "CN1[C@H]2CC[C@@H]1C[C@@H](C2)OC(=O)C(CO)c1ccccc1",         // 阿托品
+        ] {
+            let mut m = omgkit_io::smiles::parse(smi).unwrap();
+            omgkit_chem::pipeline::sanitize(&mut m).unwrap();
+            let ranks = omgkit_io::canon::canonical_ranks(&m);
+            let systems = omgkit_chem::rings::fused_ring_systems(&m);
+            let rs = omgkit_chem::sssr::ring_set(&m);
+            let mut checked = 0;
+            for sys in group(&systems, &rs) {
+                if sys.rings.is_empty() || sys.atoms.len() < 6 {
+                    continue;
+                }
+                let (pos, deg) = layout_local(&m, &sys, &ranks);
+                // **只算真正走了松弛那条路的系统。** 邻稠系统走的是正多边形
+                // 拼接,拿它去和强行松弛比,当然赢 —— 那样这条判据就是空过的。
+                if deg.is_none() {
+                    continue;
+                }
+                let single = relax_from(
+                    &m,
+                    &{
+                        let mut a = sys.atoms.clone();
+                        a.sort_by_key(|x| (ranks[*x as usize], *x));
+                        a
+                    },
+                    0,
+                    &sys.rings,
+                    &ranks,
+                );
+                let (best, _, _) = quality(&m, &pos, &ranks);
+                let (one, _, _) = quality(&m, &single, &ranks);
+                assert!(
+                    best <= one,
+                    "{smi}:多起点挑出来的解({best} 处自交)还不如单起点({one} 处)"
+                );
+                // `best <= one` 是恒真的(初值 0 本来就在候选里),单靠它这条
+                // 判据是空过的。真正要守的是**多起点确实赢过单起点**。
+                if best < one {
+                    won += 1;
+                }
+                checked += 1;
+            }
+            assert!(checked >= 1, "{smi}:一个环系统都没查到");
+        }
+        assert!(
+            won >= 1,
+            "多起点在这三个桥环分子上一次都没赢过单起点 —— 那它就是白跑的"
+        );
+    }
+
     use super::*;
     use omgkit_chem::{rings::fused_ring_systems, sssr::ring_set};
 

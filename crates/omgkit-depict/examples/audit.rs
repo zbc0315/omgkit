@@ -85,6 +85,13 @@ fn main() {
                     })
                 });
                 *quality
+                    .entry(if d.degraded.is_empty() {
+                        "——   布局没退化的"
+                    } else {
+                        "——   布局已退化的"
+                    })
+                    .or_default() += 1usize;
+                *quality
                     .entry(if terminal {
                         "——   涉及端基键的"
                     } else {

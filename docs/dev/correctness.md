@@ -209,10 +209,42 @@ substituent there, and step round by 30° if it is. An angle off its ideal is
 merely ugly; it does not make anyone misread the structure. **89 cases remain**
 (0.5%), all of them where five steps were not enough to find room.
 
-### Crossing bonds: 2.2%, and most of them cannot be moved
+### Crossing bonds: the first classification was wrong
 
-Two bonds crossing is a defect in a structure diagram. **381 / 17662 (2.2%)**
-of pictures have at least one, all reported in `Depiction::crossings`.
+381 crossings were first put down as "320 the flip operator can reach but does
+not fix". That was wrong. Bucketed by what the two crossing bonds actually are:
+**330 (86.6%) are a fused ring system self-intersecting**, and that set is
+exactly the set where `degraded` is non-empty.
+
+Collision relief cannot reach them **geometrically**: a fused ring system is
+2-connected and ring bonds are excluded from the flip candidates, so two bonds
+inside one system keep their relative positions under every flip. Enumerating
+all 2^k reachable configurations confirms it — only **19 of 381** can be
+cleared by flips at all.
+
+`rings::relax` is local descent from a single starting guess. Giving it five
+starts, all derived from canonical rank, and picking by (self-intersections,
+worst bond-length deviation, rank-ordered quantised coordinates):
+
+| | before | multi-start |
+|---|---:|---:|
+| pictures with a crossing | 381 | **281** |
+| of those, ring-system self-intersection | 330 | 230 |
+| writing-independence violations | 129 | **125** |
+
+The start that does the work is "**lay the largest ring out as a regular
+polygon**, then spread the rest outward from placed neighbours". The other four
+all put every atom on one circle — too alike topologically, and the spring
+descent falls into the same bad minima.
+
+Two writing dependences were introduced and caught while doing it: picking the
+anchor by `neighbors` storage order (violations 129 → 349), and using
+`BTreeMap`'s index iteration order as the tie-break key. Both now go by
+canonical rank.
+
+### The 51 that remain on a clean layout
+
+These layouts are clean and still cross. Reported in `Depiction::crossings`.
 
 Two attempts, both near-useless, recorded so nobody repeats them:
 
@@ -224,11 +256,15 @@ Two attempts, both near-useless, recorded so nobody repeats them:
   the code was misread. Running it the other way round raised crossings from
   381 to 415 with no reduction in collisions.
 
-What remains splits cleanly: **320 involve no terminal bond** — the flip
-operator can reach them, but no flip improves the score — and **61 involve a
-terminal bond**, which a flip provably cannot move (mirroring a leaf across its
-own bond is a no-op). Fixing those needs an operator the design deliberately
-does not have yet.
+Clearing them needs the operator generalised from "flip one bond" to "take an
+articulation point and one component hanging off it, and place that component
+in one of 24 lattice poses". That subsumes terminal redirection, angle opening
+and rotating a whole system about a spiro atom, and it changes exactly one bond
+angle — the one at the articulation point. An out-of-tree experiment clears all
+51, at the price of adding a level to the score (**coincidences ahead of
+crossings**, or it trades a phantom ring for a crossing) and giving up "bond
+angle equals its ideal" — which no audit property guards today. **Not
+implemented.**
 
 ### Current standing
 
