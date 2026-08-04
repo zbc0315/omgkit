@@ -87,10 +87,17 @@ pub(crate) fn place_neighbours(
     let occupied: Vec<f64> = occ.iter().map(|x| x.1).collect();
 
     let ideal = ideal_angle(mol, a, style);
-    let dirs = allocate(&occupied, todo.len(), ideal, zig);
+    let mut dirs = allocate(&occupied, todo.len(), ideal, zig);
 
-    debug_assert_eq!(dirs.len(), todo.len(), "方向数必须与待放邻居数相等");
-
+    // **只有一个已占方向时,±理想角两侧都是合法的,而 `allocate` 按锯齿的符号
+    // 盲选。** 挑错一侧,挂在环上的臂就朝环卷回去 —— 臂上的取代基撞到环,只能
+    // 按 30° 一档挪,挪出来就是 120∓30 = 90° 或 150°。
+    //
+    // 实测:阿司匹林乙酰基那个 sp² 碳,三个角是 90/120/150,而它三个都该是
+    // 120°;整条乙酰基臂折回来贴着苯环。
+    //
+    // 所以两侧都算一遍**拥挤度**,挑空的那边。直链两侧一样空,分不出高下时
+    // 保持锯齿的选择 —— 锯齿因此不受影响。
     // 已经占住的位置,以及已经画出来的键。新原子不许落在前者上、新键不许与
     // 后者交叉 —— 见 [`free_direction`]。
     let mut taken: Vec<Point2> = pos.values().copied().collect();
@@ -99,6 +106,38 @@ pub(crate) fn place_neighbours(
         .iter()
         .filter_map(|b| Some((*pos.get(&b.begin)?, *pos.get(&b.end)?)))
         .collect();
+
+    if occupied.len() == 1 && !todo.is_empty() {
+        // 两侧都算一遍**拥挤度**,挑空的那边;分不出高下时保持锯齿的选择 ——
+        // 直链两侧一样空,锯齿因此不受影响。
+        //
+        // 试过一个更保守的版本:"只在这一侧确实会被迫歪角时才换边"(数一数
+        // `free_direction` 会挪走几个)。它**救不了阿司匹林的 ACS 那张** ——
+        // 乙酰基那个 sp² 碳仍是 90/120/150,因为羰基氧的理想位置在放它的那一刻
+        // 还没被占,是后面的原子挤过来的。拥挤度看的是整体,才拦得住。
+        //
+        // 拥挤度:新位置到每个已放好的原子的平方反比之和(与 RDKit 的 density
+        // 同一个口径)。**量化之后再比** —— 直接比浮点会让"分不出高下"取决于
+        // 末位,而那一位取决于运算次序,写法一换就可能翻边。
+        #[allow(clippy::cast_possible_truncation)]
+        let crowd = |ds: &[f64]| -> i64 {
+            let mut sum = 0.0_f64;
+            for t in ds {
+                let p = center + Point2::new(BOND_LEN, 0.0).rotated(*t);
+                for q in pos.values() {
+                    sum += 1.0 / (p.dist(*q).powi(2) + 1e-6);
+                }
+            }
+            (sum * 1e6).round() as i64
+        };
+        let mirror: Vec<f64> = dirs.iter().map(|t| 2.0 * occupied[0] - t).collect();
+        if crowd(&mirror) < crowd(&dirs) {
+            dirs = mirror;
+        }
+    }
+
+    debug_assert_eq!(dirs.len(), todo.len(), "方向数必须与待放邻居数相等");
+
     let mut out = Vec::with_capacity(todo.len());
     for (&atom, theta) in todo.iter().zip(dirs) {
         let theta = free_direction(center, theta, &occupied, &taken, &drawn);
@@ -189,6 +228,15 @@ fn free_direction(
     };
 
     // 候选:理想方向,然后按 30° 一档往两边铺开。同一档里角度宽的排前面。
+    //
+    // # 试过在这里加"对侧那个同样理想的位置",没用
+    //
+    // 想法是:理想位置被占时,先试它关于已占方向的镜像(仍是精确的理想角),
+    // 再考虑偏离。**变异验证说它不吃劲** —— 去掉之后角度判据照样绿,而全量
+    // 语料上去掉它反而更好(窄角 209 → 180、交叉 83 → 78、干净 +14)。
+    //
+    // 原因是"对侧那个理想位置"通常正被兄弟取代基占着。真正管用的是**上游**
+    // 那步:在 `place_neighbours` 里比较两侧的拥挤度、整条臂换边。
     let mut ranked: Vec<(u32, i64, f64)> = vec![(0, 0, ideal)];
     for k in 1..=5u32 {
         for sign in [1.0, -1.0] {
@@ -291,6 +339,61 @@ fn largest_gap(sorted: &[f64]) -> (f64, f64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_arm_hanging_off_a_ring_keeps_its_ideal_angles() {
+        // `allocate` 在"只有一个已占方向"时按锯齿的符号取 ±理想角,**那个符号
+        // 不看旁边有没有东西**。挑错一侧,挂在环上的臂就朝环卷回去,臂上的
+        // 取代基撞到环,只能按 30° 一档挪 —— 挪出来就是 120∓30 = 90° 或 150°。
+        //
+        // 实测:阿司匹林(ChemDraw 规范)乙酰基那个 sp² 碳,三个角是
+        // **90 / 120 / 150**,三个都该是 120°;整条乙酰基臂折回来贴着苯环。
+        //
+        // 修法是在偏离理想角**之前**先试"对侧"那个同样理想的位置(把理想方向
+        // 关于已占方向镜像,镜像保角)。这条判据守的就是"能不歪就不歪"。
+        for smi in [
+            "CC(=O)Oc1ccccc1C(=O)O", // 阿司匹林
+            "CC(=O)Nc1ccc(O)cc1",    // 扑热息痛
+            "CC(=O)Oc1ccccc1",       // 乙酸苯酯
+            "COc1ccccc1OC(C)=O",     // 两个取代基挤在邻位
+        ] {
+            for style in &Style::ALL {
+                let mut m = omgkit_io::smiles::parse(smi).unwrap();
+                omgkit_chem::pipeline::sanitize(&mut m).unwrap();
+                omgkit_io::stereo::perceive_bond_stereo(&mut m);
+                let d = crate::generate(&m, style);
+                for a in 0..u32::try_from(m.num_atoms()).unwrap() {
+                    let n: Vec<u32> = m.neighbors(a).map(|(x, _)| x).collect();
+                    if n.len() < 2 {
+                        continue;
+                    }
+                    let c = d.coords[a as usize];
+                    for i in 0..n.len() {
+                        for j in (i + 1)..n.len() {
+                            let u = (d.coords[n[i] as usize] - c).normalized();
+                            let v = (d.coords[n[j] as usize] - c).normalized();
+                            let deg = u.dot(v).clamp(-1.0, 1.0).acos().to_degrees();
+                            // 允许的角是**这个原子自己的理想角的整数倍**:度 3
+                            // 只许 120,度 4 许 90 与 180,sp 只许 180。
+                            // 拿一张白名单(120/180/90)是不行的 —— 度 3 的
+                            // 原子上 90° 会被放过,而那正是要抓的毛病。
+                            let ideal = ideal_angle(&m, a, style).to_degrees();
+                            let ok = (1..=6)
+                                .map(|k| ideal * f64::from(k))
+                                .take_while(|t| *t <= 180.5)
+                                .any(|t| (deg - t).abs() < 1.0);
+                            assert!(
+                                ok,
+                                "[{}] {smi}:{}-{a}-{} 的夹角是 {deg:.1}°,不是标准角 —— \
+                                 理想位置被占时该先试对侧,而不是按 30° 一档歪",
+                                style.name, n[i], n[j]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn avoiding_a_taken_spot_does_not_pinch_the_angle_to_sixty_degrees() {
         // 位置被占了要挪,而挪的方向落在哪一侧决定键角是变宽还是变窄。

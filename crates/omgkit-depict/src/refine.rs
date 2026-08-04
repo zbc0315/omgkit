@@ -699,7 +699,30 @@ mod tests {
                 assert!(pos[&a].dist(pos[&b]) > 0.3, "原子 {a} 与 {b} 仍然几乎重合");
             }
         }
-        assert!(!rep.flipped.is_empty(), "应当至少翻转过一根键");
+        // **先前这里断言"至少翻转过一根键"** —— 那是防判据空过的:重合本来就不
+        // 发生的话,上面那句是恒真的。
+        //
+        // 现在不该再这么断言了,因为**修法搬到了上游**:`chains::place_neighbours`
+        // 在"只有一个已占方向"时会比较两侧的拥挤度,乙酰基那条臂不再朝苯环卷
+        // 回去,两个羰基氧从一开始就不落在同一点上,`relieve` 无事可做。
+        //
+        // 防空过换一个更强的说法:**布局阶段(消冲突之前)就已经没有重合**。
+        // 它比"翻过一根键"更贴近现在的事实,而且一旦有人把上游那个改动去掉,
+        // 这一条会立刻红。
+        let mut before: BTreeMap<u32, Point2> = BTreeMap::new();
+        for p in layout::layout_all(&m, &omgkit_io::canon::canonical_ranks(&m), &Style::ACS_1996) {
+            before.extend(p.pos);
+        }
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let (a, b) = (i as u32, j as u32);
+                assert!(
+                    before[&a].dist(before[&b]) > 0.3,
+                    "布局阶段原子 {a} 与 {b} 就重合了 —— 上游那个「挑空的一侧」没起作用"
+                );
+            }
+        }
+        let _ = &rep;
     }
 
     /// 螺环分子。前几个取自语料,后几个是教科书上的螺环。
