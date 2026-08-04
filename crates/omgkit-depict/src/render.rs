@@ -226,8 +226,9 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
 
     for (i, l) in labels.iter().enumerate() {
         if let Some(l) = l {
+            // 整串朝一侧挪 `dx`,让**元素符号**落在原子位置上
             items.push(Primitive::Text {
-                at: to_pt(depiction.coords[i]),
+                at: to_pt(depiction.coords[i]) + Point2::new(l.dx * scale, 0.0),
                 runs: l.runs.clone(),
                 size: style.atom_label_pt,
             });
@@ -490,19 +491,15 @@ pub fn is_collinear(mol: &MolBuilder, a: u32, coords: &[Point2]) -> bool {
 /// 一眼就看得出来。
 ///
 /// 标签是 `text-anchor="middle"` 摆的,盒以原子为心,所以这里按居中的轴对齐盒算。
-fn box_reach(d: Point2, half_w: f64, half_h: f64) -> f64 {
-    let (ax, ay) = (d.x.abs(), d.y.abs());
-    let tx = if ax > 1e-12 {
-        half_w / ax
-    } else {
-        f64::INFINITY
+fn box_reach(from: Point2, d: Point2, half_w: f64, half_h: f64) -> f64 {
+    let t = |o: f64, dd: f64, h: f64| {
+        if dd.abs() < 1e-12 {
+            f64::INFINITY
+        } else {
+            ((if dd > 0.0 { h } else { -h }) - o) / dd
+        }
     };
-    let ty = if ay > 1e-12 {
-        half_h / ay
-    } else {
-        f64::INFINITY
-    };
-    tx.min(ty)
+    t(from.x, d.x, half_w).min(t(from.y, d.y, half_h)).max(0.0)
 }
 
 fn trim(
@@ -513,12 +510,15 @@ fn trim(
     style: &Style,
 ) -> (Point2, Point2) {
     let d = (pb - pa).normalized();
-    // 两端的方向一正一反,而 `box_reach` 取了绝对值 —— 同一个值两边都能用
-    let cut = |l: &Option<Label>| {
-        l.as_ref()
-            .map_or(0.0, |l| box_reach(d, l.half_w, l.half_h) + style.margin())
+    // **两端要各算各的。** 盒心不在原子上(整串挪开了,好让元素符号落在原子
+    // 位置上,见 [`Label::dx`](crate::label::Label::dx)),所以盒不再左右对称,
+    // 一个值两边通用是不成立的 —— 起点朝 `d` 出盒,终点朝 `−d` 出盒。
+    let cut = |l: &Option<Label>, dir: Point2| {
+        l.as_ref().map_or(0.0, |l| {
+            box_reach(Point2::new(-l.dx, 0.0), dir, l.half_w, l.half_h) + style.margin()
+        })
     };
-    let (ca, cb) = (cut(la), cut(lb));
+    let (ca, cb) = (cut(la, d), cut(lb, d * -1.0));
     let len = pa.dist(pb);
     // 两端加起来比整根键还长时按比例压缩 —— 否则线段会反向,画出一条穿过标签的短线
     let (ca, cb) = if ca + cb >= len * 0.9 {
@@ -769,9 +769,10 @@ mod tests {
         let m = prep("C=CC(=[NH2+])N");
         let l = label_for(&m, 3, style, HSide::Right).expect("[NH2+] 该有标签");
 
-        // 竖直方向接近:盒边在 half_h,外接圆在 hypot(half_w, half_h)
+        // 竖直方向接近:盒边在 half_h,外接圆在 hypot(half_w, half_h)。
+        // 盒心横向偏开了 `dx`,而竖直方向不受影响 —— 上下边仍在 ±half_h。
         let up = Point2::new(0.0, 1.0);
-        let reach = box_reach(up, l.half_w, l.half_h);
+        let reach = box_reach(Point2::new(-l.dx, 0.0), up, l.half_w, l.half_h);
         assert!(
             (reach - l.half_h).abs() < 1e-9,
             "竖直方向该切到盒的上边 {},实得 {reach}",
@@ -805,7 +806,9 @@ mod tests {
         // 横向接近时两者本来就该一致(盒边正是 half_w),别把这条改坏
         let right = Point2::new(1.0, 0.0);
         assert!(
-            (box_reach(right, l.half_w, l.half_h) - l.half_w).abs() < 1e-9,
+            (box_reach(Point2::new(-l.dx, 0.0), right, l.half_w, l.half_h) - (l.half_w + l.dx))
+                .abs()
+                < 1e-9,
             "横向该切到盒的右边"
         );
     }
@@ -847,12 +850,14 @@ mod tests {
                             continue;
                         }
                         let dir = (pb - pa) * (1.0 / len);
-                        let need = |l: &Option<Label>| {
+                        let need = |l: &Option<Label>, dd: Point2| {
                             l.as_ref().map_or(0.0, |l| {
-                                box_reach(dir, l.half_w, l.half_h) + style.margin()
+                                box_reach(Point2::new(-l.dx, 0.0), dd, l.half_w, l.half_h)
+                                    + style.margin()
                             })
                         };
-                        if need(&labels[b.begin as usize]) + need(&labels[b.end as usize])
+                        if need(&labels[b.begin as usize], dir)
+                            + need(&labels[b.end as usize], dir * -1.0)
                             >= len * 0.9
                         {
                             v[b.begin as usize] = true;
@@ -882,7 +887,10 @@ mod tests {
                         let Primitive::Line { from, to, .. } = it else {
                             continue;
                         };
-                        let inside = |p: &Point2| (p.x - c.x).abs() < hw && (p.y - c.y).abs() < hh;
+                        // **盒心不在原子上** —— 整串朝一侧挪了 `dx`
+                        let bc = c + Point2::new(l.dx * scale, 0.0);
+                        let inside =
+                            |p: &Point2| (p.x - bc.x).abs() < hw && (p.y - bc.y).abs() < hh;
                         assert!(
                             !inside(from) && !inside(to),
                             "[{}] {smi}:原子 {a} 的标签 {} 被一条线的端点压在里面",
@@ -956,11 +964,27 @@ mod tests {
             &Some(l.clone()),
             &style,
         );
+        // **不能拿"离原子多远"当判据。** 盒心朝一侧挪了 `dx`(好让元素符号落在
+        // 原子位置上),所以离原子远近说明不了有没有盖住字 —— 要量的是**离盒心
+        // 多远**,而且要沿着键的方向比盒在那个方向上的半径。
+        let centre = d.coords[o as usize] + Point2::new(l.dx, 0.0);
+        let dir = (d.coords[o as usize] - d.coords[neighbour as usize]).normalized();
+        let from_centre = trimmed - centre;
+        // 端点在盒外:两个轴上至少有一个超出
+        let outside =
+            from_centre.x.abs() >= l.half_w - 1e-9 || from_centre.y.abs() >= l.half_h - 1e-9;
+        assert!(
+            outside,
+            "键停得太近,端点落进标签盒里了:端点离盒心 ({:.4}, {:.4}),盒半宽高 ({:.4}, {:.4})",
+            from_centre.x, from_centre.y, l.half_w, l.half_h
+        );
+        // 而且要**恰好**停在盒边外一个 margin —— 停太远就是先前那种大片空白
+        let reach = box_reach(Point2::new(-l.dx, 0.0), dir * -1.0, l.half_w, l.half_h);
         let gap = trimmed.dist(d.coords[o as usize]);
         assert!(
-            gap > l.half_w,
-            "键停得太近,会盖住标签:间隙 {gap},标签半宽 {}",
-            l.half_w
+            (gap - (reach + style.margin())).abs() < 1e-9,
+            "该停在盒边外一个 margin({}),实得 {gap}",
+            reach + style.margin()
         );
     }
 

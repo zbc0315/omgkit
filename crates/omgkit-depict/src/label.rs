@@ -152,6 +152,20 @@ pub struct Label {
     pub half_w: f64,
     /// 相对原子中心的**半高**,单位是键长
     pub half_h: f64,
+    /// 整串的中心该放在原子**横向偏开多少**的地方,单位是键长。
+    ///
+    /// # 为什么不能把整串居中
+    ///
+    /// 键连的是**元素符号**那个原子,不是整串。把 `OH` 整串居中,O 就落在原子
+    /// 位置左边 —— 实测 ACS 下 `OH` 全宽 1.042 个键长、`O` 单独 0.540,
+    /// **O 的中心离原子位置 0.251 个键长,整整四分之一根键**。
+    ///
+    /// `h_side` 把氢甩到键来向的反面,横着的键因此看着还对;**竖直的键就露馅**
+    /// —— 它落在盒的上/下边缘、横向居中,正好落在 O 和 H 中间。
+    ///
+    /// 所以把整串按这个量挪开,让符号回到原子上。盒还是那个盒,只是**盒心不在
+    /// 原子上**了 —— 裁键、判碰撞都要跟着算,见 `render::trim` 与 `refine::radii`。
+    pub dx: f64,
 }
 
 impl Label {
@@ -209,6 +223,8 @@ fn build(mol: &MolBuilder, atom: u32, style: &Style, h_side: HSide) -> Label {
         }
     };
 
+    // 记下元素符号在整串里的位置 —— 键要接到**符号**上,不是接到整串的中心
+    let mut before_sym_em = 0.0_f64;
     match h_side {
         HSide::Left => {
             // `H2N–`:氢在前,同位素仍贴着符号
@@ -216,16 +232,19 @@ fn build(mol: &MolBuilder, atom: u32, style: &Style, h_side: HSide) -> Label {
             if a.isotope != 0 {
                 runs.push(Run::Sup(a.isotope.to_string()));
             }
+            before_sym_em = runs.iter().map(Run::width_em).sum();
             runs.push(Run::Normal(symbol.into()));
         }
         HSide::Right => {
             if a.isotope != 0 {
                 runs.push(Run::Sup(a.isotope.to_string()));
+                before_sym_em = runs.iter().map(Run::width_em).sum();
             }
             runs.push(Run::Normal(symbol.into()));
             h_runs(&mut runs);
         }
     }
+    let sym_w_em = Run::Normal(symbol.into()).width_em();
 
     if a.formal_charge != 0 {
         runs.push(Run::Sup(charge_text(a.formal_charge)));
@@ -247,10 +266,17 @@ fn build(mol: &MolBuilder, atom: u32, style: &Style, h_side: HSide) -> Label {
     let top = CAP_HEIGHT / 2.0 + if has_sup { SUP_RISE } else { 0.0 };
     let bottom = CAP_HEIGHT / 2.0 + if has_sub { SUB_DROP } else { 0.0 };
 
+    // 整串要往哪边挪,才能让**元素符号**落在原子位置上。
+    //
+    // 符号中心相对整串左端在 `before_sym + sym_w/2`,整串中心在 `width/2`,
+    // 所以要把整串朝相反方向挪这个差。
+    let dx = (width_em / 2.0 - before_sym_em - sym_w_em / 2.0) * em;
+
     Label {
         runs,
         half_w: width_em * em / 2.0,
         half_h: top.max(bottom) * em,
+        dx,
     }
 }
 
@@ -321,6 +347,56 @@ mod tests {
         assert_eq!(plain("[O-]C", 0, HSide::Right).as_deref(), Some("O-"));
         assert_eq!(plain("[13CH4]", 0, HSide::Right).as_deref(), Some("13CH4"));
         assert_eq!(plain("[Fe+2]", 0, HSide::Right).as_deref(), Some("Fe2+"));
+    }
+
+    #[test]
+    fn the_element_symbol_sits_on_the_atom_not_on_the_string_centre() {
+        // **键连的是元素符号那个原子,不是整串。** 把 `OH` 整串居中,O 就落在
+        // 原子位置左边:实测 ACS 下 `OH` 全宽 1.042 个键长、`O` 单独 0.540,
+        // O 的中心离原子 **0.251 个键长,四分之一根键**。
+        //
+        // `h_side` 把氢甩到键来向的反面,横着的键因此看着还对;竖直的键就露馅
+        // —— 它落在盒的上/下边缘、横向居中,正好落在 O 和 H 中间。
+        //
+        // 判据从 `runs` **独立重算**符号该在哪,不复用 `build` 里那个中间量。
+        for (smi, atom) in [
+            ("CCO", 2u32),
+            ("NCC", 0),
+            ("CC(=O)Nc1ccc(O)cc1", 7),
+            ("[NH4+]", 0),
+            ("[13CH4]", 0),
+        ] {
+            let m = prep(smi);
+            let sym = element::by_atomic_num(m.atoms()[atom as usize].atomic_num)
+                .expect("元素表里有这个原子")
+                .symbol;
+            for style in &Style::ALL {
+                for side in [HSide::Right, HSide::Left] {
+                    let Some(l) = label_for(&m, atom, style, side) else {
+                        continue;
+                    };
+                    let em = style.label_size();
+                    let mut x = 0.0_f64;
+                    let mut centre = None;
+                    for r in &l.runs {
+                        let w = r.width_em();
+                        if matches!(r, Run::Normal(t) if t == sym) {
+                            centre = Some(x + w / 2.0);
+                        }
+                        x += w;
+                    }
+                    let c = centre.expect("标签里该有元素符号");
+                    // 整串左端在 `原子 + dx − half_w`
+                    let off = l.dx - l.half_w + c * em;
+                    assert!(
+                        off.abs() < 1e-9,
+                        "[{}] {smi} 原子 {atom} 标签 {}:元素符号 {sym} 的中心离原子 {off:.4} 个键长,该是 0",
+                        style.name,
+                        l.plain()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
