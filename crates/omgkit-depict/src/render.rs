@@ -315,7 +315,7 @@ pub fn drawn_orders(mol: &MolBuilder) -> Vec<BondOrder> {
 ///
 /// `bnd` 是 [`bounds`] 的返回值。单独抽出来是为了让判据能用同一套映射 ——
 /// 判据自己再写一遍的话,写错的方式可以和实现一模一样,就守不住了。
-fn to_canvas(p: Point2, bnd: (f64, f64, f64, f64), scale: f64) -> Point2 {
+pub fn to_canvas(p: Point2, bnd: (f64, f64, f64, f64), scale: f64) -> Point2 {
     Point2::new(
         (p.x - bnd.0) * scale + PAD_PT,
         (bnd.3 - p.y) * scale + PAD_PT,
@@ -323,15 +323,27 @@ fn to_canvas(p: Point2, bnd: (f64, f64, f64, f64), scale: f64) -> Point2 {
 }
 
 /// 含标签的包围盒,单位是**键长**。
-fn bounds(coords: &[Point2], mol: &MolBuilder, style: &Style) -> (f64, f64, f64, f64) {
+/// 画布的包围盒:`(min_x, min_y, max_x, max_y)`,单位是键长。
+///
+/// **判据必须用这个函数,不许自己抄一份。** 先前审计里 `canvas_pts` 按"同样的
+/// 规则"重算了一遍;等这边改成"用真正的 `h_side`、并把标签的横向偏移 `dx` 算
+/// 进去"之后,那份副本没跟着改,判据算出来的原子位置与 `scene` 画出来的线对
+/// 不上号 —— `环内双键` 从 0 违例变成 **1403**,全是定位错造成的假阳。
+pub fn bounds(coords: &[Point2], mol: &MolBuilder, style: &Style) -> (f64, f64, f64, f64) {
     let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for (i, p) in coords.iter().enumerate() {
         let a = u32::try_from(i).expect("原子数超出 u32");
-        let (hw, hh) =
-            label_for(mol, a, style, HSide::Right).map_or((0.0, 0.0), |l| (l.half_w, l.half_h));
-        x0 = x0.min(p.x - hw);
+        // **要用真正会画出来的那个标签。**
+        //
+        // 两处先前都错着:写死 `HSide::Right`(氢挂哪边其实看坐标),以及完全
+        // 不看 `dx` —— 整串朝一侧挪了之后**盒心不在原子上**,画布按"盒心在原子
+        // 上"算就会短一截,标签戳到画布外面去。实测踩到过 2 处
+        // (`不出画布` 那条硬性质当场破)。
+        let (dx, hw, hh) = label_for(mol, a, style, h_side(mol, a, coords))
+            .map_or((0.0, 0.0, 0.0), |l| (l.dx, l.half_w, l.half_h));
+        x0 = x0.min(p.x + dx - hw);
         y0 = y0.min(p.y - hh);
-        x1 = x1.max(p.x + hw);
+        x1 = x1.max(p.x + dx + hw);
         y1 = y1.max(p.y + hh);
     }
     if x0 > x1 {

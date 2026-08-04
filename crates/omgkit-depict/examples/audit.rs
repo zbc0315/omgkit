@@ -33,7 +33,8 @@ use omgkit_core::MolBuilder;
 use omgkit_depict::{
     generate,
     geom::{point_in_polygon, Point2},
-    render::{scene, Primitive, Scene},
+    label::label_for,
+    render::{h_side, scene, Primitive, Scene},
     style::Style,
 };
 
@@ -364,7 +365,7 @@ fn checks(
         wedges_reach_canvas(d, s),
         wedges_read_back(m, d),
         bond_lengths_equal(m, d, clean),
-        inside_canvas(s),
+        inside_canvas(m, d, s, style),
         no_atom_sits_on_another(m, d),
         no_angle_is_pinched(m, d, clean),
     ];
@@ -764,47 +765,87 @@ fn bond_lengths_equal(m: &MolBuilder, d: &omgkit_depict::Depiction, clean: bool)
 }
 
 /// 图元不许伸到画布外。
-fn inside_canvas(s: &Scene) -> Check {
+fn inside_canvas(m: &MolBuilder, d: &omgkit_depict::Depiction, s: &Scene, style: &Style) -> Check {
+    // 线、楔形按线宽/宽端算半径;**文字要按真正的字形盒算**。
+    //
+    // 先前一律拿 `size / 2` 当半径。字号 10pt 给出 ±5.00,而单字符标签的真实
+    // 半宽只有 3.34pt(`S`)—— 判据比实现留的白还宽,于是只要有一个单字符标签
+    // 落在画布边缘上就误报。实测踩到过:`S1C2=C(...)` 的硫,真盒左边缘在
+    // 1.34pt(稳稳在内),判据却按 −0.33 报了违例。
+    //
+    // **这是判据估粗了,不是实现出界。** 改成用 `label_for` 给的盒,与
+    // `render::bounds` 留白用的是同一个来源。
     for it in &s.items {
-        let pts: Vec<(Point2, f64)> = match it {
-            Primitive::Line { from, to, width } => vec![(*from, *width / 2.0), (*to, *width / 2.0)],
-            Primitive::Wedge { from, to, wide } | Primitive::Hash { from, to, wide, .. } => {
-                vec![(*from, *wide / 2.0), (*to, *wide / 2.0)]
+        let pts: Vec<(Point2, f64, f64)> = match it {
+            Primitive::Line { from, to, width } => {
+                vec![
+                    (*from, *width / 2.0, *width / 2.0),
+                    (*to, *width / 2.0, *width / 2.0),
+                ]
             }
-            Primitive::Text { at, size, .. } => vec![(*at, *size / 2.0)],
+            Primitive::Wedge { from, to, wide } | Primitive::Hash { from, to, wide, .. } => {
+                vec![
+                    (*from, *wide / 2.0, *wide / 2.0),
+                    (*to, *wide / 2.0, *wide / 2.0),
+                ]
+            }
+            Primitive::Text { .. } => continue, // 文字单独走下面那段
         };
-        for (p, r) in pts {
-            if p.x - r < -0.01 || p.x + r > s.width + 0.01 || p.y - r < -0.01 || p.y + r > s.height
+        for (p, rx, ry) in pts {
+            if p.x - rx < -0.01
+                || p.x + rx > s.width + 0.01
+                || p.y - ry < -0.01
+                || p.y + ry > s.height
             {
                 return (
                     "不出画布",
                     true,
                     Some(format!(
-                        "图元在 ({:.2},{:.2})±{r:.2},画布 {:.2}×{:.2}",
+                        "图元在 ({:.2},{:.2})±({rx:.2},{ry:.2}),画布 {:.2}×{:.2}",
                         p.x, p.y, s.width, s.height
                     )),
                 );
             }
         }
     }
+
+    let scale = style.bond_length_pt;
+    let pts = canvas_pts(m, d, style);
+    for a in 0..u32::try_from(m.num_atoms()).expect("原子数超出 u32") {
+        let Some(l) = label_for(m, a, style, h_side(m, a, &d.coords)) else {
+            continue;
+        };
+        let c = pts[a as usize] + Point2::new(l.dx * scale, 0.0);
+        let (rx, ry) = (l.half_w * scale, l.half_h * scale);
+        if c.x - rx < -0.01 || c.x + rx > s.width + 0.01 || c.y - ry < -0.01 || c.y + ry > s.height
+        {
+            return (
+                "不出画布",
+                true,
+                Some(format!(
+                    "标签 {} 在 ({:.2},{:.2})±({rx:.2},{ry:.2}),画布 {:.2}×{:.2}",
+                    l.plain(),
+                    c.x,
+                    c.y,
+                    s.width,
+                    s.height
+                )),
+            );
+        }
+    }
     ("不出画布", true, None)
 }
 
 fn canvas_pts(m: &MolBuilder, d: &omgkit_depict::Depiction, style: &Style) -> Vec<Point2> {
-    // `bounds` 是 render 里的私有函数,这里按同样的规则重算一遍:
-    // 含标签的包围盒 → 平移缩放 → y 翻转。
-    let scale = style.bond_length_pt;
-    let (mut x0, mut y1) = (f64::MAX, f64::MIN);
-    for (i, p) in d.coords.iter().enumerate() {
-        let a = u32::try_from(i).expect("原子数超出 u32");
-        let (hw, hh) =
-            omgkit_depict::label::label_for(m, a, style, omgkit_depict::label::HSide::Right)
-                .map_or((0.0, 0.0), |l| (l.half_w, l.half_h));
-        x0 = x0.min(p.x - hw);
-        y1 = y1.max(p.y + hh);
-    }
+    // **用 render 自己的那两个函数,不许再抄一遍。**
+    //
+    // 先前这里按"同样的规则"手抄了包围盒的算法。等实现改成"用真正的 `h_side`、
+    // 把标签的横向偏移 `dx` 算进去"之后,这份副本没跟着改 —— 判据算出来的原子
+    // 位置与 `scene` 画出来的线对不上号,`环内双键` 从 0 违例变成 **1403**,
+    // 全是定位错造成的假阳,而画出来的图一点毛病没有。
+    let bnd = omgkit_depict::render::bounds(&d.coords, m, style);
     d.coords
         .iter()
-        .map(|p| Point2::new((p.x - x0) * scale + 8.0, (y1 - p.y) * scale + 8.0))
+        .map(|p| omgkit_depict::render::to_canvas(*p, bnd, style.bond_length_pt))
         .collect()
 }
