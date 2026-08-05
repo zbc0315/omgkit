@@ -92,6 +92,23 @@ pub(crate) fn place_neighbours(
         .filter_map(|(n, _)| {
             pos.get(&n).map(|p| {
                 let t = (*p - center).angle().rem_euclid(std::f64::consts::TAU);
+                // **化到 `[0, 2π)` 还不够:断点只是从 ±π 挪到了 0/2π。**
+                // 一个 −1.8e-16 的角化出来是 `6.28318530717958534`(将近 2π),
+                // 而 0 与 2π 同样是一个方向 —— 两种写法照样排出两个序列。
+                // 实测踩到过两遍,第二遍就是这个:
+                //
+                // ```text
+                // 写法 A: occ = [2.0944, 4.1888, 6.28318530717958534]
+                // 写法 B: occ = [0,      2.0944, 4.1888]
+                // ```
+                //
+                // 贴着 2π 的一律掐回 0。容差取 1e-9:真正不同的两个方向至少
+                // 差 30°,而浮点噪声在 1e-16 量级。
+                let t = if std::f64::consts::TAU - t < 1e-9 {
+                    0.0
+                } else {
+                    t
+                };
                 #[allow(clippy::cast_possible_truncation)]
                 (((t * QUANT).round() as i64, ranks[n as usize]), t)
             })
@@ -400,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn plus_and_minus_pi_are_the_same_direction() {
+    fn the_same_direction_always_gets_the_same_angle() {
         // `angle()` 走 `atan2`,值域 `(-π, π]` —— **−180° 与 +180° 是同一个
         // 方向,却排在序列的两头**。末位差 4.4e-16 就足以决定它落在哪一端,
         // 于是同一组已占方向在两种写法下排出两个不同的序列,`largest_gap` 看到
@@ -415,9 +432,12 @@ mod tests {
         //
         // 化到 `[0, 2π)` 之后两边都是 `[1.047, 3.142, 5.236]`。全量语料上这一处
         // 让写法无关违例从 **77 降到 23**。
+        // 前两个踩的是 ±π 那个断点,第三个踩的是 **0/2π** 那个 —— 化到
+        // `[0, 2π)` 只把断点挪了个地方,贴着 2π 的角要再掐回 0。
         for smi in [
             "C[C]1(CCC[C]2(C)[CH]1CCC3=C2C=C(O)C=C3)C(O)=O",
             "C[C]1(CC[CH]2C(=C1)CC[CH]3[C]2(C)CCC[C]3(C)C(O)=O)C=C",
+            "CC(C)C1=CC[CH]2C(=C1)CC[CH]3[C]2(C)CCC[C]3(C)C(O)=O",
         ] {
             let mut m = crate::tests_prep(smi);
             omgkit_io::stereo::perceive_bond_stereo(&mut m);
