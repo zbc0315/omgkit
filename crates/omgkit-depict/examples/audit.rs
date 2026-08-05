@@ -199,6 +199,25 @@ fn main() {
             //
             // 留着这一档是因为它仍是**布局质量**的信号:读者得自己想明白"第四个
             // 配体在空扇区里",比取代基摊开的图费劲。
+            // **楔形落在环键上**,单独记一档,并分清是不是没得选。
+            //
+            // IUPAC 的图示建议说立体键该画向取代基;环键的两个原子在读者眼里
+            // 都躺在环平面里。补显式氢把这一档从 159 压到 18,剩下的**不是
+            // 缺口**:15 根的中心四根键全在环上、又没有氢可补 —— 补不了也没有
+            // 合法楔形。**RDKit 对同一批中心也画在环键上、也不补氢**(逐个核过
+            // 它的 molblock),所以这是理论下限。
+            //
+            // 另外 3 根是"两个相邻立体中心抢同一根共用的非环键"那笔取舍:让出去
+            // 就有一个中心画不出构型,信息比样式重要,见 `stereo::assign_wedges`。
+            let (forced, avoidable) = ring_wedges(&grown, &d);
+            if forced > 0 {
+                *quality.entry("—— 有楔形只能画在环键上").or_default() += 1usize;
+            }
+            if avoidable > 0 {
+                *quality
+                    .entry("——   其中本可避开(抢共用键输了)")
+                    .or_default() += 1usize;
+            }
             if crowded_centres(&grown, &d) > 0 {
                 *quality.entry("—— 有立体中心的取代基挤在一侧").or_default() += 1usize;
             }
@@ -299,6 +318,32 @@ fn accidental_collinear(m: &MolBuilder, d: &omgkit_depict::Depiction) -> usize {
             !(triple || doubles >= 2)
         })
         .count()
+}
+
+/// 落在环键上的楔形:`(没有别的合法选择的, 有别的选择却没用上的)`。
+///
+/// 见调用处的注释:前者是理论下限(RDKit 同样如此),后者是"两个相邻中心抢
+/// 同一根共用非环键"那笔取舍的结果。
+fn ring_wedges(m: &MolBuilder, d: &omgkit_depict::Depiction) -> (usize, usize) {
+    use omgkit_core::BondOrder;
+    let rings = omgkit_chem::sssr::ring_set(m);
+    let (mut forced, mut avoidable) = (0usize, 0usize);
+    for (bi, w) in d.wedges.iter().enumerate() {
+        let Some(narrow) = w.narrow() else { continue };
+        if !rings.iter().any(|r| r.bonds.contains(&(bi as u32))) {
+            continue;
+        }
+        let has_alt = m.neighbors(narrow).any(|(_, b)| {
+            m.bonds()[b as usize].order == BondOrder::Single
+                && !rings.iter().any(|r| r.bonds.contains(&b))
+        });
+        if has_alt {
+            avoidable += 1;
+        } else {
+            forced += 1;
+        }
+    }
+    (forced, avoidable)
 }
 
 /// 取代基挤在一侧的立体中心有几个。
