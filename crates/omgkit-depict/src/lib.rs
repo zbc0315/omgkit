@@ -39,6 +39,7 @@
 
 pub mod chains;
 pub mod geom;
+pub mod hydrogens;
 pub mod label;
 pub mod layout;
 pub mod orient;
