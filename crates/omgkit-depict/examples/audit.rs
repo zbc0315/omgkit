@@ -166,6 +166,14 @@ fn main() {
             if accidental_collinear(&m, &d) > 0 {
                 *quality.entry("—— 有骨架原子被摆成 180°").or_default() += 1usize;
             }
+            // **楔形读法有歧义的立体中心**,单独记一档。
+            //
+            // 这一档不是"难看",是**别人读出来会是对映体**。外部判官
+            // (`harness/check_wedge_readback.py`)在全量语料上量到 21 个中心
+            // 画成了对映体**而且没报** —— 它们全部落在这一档里。
+            if ambiguous_centres(&m, &d) > 0 {
+                *quality.entry("—— 有楔形读法含糊的中心").or_default() += 1usize;
+            }
             *quality
                 .entry(if !d.degraded.is_empty() {
                     "退化(桥环等)"
@@ -261,6 +269,57 @@ fn accidental_collinear(m: &MolBuilder, d: &omgkit_depict::Depiction) -> usize {
                 }
             }
             !(triple || doubles >= 2)
+        })
+        .count()
+}
+
+/// 楔形读法有歧义的立体中心有几个。
+///
+/// # 什么叫有歧义
+///
+/// 一个中心画出三根键、其中一根带楔形时,读者的推断是"带楔形的那根出/入平面,
+/// 另两根在平面里,**隐式氢在楔形的反面**"。这条推断成立的前提是**三个邻居把
+/// 中心围住** —— 中心落在它们方向围出的三角形里面。
+///
+/// 三个邻居若全挤在中心的**同一侧**(最大空隙 > 180°),中心就落在三角形外面,
+/// 第四个配体本该指进那个空扇区,而不是"投影到中心上"。这时"隐式氢在楔形反面"
+/// 与四面体的读法**不再等价**,不同实现读出**对映体**。
+///
+/// 这不是难看,是**画错了还说自己对**。外部判官
+/// (`harness/check_wedge_readback.py`,拿 RDKit 从导出的 molblock 反读)在全量
+/// 语料上量到 **21 个中心画成了对映体而且没进 `unwedged`**,它们全部落在这一档。
+///
+/// 已经报进 `unwedged` 的中心不算 —— 那是如实说过"没画出来"的。
+fn ambiguous_centres(m: &MolBuilder, d: &omgkit_depict::Depiction) -> usize {
+    (0..u32::try_from(m.num_atoms()).expect("原子数超出 u32"))
+        .filter(|a| {
+            // 画出了楔形才谈得上读法
+            if !m.neighbors(*a).any(|(_, bi)| {
+                d.wedges
+                    .get(bi as usize)
+                    .and_then(|w| w.narrow())
+                    .is_some_and(|n| n == *a)
+            }) {
+                return false;
+            }
+            let c = d.coords[*a as usize];
+            let mut angs: Vec<f64> = m
+                .neighbors(*a)
+                .map(|(n, _)| {
+                    let v = d.coords[n as usize] - c;
+                    v.y.atan2(v.x).to_degrees().rem_euclid(360.0)
+                })
+                .collect();
+            // 四个邻居全画出来的中心不需要摆隐式氢,读法不含糊
+            if angs.len() != 3 {
+                return false;
+            }
+            angs.sort_by(|x, y| x.partial_cmp(y).expect("坐标非 NaN"));
+            let mut gap = 360.0 - (angs[2] - angs[0]);
+            for w in angs.windows(2) {
+                gap = f64::max(gap, w[1] - w[0]);
+            }
+            gap > 180.0
         })
         .count()
 }
