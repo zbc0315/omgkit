@@ -72,12 +72,26 @@ pub(crate) fn place_neighbours(
     // 1e-16 时,直接比大小会让它们的先后取决于算到那一步的运算次序 —— 而
     // `allocate` 挑最大空隙时用的正是这个次序,于是同一个分子换个写法,某个
     // 取代基就换了个方向挂。实测:一个稠三环的甲基因此差了 120°。
+    //
+    // **而且要先化到 `[0, 2π)`。** `angle()` 走的是 `atan2`,值域是 `(-π, π]`
+    // —— **−180° 与 +180° 是同一个方向,却排在序列的两头**。末位差 4.4e-16 就
+    // 足以决定它落在哪一端,于是同一组方向在两种写法下排出两个不同的序列,
+    // `largest_gap` 看到的空隙序列跟着不同,取代基差 120°。
+    //
+    // 实测(`C[C]1(CCC[C]2(C)[CH]1CCC3=C2C=C(O)C=C3)C(O)=O`):
+    //
+    // ```text
+    // 写法 A: occ = [-3.14159265358979312, -1.04719755119659808, 1.04719755119659763]
+    // 写法 B: occ = [-1.04719755119659808,  1.04719755119659763, 3.14159265358979267]
+    // ```
+    //
+    // 化到 `[0, 2π)` 之后两边都是 `[1.047, 3.142, 5.236]`,一模一样。
     const QUANT: f64 = 1e9;
     let mut occ: Vec<((i64, u32), f64)> = mol
         .neighbors(a)
         .filter_map(|(n, _)| {
             pos.get(&n).map(|p| {
-                let t = (*p - center).angle();
+                let t = (*p - center).angle().rem_euclid(std::f64::consts::TAU);
                 #[allow(clippy::cast_possible_truncation)]
                 (((t * QUANT).round() as i64, ranks[n as usize]), t)
             })
@@ -366,6 +380,90 @@ fn largest_gap(sorted: &[f64]) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::largest_gap;
+
+    /// splitmix64 + Fisher–Yates。仿射式的"置换"搅不动东西 —— 审计里记过那个坑。
+    fn shuffled(n: usize, seed: u64) -> Vec<u32> {
+        let mut s = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut next = || {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        let mut v: Vec<u32> = (0..u32::try_from(n).unwrap()).collect();
+        for i in (1..n).rev() {
+            let j = (next() % (i as u64 + 1)) as usize;
+            v.swap(i, j);
+        }
+        v
+    }
+
+    #[test]
+    fn plus_and_minus_pi_are_the_same_direction() {
+        // `angle()` 走 `atan2`,值域 `(-π, π]` —— **−180° 与 +180° 是同一个
+        // 方向,却排在序列的两头**。末位差 4.4e-16 就足以决定它落在哪一端,
+        // 于是同一组已占方向在两种写法下排出两个不同的序列,`largest_gap` 看到
+        // 的空隙序列跟着不同,取代基差 120°。
+        //
+        // 实测这个分子:
+        //
+        // ```text
+        // 写法 A: occ = [-3.14159265358979312, -1.04719755119659808, 1.04719755119659763]
+        // 写法 B: occ = [-1.04719755119659808,  1.04719755119659763, 3.14159265358979267]
+        // ```
+        //
+        // 化到 `[0, 2π)` 之后两边都是 `[1.047, 3.142, 5.236]`。全量语料上这一处
+        // 让写法无关违例从 **77 降到 23**。
+        for smi in [
+            "C[C]1(CCC[C]2(C)[CH]1CCC3=C2C=C(O)C=C3)C(O)=O",
+            "C[C]1(CC[CH]2C(=C1)CC[CH]3[C]2(C)CCC[C]3(C)C(O)=O)C=C",
+        ] {
+            let mut m = crate::tests_prep(smi);
+            omgkit_io::stereo::perceive_bond_stereo(&mut m);
+            let ranks = omgkit_io::canon::canonical_ranks(&m);
+            let fp = |x: &MolBuilder, r: &[u32]| {
+                let c = crate::generate(x, &crate::style::Style::ACS_1996).coords;
+                let mut v: Vec<(u32, i64, i64)> = (0..c.len())
+                    .map(|i| {
+                        (
+                            r[i],
+                            (c[i].x * 1e4).round() as i64,
+                            (c[i].y * 1e4).round() as i64,
+                        )
+                    })
+                    .collect();
+                v.sort_unstable();
+                v
+            };
+            let want = fp(&m, &ranks);
+            let mut compared = 0usize;
+            for seed in 0..16u64 {
+                let w = omgkit_io::smiles::write_with_priority(&m, &shuffled(m.num_atoms(), seed));
+                let Ok(mut m2) = omgkit_io::smiles::parse(&w.smiles) else {
+                    continue;
+                };
+                if omgkit_chem::pipeline::sanitize(&mut m2).is_err() {
+                    continue;
+                }
+                omgkit_io::stereo::perceive_bond_stereo(&mut m2);
+                if omgkit_io::canon::canonical_smiles(&m2).smiles
+                    != omgkit_io::canon::canonical_smiles(&m).smiles
+                {
+                    continue;
+                }
+                let r2 = omgkit_io::canon::canonical_ranks(&m2);
+                assert_eq!(
+                    fp(&m2, &r2),
+                    want,
+                    "{smi}:换成 {} 之后摆得不一样了",
+                    w.smiles
+                );
+                compared += 1;
+            }
+            assert!(compared > 0, "{smi}:一次都没比成 —— 判据空过了");
+        }
+    }
 
     #[test]
     fn a_three_way_tie_of_gaps_is_not_broken_by_the_last_bit() {

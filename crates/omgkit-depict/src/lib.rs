@@ -139,6 +139,14 @@ impl Depiction {
     }
 }
 
+/// 判据共用的解析 + 净化。
+#[cfg(test)]
+pub(crate) fn tests_prep(smi: &str) -> MolBuilder {
+    let mut m = omgkit_io::smiles::parse(smi).expect("测试用的 SMILES 该能解析");
+    omgkit_chem::pipeline::sanitize(&mut m).expect("测试用的分子该能净化");
+    m
+}
+
 /// 给分子生成 2D 坐标。
 ///
 /// 分子**应当先净化** —— 环感知的结果决定环系统怎么划分。没净化过也能跑,
