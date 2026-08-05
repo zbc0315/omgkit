@@ -172,7 +172,7 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
                 // `off` 与 `n` 都在画布坐标系里 —— 混用两个坐标系正是先前那个
                 // "横着的双键画到环外"的成因,见 [`offset_dir`]。
                 let spacing = style.bond_spacing() * scale;
-                let off = offset_dir(mol, bi, &pts, &rings, &orders, spacing);
+                let off = offset_dir(mol, bi, &pts, &rings, &orders, &labels, spacing);
                 let d = (bb - a).normalized();
                 let n = Point2::new(-d.y, d.x) * spacing;
                 let n = if n.dot(off) < 0.0 { n * -1.0 } else { n };
@@ -188,16 +188,23 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
                         width: w,
                     });
                     // 第二条线两端**斜切**到与相邻键接上,见 [`mitre_end`]。
-                    // 相邻键取不到(端基、共线)时退回按固定比例缩进。
                     //
-                    // **端原子有标签就不斜切。** 斜切点是从原子中心量的角平分线
-                    // 交点,而主线为了让开字已经缩回去了 —— 两者不在一个起跑线上,
-                    // 算出来的斜切点直接落在字里,还比主线伸得更靠前。这时跟着
-                    // 主线的端点平移就对了:主线让开多少,它就让开多少。
-                    // RDKit 同规则,`doubleBondEnd` 的 `trunc` 取 `!atomLabels_[at]`。
+                    // 有两种端原子不斜切,跟着主线的端点平移就是了 ——
+                    // **那一头本来就没有可接的东西**:
+                    //
+                    // - **带标签的**:斜切点是从原子中心量的角平分线交点,而主线
+                    //   为了让开字已经缩回去了,两者不在一个起跑线上;算出来的
+                    //   斜切点直接落在字里,还比主线伸得更靠前。RDKit 同规则,
+                    //   `doubleBondEnd` 的 `trunc` 取 `!atomLabels_[at]`。
+                    // - **度 1 的**:根本没有第二根键。丙烯 `CH₂=CH–CH₃` 末端那
+                    //   头就是,两条线齐头收尾才是端烯的通例;RDKit 的
+                    //   `doubleBondTerminal` 在那一头也是纯法向平移、不缩进。
+                    //
+                    // 斜切还取不到(邻居都在另一侧、角平分线退化)时才退回按固定
+                    // 比例缩进。
                     let fallback = (bb - a) * 0.12;
                     let end = |e: u32, o: u32, p: Point2, back: Point2| {
-                        if labels[e as usize].is_some() {
+                        if labels[e as usize].is_some() || mol.degree(e) == 1 {
                             p + n
                         } else {
                             mitre_end(mol, e, o, &pts, n).unwrap_or(p + n + back)
@@ -687,14 +694,20 @@ fn trim(
 /// 反**,于是"大部分环看着没问题"掩护了整类缺陷。实测:阿司匹林苯环底边
 /// 那根双键的第二条线画到了环外。
 ///
-/// # 四种情形
+/// # 分几种情形
 ///
 /// | 键 | 第二条线 |
 /// |---|---|
 /// | 只属于一个环 | 偏向**环内**(射线法判,不是"和环心同侧") |
 /// | 稠合处的共用键 | 进**芳香**的那个环;都芳香或都不芳香时取双键最多的。不跨骑 |
-/// | 链上、一端是端点 | 对称:醛、端烯、累积双键的通例 |
+/// | 链上、端点共线(累积双键) | 对称跨轴 |
+/// | 链上、两端都是端点(乙烯) | 对称跨轴 |
+/// | 链上、一端是端点,内侧原子**带标签或还有别的分叉** | 对称跨轴 |
+/// | 链上、一端是端点,内侧原子度 2 且无标签 | 偏向内侧原子的另一根键那一侧(端烯、醛) |
 /// | 链上、两端都有取代基 | 偏向取代基多的一侧(顺式那一侧) |
+///
+/// 后四行与 RDKit `calcDoubleBondLines` / `doubleBondTerminal` 的分档一一对应,
+/// 见函数体里的注释。
 ///
 /// 环上那一条**不看取代基**:抗坏血酸环内的 C=C 两端各挂一个 OH,按邻居计数
 /// 正好抵消,两条线就骑在环边上,其中一条落到环外去了。
@@ -704,6 +717,7 @@ fn offset_dir(
     pts: &[Point2],
     rings: &[Ring],
     orders: &[BondOrder],
+    labels: &[Option<Label>],
     probe: f64,
 ) -> Point2 {
     let b = &mol.bonds()[bi];
@@ -779,18 +793,45 @@ fn offset_dir(
         // 一个环都收不下(自交的退化环)—— 不猜,交给下面的通用规则
     }
 
-    // 端基双键对称:醛、端烯的通例。
+    // **没有"内侧"可言的几种情形,才跨轴对称画。** 与 RDKit
+    // `calcDoubleBondLines` / `doubleBondTerminal` 的分档一一对应:
     //
-    // **共线的原子也要对称。** 累积双键 `C=C=C` 的两根键若都把第二条线偏到同
-    // 一侧,画出来就是一条直线配两条同侧短线 —— 读起来是顺式二烯。两根键各自
-    // 跨轴对称画,才是累积双键的通例。RDKit 的 `calcDoubleBondLines` 把
-    // `isLinearAtom` 与端基放在同一个分支里,口径一致。
-    if mol.degree(b.begin) == 1
-        || mol.degree(b.end) == 1
-        || is_collinear(mol, b.begin, pts)
+    // - 端点**共线**(累积双键 `C=C=C`):两根键若都把第二条线偏到同一侧,画
+    //   出来是一条直线配两条同侧短线 —— 读起来是顺式二烯。RDKit `isLinearAtom`。
+    // - **两端都是端基**(乙烯):压根没有别的邻居可偏。RDKit 与上一条同一支。
+    if is_collinear(mol, b.begin, pts)
         || is_collinear(mol, b.end, pts)
+        || (mol.degree(b.begin) == 1 && mol.degree(b.end) == 1)
     {
         return Point2::ORIGIN;
+    }
+    // 恰有一端是端基 —— RDKit 的 `doubleBondTerminal`,它**有三支,两支对称**。
+    //
+    // 先前这里一见度 1 就对称,于是丙烯 `CH₂=CH–CH₃` 的两条线跨着键轴画,而
+    // 内侧那个碳上的单键是**收在原子中心**的 —— 两条线谁也不从那一点出发,
+    // 顶点合不拢,露出一个豁口。
+    //
+    // 但**只把这条早退删掉又走过了头**:剩下两支落进下面的投票规则,而"内侧
+    // 只有一个别的邻居、票数必然 ±1"对它们同样成立,于是也全变成不对称。实测
+    // 多改了 216 根键,方向与 RDKit、与改前都相反:
+    //
+    // - **内侧带标签**(亚硝基 `R–N=O`、亚胺 `CH₂=N–R`,100 根/95 分子):那一头
+    //   所有的键都停在字盒外,压根不存在"单键收在原子中心"这个成因,**没有顶点
+    //   要合**。偏一边只丢了对称性,换回来的是 `=` 看着挂在字母底边上。
+    // - **内侧还有别的分叉**(丙酮、砜,116 根/68 分子):两侧各被键占着,偏哪边
+    //   都压着一根。度 3 时两个邻居分居两侧、票数碰巧抵消,**度 ≥4 抵消不掉** ——
+    //   实测砜的两根 S=O 双双朝对方倾斜,四条线挤在中间。
+    if mol.degree(b.begin) == 1 || mol.degree(b.end) == 1 {
+        let inner = if mol.degree(b.begin) == 1 {
+            b.end
+        } else {
+            b.begin
+        };
+        if mol.degree(inner) != 2 || labels[inner as usize].is_some() {
+            return Point2::ORIGIN;
+        }
+        // 剩下的是丙烯那一档,落到下面的投票 —— 内侧只有一个别的邻居,
+        // 票数必然 ±1(它正好落在键轴上时才是 0,那时本来也无侧可偏)。
     }
 
     // 两端其它邻居投影到法线上,哪边多就偏哪边。
@@ -1791,13 +1832,38 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_double_bond_is_drawn_symmetric() {
-        // 末端双键(醛、端烯、累积双键)按通例两条线对称跨在键轴两侧。偏向
-        // 一边的话,C=O 看着像挂在碳上而不是接在碳上。
+    fn a_double_bond_with_no_inner_side_is_drawn_symmetric() {
+        // **只有真的没有内侧可偏时**,两条线才对称跨在键轴两侧:
+        //
+        // - 累积双键 `O=C=O`:两根键若都把第二条线偏到同一侧,画出来就是一条
+        //   直线配两条同侧短线 —— 读起来是顺式二烯;
+        // - 内侧原子是分叉点 `CC(C)=C`、`CC(C)=O`:两侧各被一根键占着,偏哪边
+        //   都压着一根键;
+        // - 两端都是端基 `C=C`:压根没有别的邻居。
+        //
+        // **"一端是端基"不在此列** —— 那一类见
+        // [`a_terminal_double_bond_closes_the_joint_at_the_inner_atom`]。
         //
         // 旧写法拿 `f64::signum` 数邻居,而 `signum` 对 ±0.0 给 ±1 —— 共线的
         // 邻居会按零的符号位投出一票,那一位取决于算到那步的运算次序。
-        for smi in ["CC=O", "CC=C", "O=C=O", "CC(C)=C"] {
+        //
+        // **后两个是补进来的**,因为前面那些**挡不住**"把端基那条早退整个删掉"
+        // 这个改法:`CC(C)=C`、`CC(C)=O` 的内侧原子度 3、两个邻居分居两侧,
+        // 投票碰巧抵消,照样对称 —— 绿得没有道理。
+        //
+        // - `CN=O`:内侧原子度 2 但**带标签**。那一头的键都停在字盒外,没有
+        //   顶点要合;偏一边只会让 `=` 挂在字母底边上。全量 100 根/95 分子。
+        // - `Br[CH]1[CH](Br)S(=O)(=O)C2=C1C=CC=C2`:内侧的 S **度 4**,三个别的
+        //   邻居,票数是奇数项之和,抵消不掉。删掉早退的话两根 S=O 双双朝对方
+        //   倾斜,四条线挤在中间。全量 116 根/68 分子。
+        for smi in [
+            "O=C=O",
+            "CC(C)=C",
+            "C=C",
+            "CC(C)=O",
+            "CN=O",
+            "Br[CH]1[CH](Br)S(=O)(=O)C2=C1C=CC=C2",
+        ] {
             let m = prep(smi);
             let style = Style::ACS_1996;
             let d = generate(&m, &style);
@@ -1835,6 +1901,140 @@ mod tests {
                 checked += 1;
             }
             assert!(checked >= 1, "{smi}:一根双键都没查到");
+        }
+    }
+
+    #[test]
+    fn a_terminal_double_bond_closes_the_joint_at_the_inner_atom() {
+        // 丙烯 `CH₂=CH–CH₃`:内侧那个碳上还挂着一根单键,而单键是**收在原子
+        // 中心**的。两条线若跨着键轴对称画,谁也不从那一点出发 —— 顶点合不拢,
+        // 单键的尖头戳出来,旁边留一个豁口。放大看一眼就明白。
+        //
+        // 通例(也是 RDKit `doubleBondTerminal` 的第三支):**一条线走键轴**把
+        // 顶点接上,另一条偏向内侧原子的**另一根键**那一侧,并在末端那头与主线
+        // **齐头**收尾 —— 末端没有第二根键可接,缩进去只会让它看着短一截。
+        //
+        // 全量语料 404 根键、374 个分子落在这一档。醛 `CC=O` 同理:RDKit 画的
+        // 乙醛也是一条线走键轴。
+        for smi in ["CC=C", "CC=O", "CCC=C", "C=CC#N"] {
+            for style in &Style::ALL {
+                let m = prep(smi);
+                let d = generate(&m, style);
+                let s = scene(&m, &d, style);
+                let bnd = bounds(&d.coords, &m, style);
+                let pts: Vec<Point2> = d
+                    .coords
+                    .iter()
+                    .map(|p| to_canvas(*p, bnd, style.bond_length_pt))
+                    .collect();
+
+                let mut checked = 0usize;
+                for (bi, b) in m.bonds().iter().enumerate() {
+                    if drawn_orders(&m)[bi] != BondOrder::Double {
+                        continue;
+                    }
+                    // 这一档:恰有一端是端基,内侧那端度 2 且不带标签
+                    let (da, db) = (m.degree(b.begin), m.degree(b.end));
+                    if (da == 1) == (db == 1) {
+                        continue;
+                    }
+                    let (term, inner) = if da == 1 {
+                        (b.begin, b.end)
+                    } else {
+                        (b.end, b.begin)
+                    };
+                    if m.degree(inner) != 2 || label_at(&m, inner, style, &d.coords).is_some() {
+                        continue;
+                    }
+                    let third = m
+                        .neighbors(inner)
+                        .map(|(x, _)| x)
+                        .find(|x| *x != term)
+                        .expect("度 2 的内侧原子必有另一个邻居");
+
+                    let (pi, pt) = (pts[inner as usize], pts[term as usize]);
+                    let len = pi.dist(pt);
+                    let axis = (pt - pi) * (1.0 / len);
+                    let normal = Point2::new(-axis.y, axis.x);
+                    let ls = lines_of_bond(&s, pi, pt);
+                    assert_eq!(ls.len(), 2, "[{}] {smi}:双键该画两条线", style.name);
+
+                    // 一、有一条线从内侧原子出发 —— 顶点合得拢。
+                    //
+                    // **这条只等价于"没被画成对称"**:内侧原子不带标签,`trim`
+                    // 不动端点,所以主线必然从 `pi` 出发。它管的是 `offset_dir`
+                    // 那一档,管不到第二条线怎么收尾 —— 那要靠下面第四条。
+                    let starts_at_inner =
+                        |(u, v): &(Point2, Point2)| u.dist(pi).min(v.dist(pi)) < 0.02 * len;
+                    assert!(
+                        ls.iter().any(starts_at_inner),
+                        "[{}] {smi}:键 {bi} 两条线都不从内侧原子 {inner} 出发,顶点合不拢",
+                        style.name
+                    );
+
+                    // 二、另一条偏向内侧原子的另一根键那一侧
+                    let off = |(u, v): &(Point2, Point2)| ((*u + *v) * 0.5 - pi).dot(normal);
+                    let side = (pts[third as usize] - pi).dot(normal);
+                    let outer = ls
+                        .iter()
+                        .max_by(|x, y| off(x).abs().partial_cmp(&off(y).abs()).expect("坐标非 NaN"))
+                        .expect("有两条线");
+                    assert!(
+                        off(outer) * side > 0.0,
+                        "[{}] {smi}:键 {bi} 的第二条线偏到了内侧原子另一根键的反面",
+                        style.name
+                    );
+
+                    // 三、末端那头齐头 —— 那里没有第二根键可接,不该缩进去
+                    let far = |(u, v): &(Point2, Point2)| {
+                        let (tu, tv) = ((*u - pi).dot(axis), (*v - pi).dot(axis));
+                        tu.max(tv)
+                    };
+                    let (f0, f1) = (far(&ls[0]), far(&ls[1]));
+                    assert!(
+                        (f0 - f1).abs() < 0.02 * len,
+                        "[{}] {smi}:键 {bi} 两条线在端基那头没齐头,{f0:.2} vs {f1:.2}(键长 {len:.2})",
+                        style.name
+                    );
+
+                    // 四、第二条线在内侧那头**斜切到角平分线上**,落点有闭式解:
+                    // 与内侧原子的距离是 `spacing / sin(θ/2)`,θ 是那里的夹角。
+                    //
+                    // 这一条是独立的。前三条都只等价于"没画成对称",**把斜切
+                    // 整个去掉它们照样全绿** —— 而那时第二条线会穿过相邻的单键
+                    // 伸出去(实测丙烯伸出 1.30pt,约 0.09 个键长)。
+                    let u = (pts[third as usize] - pi).normalized();
+                    let v = (pt - pi).normalized();
+                    let bis = (u + v).normalized();
+                    let half = u.dot(v).clamp(-1.0, 1.0).acos() / 2.0;
+                    let spacing = style.bond_spacing() * style.bond_length_pt;
+                    let want = pi + bis * (spacing / half.sin());
+                    let inner_end = {
+                        let (uu, vv) = *outer;
+                        if uu.dist(pi) < vv.dist(pi) {
+                            uu
+                        } else {
+                            vv
+                        }
+                    };
+                    assert!(
+                        inner_end.dist(want) < 0.02 * len,
+                        "[{}] {smi}:键 {bi} 的第二条线没斜切到角平分线上 —— \
+                         落在 ({:.2},{:.2}),闭式解是 ({:.2},{:.2})",
+                        style.name,
+                        inner_end.x,
+                        inner_end.y,
+                        want.x,
+                        want.y
+                    );
+                    checked += 1;
+                }
+                assert!(
+                    checked >= 1,
+                    "[{}] {smi}:这一档一根键都没查到 —— 判据空过了",
+                    style.name
+                );
+            }
         }
     }
 
