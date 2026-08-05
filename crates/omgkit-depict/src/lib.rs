@@ -201,7 +201,7 @@ pub fn generate(mol: &MolBuilder, style: &Style) -> Depiction {
     for (a, q) in &pos {
         flat[*a as usize] = *q;
     }
-    stereo::fix_cis_trans(mol, &mut flat);
+    stereo::fix_cis_trans(mol, &mut flat, &ranks);
     for (a, q) in pos.iter_mut() {
         *q = flat[*a as usize];
     }

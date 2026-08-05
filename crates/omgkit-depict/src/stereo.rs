@@ -497,19 +497,68 @@ pub fn read_bond_stereo(mol: &MolBuilder, coords: &[Point2], bond: u32) -> Optio
 /// 消冲突靠翻转可旋转键,而双键旁边的单键一翻,那一侧的参照原子就换了边 ——
 /// 顺反跟着反。所以顺序必须是:先把顺反摆对,再在**不许破坏它**的前提下消冲突
 /// (见 `refine` 里的立体守卫)。反过来做的话,冲突消完顺反又被弄反了。
-pub(crate) fn fix_cis_trans(mol: &MolBuilder, coords: &mut [Point2]) -> Vec<u32> {
+pub(crate) fn fix_cis_trans(mol: &MolBuilder, coords: &mut [Point2], ranks: &[u32]) -> Vec<u32> {
     let mut fixed = Vec::new();
-    for bi in 0..u32::try_from(mol.num_bonds()).expect("键数超出 u32") {
+    // **次序与"镜像哪一侧"都不能跟着存储序走。**
+    //
+    // 掰一根顺反键的做法是把一侧的子树整体镜像。多根顺反键时,**先掰哪根、
+    // 掰哪一侧,决定最终的几何** —— 两次镜像不对易。先前一是按键的存储下标
+    // 遍历,二是一律镜像 `b.end` 那一侧,而 `begin`/`end` 只是书写痕迹。
+    // 于是同一个分子换种写法就摆成另一个样子。
+    //
+    // 实测:全量语料 78 个写法相关的分子里,**40 个的首次分岔就在这一步**,
+    // 是最大的一块。
+    //
+    // 改成两条:按两端的规范秩排着掰;每根键镜像**最小规范秩更大**的那一侧 ——
+    // 让"更靠前"的那半边钉住不动。
+    //
+    // **两条的分量不一样,语料级变异量过:**
+    //
+    // | 变异 | 写法无关违例 |
+    // |---|---:|
+    // | 去掉排序(退回按存储下标掰) | **77 —— 没影响** |
+    // | 一律镜像 `end` 那一侧 | **155 —— 全部效果在这** |
+    //
+    // 所以 155 → 77 全部来自"挑哪一侧",排序那一条在本语料上**一次都没触发**。
+    // 留着不是因为量到了收益,是因为按存储序遍历本身就是头号契约的隐患 ——
+    // 这一点照实记,不假装它有贡献。
+    let mut todo: Vec<u32> = (0..u32::try_from(mol.num_bonds()).expect("键数超出 u32"))
+        .filter(|bi| {
+            matches!(
+                mol.bonds()[*bi as usize].stereo,
+                BondStereo::Cis | BondStereo::Trans
+            )
+        })
+        .collect();
+    todo.sort_by_key(|bi| {
+        let b = &mol.bonds()[*bi as usize];
+        let (x, y) = (ranks[b.begin as usize], ranks[b.end as usize]);
+        (x.min(y), x.max(y), *bi)
+    });
+    for bi in todo {
         let want = mol.bonds()[bi as usize].stereo;
-        if !matches!(want, BondStereo::Cis | BondStereo::Trans) {
-            continue;
-        }
         if read_bond_stereo(mol, coords, bi) == Some(want) {
             continue;
         }
         let b = &mol.bonds()[bi as usize];
-        let Some(side) = subtree(mol, bi, b.end) else {
-            continue;
+        // 两侧都算出来,镜像最小规范秩更大的那一侧
+        let low = |s: &Vec<u32>| {
+            s.iter()
+                .map(|a| ranks[*a as usize])
+                .min()
+                .unwrap_or(u32::MAX)
+        };
+        let side = match (subtree(mol, bi, b.begin), subtree(mol, bi, b.end)) {
+            (Some(x), Some(y)) => {
+                if low(&x) > low(&y) {
+                    x
+                } else {
+                    y
+                }
+            }
+            (Some(x), None) => x,
+            (None, Some(y)) => y,
+            (None, None) => continue,
         };
         let (pa, pb) = (coords[b.begin as usize], coords[b.end as usize]);
         for a in &side {
