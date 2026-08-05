@@ -92,6 +92,12 @@ const PAD_PT: f64 = 8.0;
 /// 得到一张张冠李戴的结构式。
 #[must_use]
 pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
+    // **画的是补完氢的那个分子。** 有些立体中心三根键全在环上,唯一合法的楔形
+    // 是 C–H,那个氢是 `generate` 补出来的(见 [`hydrogens`](crate::hydrogens))。
+    // 拿传进来的分子画的话,补出来的氢连同它那根楔形会被**静默丢掉** —— 而
+    // `unwedged` 是空的,诊断全绿。
+    let grown = depiction.drawn(mol);
+    let mol = &*grown;
     assert_eq!(
         depiction.coords.len(),
         mol.num_atoms(),
@@ -938,6 +944,10 @@ mod tests {
                 let m = prep(smi);
                 let d = generate(&m, style);
                 let s = scene(&m, &d, style);
+                // `coords`/`wedges` 的下标相对**被画的那个分子** —— 为画出构型补
+                // 出来的氢也在里面。`scene` 自己会补,所以它拿的是原分子;这里影子化
+                // 之后,下面按下标索引才不会错位甚至越界。
+                let m = d.drawn(&m);
                 let bnd = bounds(&d.coords, &m, style);
                 let here = to_canvas(d.coords[centre as usize], bnd, style.bond_length_pt);
 
@@ -1072,6 +1082,10 @@ mod tests {
                 let m = prep(smi);
                 let d = generate(&m, style);
                 let s = scene(&m, &d, style);
+                // `coords`/`wedges` 的下标相对**被画的那个分子** —— 为画出构型补
+                // 出来的氢也在里面。`scene` 自己会补,所以它拿的是原分子;这里影子化
+                // 之后,下面按下标索引才不会错位甚至越界。
+                let m = d.drawn(&m);
                 let bnd = bounds(&d.coords, &m, style);
                 let scale = style.bond_length_pt;
                 let labels: Vec<Option<Label>> = (0..u32::try_from(m.num_atoms()).unwrap())
@@ -1283,6 +1297,10 @@ mod tests {
                 let m = prep(smi);
                 let d = generate(&m, style);
                 let s = scene(&m, &d, style);
+                // `coords`/`wedges` 的下标相对**被画的那个分子** —— 为画出构型补
+                // 出来的氢也在里面。`scene` 自己会补,所以它拿的是原分子;这里影子化
+                // 之后,下面按下标索引才不会错位甚至越界。
+                let m = d.drawn(&m);
                 let bnd = bounds(&d.coords, &m, style);
                 let pts: Vec<Point2> = d
                     .coords
@@ -1361,6 +1379,10 @@ mod tests {
             let m = prep("c1ccccc1");
             let d = generate(&m, style);
             let s = scene(&m, &d, style);
+            // `coords`/`wedges` 的下标相对**被画的那个分子** —— 为画出构型补
+            // 出来的氢也在里面。`scene` 自己会补,所以它拿的是原分子;这里影子化
+            // 之后,下面按下标索引才不会错位甚至越界。
+            let m = d.drawn(&m);
             let bnd = bounds(&d.coords, &m, style);
             let pts: Vec<Point2> = d
                 .coords
@@ -1419,6 +1441,10 @@ mod tests {
             let m = prep("CN1C=NC2=C1C(=O)N(C)C(=O)N2C");
             let d = generate(&m, style);
             let s = scene(&m, &d, style);
+            // `coords`/`wedges` 的下标相对**被画的那个分子** —— 为画出构型补
+            // 出来的氢也在里面。`scene` 自己会补,所以它拿的是原分子;这里影子化
+            // 之后,下面按下标索引才不会错位甚至越界。
+            let m = d.drawn(&m);
             let bnd = bounds(&d.coords, &m, style);
             let scale = style.bond_length_pt;
             let pts: Vec<Point2> = d.coords.iter().map(|p| to_canvas(*p, bnd, scale)).collect();
@@ -1509,6 +1535,10 @@ mod tests {
                 let m = prep(smi);
                 let d = generate(&m, style);
                 let s = scene(&m, &d, style);
+                // `coords`/`wedges` 的下标相对**被画的那个分子** —— 为画出构型补
+                // 出来的氢也在里面。`scene` 自己会补,所以它拿的是原分子;这里影子化
+                // 之后,下面按下标索引才不会错位甚至越界。
+                let m = d.drawn(&m);
                 let bnd = bounds(&d.coords, &m, style);
                 let pts: Vec<Point2> = d
                     .coords
@@ -1694,6 +1724,10 @@ mod tests {
                 let m = prep(smi);
                 let d = generate(&m, style);
                 let s = scene(&m, &d, style);
+                // `coords`/`wedges` 的下标相对**被画的那个分子** —— 为画出构型补
+                // 出来的氢也在里面。`scene` 自己会补,所以它拿的是原分子;这里影子化
+                // 之后,下面按下标索引才不会错位甚至越界。
+                let m = d.drawn(&m);
                 let bnd = bounds(&d.coords, &m, style);
                 let pts: Vec<Point2> = d
                     .coords
@@ -1839,6 +1873,10 @@ mod tests {
                 let m = prep(smi);
                 let d = generate(&m, style);
                 let s = scene(&m, &d, style);
+                // `coords`/`wedges` 的下标相对**被画的那个分子** —— 为画出构型补
+                // 出来的氢也在里面。`scene` 自己会补,所以它拿的是原分子;这里影子化
+                // 之后,下面按下标索引才不会错位甚至越界。
+                let m = d.drawn(&m);
                 let bnd = bounds(&d.coords, &m, style);
                 let pts: Vec<Point2> = d
                     .coords
@@ -1984,6 +2022,10 @@ mod tests {
                 let m = prep(smi);
                 let d = generate(&m, style);
                 let s = scene(&m, &d, style);
+                // `coords`/`wedges` 的下标相对**被画的那个分子** —— 为画出构型补
+                // 出来的氢也在里面。`scene` 自己会补,所以它拿的是原分子;这里影子化
+                // 之后,下面按下标索引才不会错位甚至越界。
+                let m = d.drawn(&m);
                 let bnd = bounds(&d.coords, &m, style);
                 let pts: Vec<Point2> = d
                     .coords
@@ -2129,6 +2171,10 @@ mod tests {
                 let m = prep(smi);
                 let d = generate(&m, style);
                 let s = scene(&m, &d, style);
+                // `coords`/`wedges` 的下标相对**被画的那个分子** —— 为画出构型补
+                // 出来的氢也在里面。`scene` 自己会补,所以它拿的是原分子;这里影子化
+                // 之后,下面按下标索引才不会错位甚至越界。
+                let m = d.drawn(&m);
                 let bnd = bounds(&d.coords, &m, style);
                 let pts: Vec<Point2> = d
                     .coords
@@ -2213,6 +2259,10 @@ mod tests {
                 let m = prep(smi);
                 let d = generate(&m, style);
                 let s = scene(&m, &d, style);
+                // `coords`/`wedges` 的下标相对**被画的那个分子** —— 为画出构型补
+                // 出来的氢也在里面。`scene` 自己会补,所以它拿的是原分子;这里影子化
+                // 之后,下面按下标索引才不会错位甚至越界。
+                let m = d.drawn(&m);
                 for it in &s.items {
                     // 文字走下面那段 —— **字宽不是 `size/2`**,`CH` 的半宽 7.22pt
                     // 比字号的一半还大 2.22pt,按 `size/2` 量会把出界量少算

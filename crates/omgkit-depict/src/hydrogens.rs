@@ -49,6 +49,12 @@ pub struct Augmented {
 }
 
 impl Augmented {
+    /// 什么都没补。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.atoms.is_empty()
+    }
+
     /// 把增量贴回去,得到**真正被画的那个分子**。
     ///
     /// 前 `mol.num_atoms()` 个原子、前 `mol.num_bonds()` 根键与传入的分子逐项

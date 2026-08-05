@@ -138,6 +138,10 @@ fn main() {
         for style in &Style::ALL {
             let d = generate(&m, style);
             let s = scene(&m, &d, style);
+            // **几何判据要拿被画的那个分子。** 为画出构型补的显式氢也在里面,
+            // 而 `coords`/`wedges` 的下标是相对它的 —— 拿原分子索引会错位甚至
+            // 越界。写法无关那一条例外,见 `checks` 的注释。
+            let grown = d.drawn(&m);
             let tag = format!("{}:{lineno}:{smi}", style.name);
             let clean = d.degraded.is_empty() && d.unresolved.is_empty();
             // 画得干不干净也要报 —— 判据只说"没画错",不说"画得好"。
@@ -149,8 +153,8 @@ fn main() {
                 // 等于没翻),要修得另想办法。先量清楚够不够本。
                 let terminal = d.crossings.iter().any(|(b1, b2)| {
                     [b1, b2].iter().any(|b| {
-                        let bd = &m.bonds()[**b as usize];
-                        m.degree(bd.begin) == 1 || m.degree(bd.end) == 1
+                        let bd = &grown.bonds()[**b as usize];
+                        grown.degree(bd.begin) == 1 || grown.degree(bd.end) == 1
                     })
                 });
                 *quality
@@ -174,7 +178,7 @@ fn main() {
             // 两端要 1.375 个键长的净空,一个键长塞不下,`trim` 只能压缩兜底,
             // 于是线端点落进字里。翻转动不了它(键长是定死的),所以不进违例列;
             // 但也不能不报 —— 那正是"画不好要说出来"该覆盖的东西。
-            if squeezed_bonds(&m, &d, style) > 0 {
+            if squeezed_bonds(&grown, &d, style) > 0 {
                 *quality.entry("—— 有标签在键上塞不下").or_default() += 1usize;
             }
             // **骨架原子被摆成 180°**,单独记一档。
@@ -184,7 +188,7 @@ fn main() {
             // 共线的骨架碳,坐标本身就不对:sp3 碳该是 120°,是取代基避让一档
             // 一档挪出来的。补了符号图能读了,布局的毛病却被盖住了,所以这里
             // 单独报一笔。真正的累积双键(sp,本来就该 180°)只占 42/300。
-            if accidental_collinear(&m, &d) > 0 {
+            if accidental_collinear(&grown, &d) > 0 {
                 *quality.entry("—— 有骨架原子被摆成 180°").or_default() += 1usize;
             }
             // **立体中心的取代基挤在一侧**,单独记一档。
@@ -195,7 +199,7 @@ fn main() {
             //
             // 留着这一档是因为它仍是**布局质量**的信号:读者得自己想明白"第四个
             // 配体在空扇区里",比取代基摊开的图费劲。
-            if crowded_centres(&m, &d) > 0 {
+            if crowded_centres(&grown, &d) > 0 {
                 *quality.entry("—— 有立体中心的取代基挤在一侧").or_default() += 1usize;
             }
             *quality
@@ -210,7 +214,7 @@ fn main() {
                 })
                 .or_default() += 1usize;
 
-            for (name, hit, bad) in checks(&m, &d, &s, style, clean, writings) {
+            for (name, hit, bad) in checks(&m, &grown, &d, &s, style, clean, writings) {
                 *checked.entry(name).or_default() += usize::from(hit);
                 if let Some(why) = bad {
                     fails
@@ -438,8 +442,15 @@ fn fingerprint(s: &Scene) -> Vec<String> {
 
 type Check = (&'static str, bool, Option<String>);
 
+/// `orig` 是**调用方传进来的**分子,`drawn` 是**真正被画的**那个(可能多几个
+/// 为画出构型补的显式氢,见 `Depiction::drawn`)。
+///
+/// **两者不能混用。** 几何判据的下标相对 `drawn`;而写法无关那一条要把分子
+/// **重写成 SMILES** 再画一遍,那必须用 `orig` —— 拿补完的去写,显式氢会进到
+/// SMILES 里,改写出来的就不是同一个分子了。
 fn checks(
-    m: &MolBuilder,
+    orig: &MolBuilder,
+    drawn: &MolBuilder,
     d: &omgkit_depict::Depiction,
     s: &Scene,
     style: &Style,
@@ -447,17 +458,17 @@ fn checks(
     writings: usize,
 ) -> Vec<Check> {
     let mut v = vec![
-        ring_double_bonds(m, d, s, style, clean),
+        ring_double_bonds(drawn, d, s, style, clean),
         wedges_reach_canvas(d, s),
-        wedges_read_back(m, d),
-        bond_lengths_equal(m, d, clean),
-        inside_canvas(m, d, s, style),
-        lines_clear_of_labels(m, d, s, style),
-        no_atom_sits_on_another(m, d),
-        no_angle_is_pinched(m, d, clean),
+        wedges_read_back(drawn, d),
+        bond_lengths_equal(drawn, d, clean),
+        inside_canvas(drawn, d, s, style),
+        lines_clear_of_labels(drawn, d, s, style),
+        no_atom_sits_on_another(drawn, d),
+        no_angle_is_pinched(drawn, d, clean),
     ];
     // 写法无关出三行:判据本身、比满没有、以及有没有查成 —— 见其文档注释
-    v.extend(writing_independent(m, d, s, style, clean, writings));
+    v.extend(writing_independent(orig, d, s, style, clean, writings));
     v
 }
 

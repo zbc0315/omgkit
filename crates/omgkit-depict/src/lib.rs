@@ -67,9 +67,18 @@ use rings::Degradation;
 use style::Style;
 
 /// 一张 2D 图。
+///
+/// # 下标是相对**被画的那个分子**的
+///
+/// 为了画出构型,某些立体中心要补一个显式氢(见 [`hydrogens`])。那时被画的
+/// 分子比传进来的多几个原子,而 `coords`、`wedges` 这些逐原子/逐键的向量是按
+/// **补完之后**的编号排的 —— 拿 [`Depiction::drawn`] 取回那个分子。
+///
+/// **前 `mol.num_atoms()` 个原子、前 `mol.num_bonds()` 根键与传入的分子逐项
+/// 对应**,所以按原下标索引仍然是对的;多出来的排在后面。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Depiction {
-    /// 逐原子坐标,下标与 [`MolBuilder`] 的原子下标一致。
+    /// 逐原子坐标,下标与**被画的那个分子**([`Depiction::drawn`])一致。
     ///
     /// 单位是**键长**,不是埃 —— 2D 结构图不是比例模型。换算成 pt/px 由
     /// [`Style::bond_length_pt`] 负责。
@@ -90,6 +99,8 @@ pub struct Depiction {
     ///
     /// 拿另一套规范渲染时,用它可以查出错配 —— 见 [`Style::layout_fingerprint`]。
     pub style_fingerprint: u64,
+    /// 为了画出构型补出来的原子/键。空的话画的就是传进来的分子。
+    pub added: hydrogens::Augmented,
 }
 
 impl Depiction {
@@ -99,6 +110,23 @@ impl Depiction {
     #[must_use]
     pub fn matches(&self, style: &Style) -> bool {
         self.style_fingerprint == style.layout_fingerprint()
+    }
+
+    /// **真正被画的那个分子。** 没补东西时就是传进来的那个,不复制。
+    ///
+    /// `coords`、`wedges`、`unresolved`、`crossings`、`unwedged`、`degraded`
+    /// 的下标全部相对它。渲染与判据都该拿它,而不是拿传进来的分子 —— 否则
+    /// 补出来的氢会被静默丢掉,而诊断全绿。
+    ///
+    /// 返回 [`Cow`](std::borrow::Cow),所以 `&d.drawn(&m)` 在要 `&MolBuilder`
+    /// 的地方直接能用(靠 `Deref`)。
+    #[must_use]
+    pub fn drawn<'a>(&self, mol: &'a MolBuilder) -> std::borrow::Cow<'a, MolBuilder> {
+        if self.added.is_empty() {
+            std::borrow::Cow::Borrowed(mol)
+        } else {
+            std::borrow::Cow::Owned(self.added.apply(mol))
+        }
     }
 
     /// 有没有任何一处没画好(退化、仍在碰撞、仍有交叉)。
@@ -117,6 +145,15 @@ impl Depiction {
 /// 但环会被当成链画出来。
 #[must_use]
 pub fn generate(mol: &MolBuilder, style: &Style) -> Depiction {
+    // **先补显式氢,再做别的。** 有些立体中心三根键全在环上,唯一合法的楔形是
+    // C–H —— 那个氢不画出来,构型就只能画到环键上(见 [`hydrogens`])。
+    //
+    // 补出来的原子接在**末尾**,原有编号一概不变,所以下面整条管线原样跑在补完
+    // 的分子上就行:布局、消冲突、规范朝向、楔形指派全都自动把那个氢算进去。
+    let added = hydrogens::with_stereo_hs(mol).unwrap_or_default();
+    let grown = (!added.is_empty()).then(|| added.apply(mol));
+    let mol = grown.as_ref().unwrap_or(mol);
+
     let ranks = omgkit_io::canon::canonical_ranks(mol);
 
     // **配位键在几何上就是一根线。** 环感知按化学口径把配位键排除在环外
@@ -192,6 +229,7 @@ pub fn generate(mol: &MolBuilder, style: &Style) -> Depiction {
         crossings: report.crossings,
         style_name: style.name,
         style_fingerprint: style.layout_fingerprint(),
+        added,
     }
 }
 

@@ -633,6 +633,10 @@ mod tests {
             for style in &Style::ALL {
                 let m = prep(smi);
                 let d = generate(&m, style);
+                // `coords`/`wedges` 的下标相对**被画的那个分子** —— 为画出构型补
+                // 出来的氢也在里面。`scene` 自己会补,所以它拿的是原分子;这里影子化
+                // 之后,下面按下标索引才不会错位甚至越界。
+                let m = d.drawn(&m);
                 let mut checked = 0;
                 for (i, a) in m.atoms().iter().enumerate() {
                     let at = u32::try_from(i).expect("原子数超出 u32");
@@ -698,6 +702,10 @@ mod tests {
             for style in &Style::ALL {
                 let m = prep(smi);
                 let d = generate(&m, style);
+                // `coords`/`wedges` 的下标相对**被画的那个分子** —— 为画出构型补
+                // 出来的氢也在里面。`scene` 自己会补,所以它拿的是原分子;这里影子化
+                // 之后,下面按下标索引才不会错位甚至越界。
+                let m = d.drawn(&m);
                 let centres = m
                     .atoms()
                     .iter()

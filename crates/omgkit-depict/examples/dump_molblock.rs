@@ -58,7 +58,12 @@ fn main() {
         if d.wedges.iter().all(|w| w.narrow().is_none()) && d.unwedged.is_empty() {
             continue;
         }
-        let orders = drawn_orders(&m);
+        // **导出的必须是被画的那个分子。** 为画出构型补的显式氢也在里面,而
+        // 楔形恰恰就打在那根 C–H 上 —— 拿原分子导出的话,那根键根本不存在,
+        // 判官看到的是"没有立体信息",149 个中心全部报成"画成 None"。
+        let grown = d.drawn(&m);
+        let m = &*grown;
+        let orders = drawn_orders(m);
 
         println!(">>> {lineno}\t{smi}");
         println!(
