@@ -89,6 +89,19 @@ fn needs_h(mol: &MolBuilder, a: u32, rings: &[omgkit_chem::sssr::Ring]) -> bool 
     if u32::from(at.num_explicit_hs) + u32::from(at.num_implicit_hs) == 0 {
         return false; // 没氢可补 —— 那一档无解,不在这里处理
     }
+    // **画出来的键少于三根,构型根本表达不了。**
+    //
+    // 楔形只能说"这一根出/入平面",其余的算在平面里。要定死一个四面体,平面里
+    // 至少得有两根键把方向锚住 —— 也就是**总共画出三根**。
+    //
+    // 三配位 + 一对孤对的中心(亚砜的 S、膦的 P)只有两个重原子邻居时就不够:
+    // `C[P@H]C` 的磷是两个邻居 + 一个氢 + 一对孤对,画出来只有两根键,谁也读不出
+    // 构型 —— 先前它只能进 `unwedged`。把那个氢画出来就够三根了。
+    if mol.degree(a) < 3 {
+        return true;
+    }
+    // 三根以上时,问的是另一件事:有没有一根**能打楔形的非环单键**。
+    // 没有的话唯一合法的楔形是 C–H,那个氢得画出来。
     !mol.neighbors(a).any(|(_, b)| {
         mol.bonds()[b as usize].order == BondOrder::Single
             && !rings.iter().any(|r| r.bonds.contains(&b))
