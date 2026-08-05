@@ -95,8 +95,54 @@ pub struct Wedges {
 /// 代价是这样一来 `assign` 与 [`read_chirality`] 就有了共谋:拿"反读一致"去
 /// 检验它是**空过的**。真正的判据是**区分力**:一个分子和它的对映体必须得到
 /// 相反的楔形。反读函数若与几何无关,两者会得到同一个楔形 —— 那一条测得出来。
+/// 绝对意义上对不对由外部判官定,见 `harness/check_wedge_readback.py`。
+///
+/// # 候选键的两条忌讳互相冲突,所以两种序都跑
+///
+/// 楔形该躲开**环键**(IUPAC 的图示建议:立体键应当画向取代基;环键的两个原子
+/// 在读者眼里都躺在环平面里),也该躲开**与另一个立体中心共用的键**(读者会问
+/// 这个楔形在说谁)。
+///
+/// 两条常常冲不到一起,但**相邻的两个中心只有一根共用的非环键时就冲了**:谁先
+/// 拿走谁受益,另一个被饿死。实测把"环键最差"提到最前面,某个分子里修好了 1 个
+/// 却让另一个中心**根本画不出来** —— 净 −3 环上楔形、+1 `unwedged`。
+///
+/// **哪一条该优先没有普遍答案**,所以不猜:两种序各指派一遍,按结果挑 ——
+/// 先比画不出来的中心数(少的赢,信息不能丢),再比落在环键上的楔形数。
+/// 两个都跑过一遍才挑,所以结果**不会比任何一种单独跑更差**。
 #[must_use]
 pub fn assign_wedges(mol: &MolBuilder, coords: &[Point2], ranks: &[u32]) -> Wedges {
+    let ring_first = assign_with(mol, coords, ranks, Taboo::RingWorst);
+    let shared_first = assign_with(mol, coords, ranks, Taboo::SharedWorst);
+    // 落在环键上的楔形有几个 —— 越少越好
+    let on_ring = |w: &Wedges| {
+        w.bonds
+            .iter()
+            .enumerate()
+            .filter(|(bi, x)| {
+                x.narrow().is_some() && mol.bonds()[*bi].flags.contains(BondFlags::IN_RING)
+            })
+            .count()
+    };
+    let key = |w: &Wedges| (w.unwedged.len(), on_ring(w));
+    // 打平取 `RingWorst` —— 要一个定死的方向,不能让它随机
+    if key(&shared_first) < key(&ring_first) {
+        shared_first
+    } else {
+        ring_first
+    }
+}
+
+/// 候选键的忌讳排序里,哪一条排在最前。见 [`assign_wedges`]。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Taboo {
+    /// 环键最忌讳(IUPAC 的口径)
+    RingWorst,
+    /// 与另一个立体中心共用的键最忌讳(先前的口径)
+    SharedWorst,
+}
+
+fn assign_with(mol: &MolBuilder, coords: &[Point2], ranks: &[u32], taboo: Taboo) -> Wedges {
     let mut out = Wedges {
         bonds: vec![Wedge::None; mol.num_bonds()],
         unwedged: Vec::new(),
@@ -131,7 +177,7 @@ pub fn assign_wedges(mol: &MolBuilder, coords: &[Point2], ranks: &[u32]) -> Wedg
         // **一根不成就换下一根。** 先前只挑最合适的那一根试,Up、Down 都反读
         // 不对就放弃报 `unwedged` —— 而换一根往往就成了。实测:抗坏血酸两个
         // 立体中心里的那个侧链碳因此没画出来,图上看不出任何异常。
-        for bond in candidate_bonds(mol, a, &used, ranks) {
+        for bond in candidate_bonds(mol, a, &used, ranks, taboo) {
             for w in [Wedge::Up { narrow: a }, Wedge::Down { narrow: a }] {
                 out.bonds[bond as usize] = w;
                 if read_chirality(mol, coords, &out.bonds, a) == Some(want) {
@@ -175,15 +221,24 @@ pub fn assign_wedges(mol: &MolBuilder, coords: &[Point2], ranks: &[u32]) -> Wedg
 
 /// 立体中心 `a` 可以打楔形的键,**按优先级从好到差排好**。
 ///
-/// 优先级:**对端不是立体中心** > **不在环上** > **对端是端基原子** > 规范秩小。
+/// 两条忌讳,哪条排前面由 `taboo` 定 —— 它们会冲突,见 [`assign_wedges`]:
 ///
-/// - 对端也是立体中心的键,画出来人读着有歧义:这个楔形在说谁的构型?几何上
-///   它现在是明确的([`Wedge`] 带着窄端),但能躲就躲。
-/// - 环上的键打楔形同样有歧义 —— 它同时属于两个原子的平面;打在端基上最清楚。
+/// - **环上的键**:IUPAC 的图示建议说立体键该画向取代基。环键的两个原子在读者
+///   眼里都躺在环平面里,声明其中一个出平面与读者正在用的环几何自相矛盾。
+/// - **对端也是立体中心的键**:读者会问这个楔形在说谁的构型。几何上它是明确的
+///   ([`Wedge`] 带着窄端),但能躲就躲。
+///
+/// 后面两档不变:**对端是端基原子**(打在端基上最清楚)> 规范秩小。
 ///
 /// 返回的是整个候选序列而不是最好的那一根:最好的那根未必读得回正确的构型,
 /// 那时要接着试下一根。平局一律按规范秩打破,拿存储下标打破会引入写法依赖。
-fn candidate_bonds(mol: &MolBuilder, a: u32, used: &[bool], ranks: &[u32]) -> Vec<u32> {
+fn candidate_bonds(
+    mol: &MolBuilder,
+    a: u32,
+    used: &[bool],
+    ranks: &[u32],
+    taboo: Taboo,
+) -> Vec<u32> {
     let mut cands: Vec<(u8, u8, u8, u32, u32, u32)> = mol
         .neighbors(a)
         .filter(|(_, bi)| !used[*bi as usize])
@@ -197,9 +252,13 @@ fn candidate_bonds(mol: &MolBuilder, a: u32, used: &[bool], ranks: &[u32]) -> Ve
                 mol.atoms()[n as usize].chiral_tag,
                 ChiralTag::Cw | ChiralTag::Ccw
             );
+            let (first, second) = match taboo {
+                Taboo::RingWorst => (in_ring, other_is_centre),
+                Taboo::SharedWorst => (other_is_centre, in_ring),
+            };
             (
-                u8::from(other_is_centre),
-                u8::from(in_ring),
+                u8::from(first),
+                u8::from(second),
                 u8::from(mol.degree(n) > 1),
                 ranks[n as usize],
                 n,
@@ -763,6 +822,46 @@ mod tests {
             read_chirality(&m2, &c2, &w2, 0).is_some(),
             "张开之后应当读得出来"
         );
+    }
+
+    #[test]
+    fn when_the_two_taboos_conflict_the_better_of_both_orders_wins() {
+        // 楔形该躲开**环键**,也该躲开**与另一个立体中心共用的键**。相邻的两个
+        // 中心只有一根共用的非环键时这两条就冲了:谁先拿走谁受益,另一个被饿死。
+        //
+        // 下面两个分子各站一边 —— 单跑任何一种序都会在其中一个上吃亏:
+        //
+        // | | 只 SharedWorst | 只 RingWorst | 两种都跑 |
+        // |---|---|---|---|
+        // | 缩醛那个 | 2 根环上楔形 | **1 根** | 1 根 |
+        // | 噻嗪那个 | 2 根环上楔形 | 1 根,但**丢一个中心** | 2 根 |
+        //
+        // 全量语料上:只 SharedWorst 159 根环上楔形 / 18 个 unwedged;
+        // 只 RingWorst 156 / **19**;两种都跑 158 / 18 —— **信息不能丢**,
+        // 所以先比 `unwedged` 再比环上楔形。
+        for (smi, want_ring) in [
+            ("CC1(OC[C@@H](O1)[C@@H]2CC23SCCCS3)C", 1usize),
+            ("COCCCNC1=C(C(=O)N[C@@H](S1)[C@@H]2CCC=CC2)C#N", 2),
+        ] {
+            let m = prep(smi);
+            let ranks = omgkit_io::canon::canonical_ranks(&m);
+            let d = generate(&m, &Style::ACS_1996);
+            let w = assign_wedges(&m, &d.coords, &ranks);
+            assert!(
+                w.unwedged.is_empty(),
+                "{smi}:有中心没画出构型 {:?} —— 丢信息换环上楔形是亏的",
+                w.unwedged
+            );
+            let on_ring = w
+                .bonds
+                .iter()
+                .enumerate()
+                .filter(|(bi, x)| {
+                    x.narrow().is_some() && m.bonds()[*bi].flags.contains(BondFlags::IN_RING)
+                })
+                .count();
+            assert_eq!(on_ring, want_ring, "{smi}:落在环键上的楔形数不对");
+        }
     }
 
     #[test]
