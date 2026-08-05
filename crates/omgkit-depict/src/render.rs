@@ -704,13 +704,21 @@ fn trim(
 /// | 链上、两端都是端点(乙烯) | 对称跨轴 |
 /// | 链上、一端是端点,内侧原子**带标签或还有别的分叉** | 对称跨轴 |
 /// | 链上、一端是端点,内侧原子度 2 且无标签 | 偏向内侧原子的另一根键那一侧(端烯、醛) |
-/// | 链上、两端都有取代基 | 偏向取代基多的一侧(顺式那一侧) |
+/// | 链上、两端都有取代基,票数不为 0 | 偏向取代基多的一侧(顺式那一侧) |
+/// | 链上、票数抵消(反式),**两端都带标签** | 对称跨轴 |
+/// | 链上、票数抵消(反式),其余 | 按**画布的绝对方向**偏:朝上,竖直键朝左 |
 ///
 /// 后四行与 RDKit `calcDoubleBondLines` / `doubleBondTerminal` 的分档一一对应,
 /// 见函数体里的注释。
 ///
 /// 环上那一条**不看取代基**:抗坏血酸环内的 C=C 两端各挂一个 OH,按邻居计数
 /// 正好抵消,两条线就骑在环边上,其中一条落到环外去了。
+///
+/// # 反式那一档的偏侧是**约定**,不是推导
+///
+/// 两个取代基一边一个时,两侧一样合理。RDKit 按存储序挑(`otherNeighbor(…, 0)`),
+/// 那会让同一分子的不同写法画到不同侧 —— 这里改成认**画布的绝对方向**,见
+/// 函数体末尾。
 fn offset_dir(
     mol: &MolBuilder,
     bi: usize,
@@ -732,6 +740,11 @@ fn offset_dir(
     // 打平的容差按键长取。真正的左右之别至少是半个键长的量级,而共线的邻居
     // 算出来是 1e-15 —— 中间空得很,取哪个数量级都一样。
     let tie = 1e-3 * len;
+    // 判"这根键是不是竖着的"的容差。`normal` 是单位向量,所以这是个绝对量。
+    // 实测全量语料落进"票数抵消"那一档的 1072 条记录里,`|normal.y|` 只有两簇:
+    // 噪声簇 ≤ 1.97e-15、真实簇 ≥ 7.47e-02,**中间空 13 个数量级**,取哪个
+    // 数量级都一样。放宽到全部 81488 次调用也一样(5.43e-14 / 6.48e-04)。
+    const TIE_DIR: f64 = 1e-9;
 
     let bond_no = u32::try_from(bi).expect("键数超出 u32");
     let mine: Vec<&Ring> = rings
@@ -852,10 +865,38 @@ fn offset_dir(
             }
         }
     }
-    if score == 0 {
-        Point2::ORIGIN
+    if score != 0 {
+        return normal * f64::from(score.signum());
+    }
+
+    // 票数抵消 —— **反式双键的通例**,两个取代基一边一个。
+    //
+    // 对称跨轴是不行的:两端的单键都收在原子中心,而两条线谁也不从那两点出发,
+    // **两个顶点都合不拢** —— 与丙烯是同一个毛病,只是这里两头都犯。实测
+    // 643 根键 / 574 个分子(单套规范),trans-butene 就是其中一个。
+    //
+    // **两端都带标签时才对称**:那时键都停在字盒外,压根没有顶点要合(RDKit
+    // `calcDoubleBondLines` 里 `atomLabels_[at1] && atomLabels_[at2]` 那一支,
+    // 与"端基双键内侧带标签"是同一条道理)。
+    if labels[b.begin as usize].is_some() && labels[b.end as usize].is_some() {
+        return Point2::ORIGIN;
+    }
+
+    // 偏哪一侧**没有道理可讲** —— 两侧各有一个取代基,谁也不比谁更该。RDKit
+    // 取 `otherNeighbor(begAt, endAt, 0)`,那是**存储序**:同一个分子换种写法
+    // 就画到另一侧去,本库的头号契约不允许照抄。
+    //
+    // 这里按**画布的绝对方向**定:朝上那一侧,横着打平时朝左。坐标此时已经过
+    // `orient::canonicalise`,与写法无关;而且这条规则只认方向、不认 `normal`
+    // 的正负,所以**键的 begin/end 换个个儿它也不变**。
+    if normal.y < -TIE_DIR {
+        normal
+    } else if normal.y > TIE_DIR {
+        normal * -1.0
+    } else if normal.x < 0.0 {
+        normal
     } else {
-        normal * f64::from(score.signum())
+        normal * -1.0
     }
 }
 
@@ -1543,6 +1584,23 @@ mod tests {
             vec!["c1ccncc1", "c1cccnc1"],
             vec!["Cn1cnc2c1c(=O)n(C)c(=O)n2C", "CN1C=NC2=C1C(=O)N(C)C(=O)N2C"],
             vec!["OC(=O)c1ccccc1", "c1ccccc1C(O)=O"],
+            // 反式双键:两个取代基一边一个,第二条线偏哪侧**没有道理可讲**。
+            // RDKit 按存储序挑,那正是这条判据要挡的东西 —— 换个写法就画到另
+            // 一侧去。我们按画布的绝对方向挑,与写法无关。
+            //
+            // **必须是反式-2-戊烯,不能用 2-丁烯。** 两条都踩过:
+            //
+            // - 先前写的 `["C/C=C/C", "C(=C\\C)\\C", "C(/C)=C/C"]` **根本不是
+            //   同一个分子** —— 后两个的规范式是 `C/C=C\C`(顺式)。它能绿只
+            //   因为这里的 `prep` 不调 `perceive_bond_stereo`,布局看不见 E/Z,
+            //   顺反画成了同一张图。**那等于把"顺式和反式必须画得一模一样"
+            //   写成了硬性要求**,哪天 prep 对齐了它就红,而红的是判据自己。
+            // - 换成三种真反式的 2-丁烯又**抓不住存储序**:它两端等价,
+            //   `otherNeighbor(begAt, endAt, 0)` 挑哪一端都落到同一侧。
+            //
+            // 反式-2-戊烯两端不等价,四种写法的规范式都是 `C/C=C/CC`,而且在
+            // 感不感知顺反两套口径下都落进"票数抵消"那一档。
+            vec!["C/C=C/CC", "CC/C=C/C", "C(/C)=C\\CC", "C(\\CC)=C/C"],
         ];
         // 图元的多重集:坐标量化后排序。原子编号不同,画出来的线必须一样。
         let key = |smi: &str, style: &Style| -> Vec<String> {
@@ -1856,6 +1914,10 @@ mod tests {
         // - `Br[CH]1[CH](Br)S(=O)(=O)C2=C1C=CC=C2`:内侧的 S **度 4**,三个别的
         //   邻居,票数是奇数项之和,抵消不掉。删掉早退的话两根 S=O 双双朝对方
         //   倾斜,四条线挤在中间。全量 116 根/68 分子。
+        // - `CN=NC`(偶氮):**链上**的双键,两端都有取代基、票数抵消,而
+        //   **两端都带标签** —— 那时键都停在字盒外,同样没有顶点要合。这一支
+        //   先前一条判据都没有,删掉它全世界不吭声(全量审计也逐字节不变,
+        //   因为审计里没有任何一条性质在量偏侧)。删掉之后 `=` 贴着 N 画。
         for smi in [
             "O=C=O",
             "CC(C)=C",
@@ -1863,6 +1925,7 @@ mod tests {
             "CC(C)=O",
             "CN=O",
             "Br[CH]1[CH](Br)S(=O)(=O)C2=C1C=CC=C2",
+            "CN=NC",
         ] {
             let m = prep(smi);
             let style = Style::ACS_1996;
@@ -2032,6 +2095,98 @@ mod tests {
                 assert!(
                     checked >= 1,
                     "[{}] {smi}:这一档一根键都没查到 —— 判据空过了",
+                    style.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_trans_double_bond_closes_both_joints() {
+        // 反式双键 `CH₃–CH=CH–CH₃`:两个取代基一边一个,按邻居计数正好抵消。
+        // 先前抵消就跨轴对称画 —— 于是**两个顶点都合不拢**,与丙烯是同一个
+        // 毛病,只是这里两头都犯。画廊里的 trans-butene 就是这样。
+        //
+        // 全量语料落进这一档的有 **629 根键 / 562 个分子**(单套规范,按审计
+        // 那条会感知顺反的管线数;这里的 `prep` 不感知,同一份语料数出 643/574)。
+        // 其中 93 根**两端都带标签**,仍旧对称,由
+        // [`a_double_bond_with_no_inner_side_is_drawn_symmetric`] 管。真正改了
+        // 画法的是 **536 根**。
+        //
+        // 偏哪一侧没有道理可讲,但**必须偏**:一条线走键轴才接得上两端的单键。
+        //
+        // **只挑真的落在这一档的分子。** 先前列的 `CC=C(C)CC` 走的是 vote 档
+        // (一端一个邻居、另一端两个分居两侧,票数 ±1),在 HEAD 上本来就不
+        // 对称,变异下照样绿 —— 对这条判据零贡献。下面按几何显式筛:
+        // **两端各恰好一个取代基,且分居键轴两侧**。
+        //
+        // 断言拿的是**未 trim** 的原子位置,所以列的分子两端都不能带标签 ——
+        // 带标签那头主线会缩回字盒外,断言会假红。真实语料里这一档 536 根中
+        // 有 246 根是"只有一端带标签",那时只有一个顶点要合,同样该偏,只是
+        // 这条判据的写法量不了。
+        for smi in ["C/C=C/C", "C/C=C/CC", "C/C=C/C=C/C=C/C"] {
+            for style in &Style::ALL {
+                let m = prep(smi);
+                let d = generate(&m, style);
+                let s = scene(&m, &d, style);
+                let bnd = bounds(&d.coords, &m, style);
+                let pts: Vec<Point2> = d
+                    .coords
+                    .iter()
+                    .map(|p| to_canvas(*p, bnd, style.bond_length_pt))
+                    .collect();
+
+                let mut checked = 0usize;
+                for (bi, b) in m.bonds().iter().enumerate() {
+                    if drawn_orders(&m)[bi] != BondOrder::Double {
+                        continue;
+                    }
+                    if m.degree(b.begin) == 1 || m.degree(b.end) == 1 {
+                        continue;
+                    }
+                    let (pa, pb) = (pts[b.begin as usize], pts[b.end as usize]);
+                    let len = pa.dist(pb);
+                    let mid = (pa + pb) * 0.5;
+                    let axis = (pb - pa) * (1.0 / len);
+                    let normal = Point2::new(-axis.y, axis.x);
+                    // **这一档的定义:两端各恰好一个取代基,且分居键轴两侧。**
+                    // 同侧是顺式,走的是另一档(偏向取代基那侧),不在这里。
+                    let subs = |e: u32, other: u32| -> Vec<u32> {
+                        m.neighbors(e)
+                            .map(|(x, _)| x)
+                            .filter(|x| *x != other)
+                            .collect()
+                    };
+                    let (sa, sb) = (subs(b.begin, b.end), subs(b.end, b.begin));
+                    if sa.len() != 1 || sb.len() != 1 {
+                        continue;
+                    }
+                    let side = |x: u32| (pts[x as usize] - mid).dot(normal);
+                    if side(sa[0]) * side(sb[0]) >= 0.0 {
+                        continue;
+                    }
+                    // 两端都带标签的另有规矩(偶氮 `CN=NC`),不在这条里
+                    if label_at(&m, b.begin, style, &d.coords).is_some()
+                        && label_at(&m, b.end, style, &d.coords).is_some()
+                    {
+                        continue;
+                    }
+                    let ls = lines_of_bond(&s, pa, pb);
+                    assert_eq!(ls.len(), 2, "[{}] {smi}:双键该画两条线", style.name);
+                    // 有一条线整根走在键轴上 —— 两个顶点都接得上
+                    assert!(
+                        ls.iter().any(|(u, v)| {
+                            (u.dist(pa) < 0.02 * len && v.dist(pb) < 0.02 * len)
+                                || (u.dist(pb) < 0.02 * len && v.dist(pa) < 0.02 * len)
+                        }),
+                        "[{}] {smi}:键 {bi} 没有一条线走在键轴上,两个顶点都合不拢",
+                        style.name
+                    );
+                    checked += 1;
+                }
+                assert!(
+                    checked >= 1,
+                    "[{}] {smi}:一根都没查到 —— 判据空过了",
                     style.name
                 );
             }
