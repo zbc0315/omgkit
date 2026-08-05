@@ -321,24 +321,95 @@ fn allocate(occupied: &[f64], n: usize, ideal: f64, zig: i8) -> Vec<f64> {
 }
 
 /// 已排序角度序列中最大的空隙:返回(空隙起始角, 空隙大小)。
+///
+/// # 比大小必须先量化,平局必须有绝对判据
+///
+/// 三个已占方向恰好各差 120° 时(稠环上挂一个取代基就是这样),**三个空隙在
+/// 数学上精确相等**。先前直接拿 `>` 比浮点,于是"哪个最大"由末位决定 —— 而
+/// 末位取决于环坐标是按什么次序算出来的,同一个分子换种写法就换一个答案。
+///
+/// 实测:`C1CCN2[C@@H](C1)C=CC3=C2CCCC3=O` 的稠合碳上,三个已占方向算出来是
+///
+/// ```text
+/// 写法 A: -2.09439510239319571, -0.00000000000000067, 2.09439510239319526
+/// 写法 B: -2.09439510239319615, -0.00000000000000067, 2.09439510239319526
+/// ```
+///
+/// 只差 4.4e-16,而补出来的那个氢因此挂到了 **120° 外的另一个扇区**。这一处
+/// 是"写法无关"违例里相当大的一块 —— 它不是布局挑错了,是根本没在挑。
+///
+/// 所以:空隙量化到 1e-9 再比;仍然并列时取**起始角最小**的那个扇区 —— 那是
+/// 与写法无关的绝对判据,与本文件里 `occ` 的排序、`mitre_end` 的量化同一个路子。
 fn largest_gap(sorted: &[f64]) -> (f64, f64) {
+    /// 量化的刻度。真正不等的两个空隙至少差 30°(栅格步长),而浮点噪声在
+    /// 1e-15 量级 —— 中间空得很,取哪个数量级都一样。
+    const QUANT: f64 = 1e9;
+    #[allow(clippy::cast_possible_truncation)]
+    let q = |x: f64| (x * QUANT).round() as i64;
+
     let n = sorted.len();
     debug_assert!(n >= 2);
-    let mut best = (
-        sorted[n - 1],
-        sorted[0] + std::f64::consts::TAU - sorted[n - 1],
-    );
+    let mut cands: Vec<(i64, i64, f64, f64)> = Vec::with_capacity(n);
+    let wrap_start = sorted[n - 1];
+    let wrap = sorted[0] + std::f64::consts::TAU - wrap_start;
+    cands.push((q(wrap), q(wrap_start), wrap_start, wrap));
     for i in 0..n - 1 {
         let g = sorted[i + 1] - sorted[i];
-        if g > best.1 {
-            best = (sorted[i], g);
-        }
+        cands.push((q(g), q(sorted[i]), sorted[i], g));
     }
-    best
+    // 空隙大的在前;并列取起始角最小的
+    cands.sort_by_key(|c| (std::cmp::Reverse(c.0), c.1));
+    let c = cands[0];
+    (c.2, c.3)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::largest_gap;
+
+    #[test]
+    fn a_three_way_tie_of_gaps_is_not_broken_by_the_last_bit() {
+        // 稠环上的取代基:三个已占方向恰好各差 120°,**三个空隙精确相等**。
+        // 先前拿 `>` 直接比浮点,谁"最大"由末位决定 —— 而末位取决于环坐标是按
+        // 什么次序算出来的,同一个分子换种写法就换一个扇区,取代基差 120°。
+        //
+        // 实测那两组数只差 4.4e-16(见 `largest_gap` 的文档)。这里把那个量级
+        // 的扰动加在每一个位置上,结果必须一个样。
+        let base = [
+            -2.094_395_102_393_195_7_f64,
+            -0.000_000_000_000_000_67,
+            2.094_395_102_393_195_3,
+        ];
+        let want = largest_gap(&base);
+        for i in 0..3 {
+            for eps in [-4.4e-16, 4.4e-16, -1e-15, 1e-15] {
+                let mut v = base;
+                v[i] += eps;
+                v.sort_by(|a, b| a.partial_cmp(b).expect("非 NaN"));
+                let got = largest_gap(&v);
+                assert!(
+                    (got.0 - want.0).abs() < 1e-9,
+                    "第 {i} 个方向抖动 {eps:e} 之后挑了另一个扇区:{:.6} → {:.6}",
+                    want.0,
+                    got.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_genuinely_larger_gap_still_wins() {
+        // 上一条只说"平局要稳",不能顺手把"真的更大"也压掉 —— 那样就成了
+        // "永远取第一个扇区"。
+        let v = [0.0_f64, 1.0, 1.2];
+        let (start, gap) = largest_gap(&v);
+        assert!(
+            (start - 1.2).abs() < 1e-9,
+            "该取 1.2 起那个最大的空隙,实得起点 {start:.4}"
+        );
+        assert!((gap - (std::f64::consts::TAU - 1.2)).abs() < 1e-9);
+    }
+
     #[test]
     fn an_arm_hanging_off_a_ring_keeps_its_ideal_angles() {
         // `allocate` 在"只有一个已占方向"时按锯齿的符号取 ±理想角,**那个符号
