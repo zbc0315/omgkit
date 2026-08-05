@@ -47,7 +47,25 @@ use omgkit_depict::{
 /// 契约就是被这样一个九分之一空过的搅拌器在验的。
 ///
 /// 换成货真价实的置换之后每一次都算数,于是可以多试几种。
-const WRITINGS: usize = 5;
+///
+/// # 这个数是量出来的,不是拍的
+///
+/// 先前是 5。**5 种只是抽样,漏掉的写法依赖不会自己冒出来** —— 而写法无关是
+/// 本 crate 的头号契约,判据自己的**灵敏度**必须先量。全量语料上把它拉开:
+///
+/// | 写法数 | 5 | 10 | 30 | 60 | 100 |
+/// |---|---:|---:|---:|---:|---:|
+/// | 违例 | **201** | 221 | **223** | 223 | 223 |
+///
+/// **5 种漏报了 22 处(10%)**,30 种就饱和,60 与 100 一个不多。所以取 30。
+/// 代价是全量一遍从 ~45s 变成 ~55s。
+///
+/// 命令行第二个参数可以再调:
+///
+/// ```shell
+/// cargo run -p omgkit-depict --release --example audit -- harness/corpus/large.smi 100
+/// ```
+const WRITINGS: usize = 30;
 
 /// 每种写法最多试几个种子,去找一个**确实换了存储序**的改写。
 ///
@@ -92,6 +110,9 @@ fn main() {
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "harness/corpus/large.smi".into());
+    let writings: usize = std::env::args().nth(2).map_or(WRITINGS, |x| {
+        x.parse().expect("第二个参数是写法数,要是个整数")
+    });
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("读不了 {path}:{e}"));
 
     let mut fails: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
@@ -189,7 +210,7 @@ fn main() {
                 })
                 .or_default() += 1usize;
 
-            for (name, hit, bad) in checks(&m, &d, &s, style, clean) {
+            for (name, hit, bad) in checks(&m, &d, &s, style, clean, writings) {
                 *checked.entry(name).or_default() += usize::from(hit);
                 if let Some(why) = bad {
                     fails
@@ -201,7 +222,7 @@ fn main() {
         }
     }
 
-    println!("语料 {path}:解析成功 {n_ok},跳过 {n_skip}\n");
+    println!("语料 {path}:解析成功 {n_ok},跳过 {n_skip};每分子比 {writings} 种写法\n");
     let tot: usize = quality
         .iter()
         .filter(|(k, _)| !k.starts_with('—'))
@@ -423,6 +444,7 @@ fn checks(
     s: &Scene,
     style: &Style,
     clean: bool,
+    writings: usize,
 ) -> Vec<Check> {
     let mut v = vec![
         ring_double_bonds(m, d, s, style, clean),
@@ -435,7 +457,7 @@ fn checks(
         no_angle_is_pinched(m, d, clean),
     ];
     // 写法无关出三行:判据本身、比满没有、以及有没有查成 —— 见其文档注释
-    v.extend(writing_independent(m, d, s, style, clean));
+    v.extend(writing_independent(m, d, s, style, clean, writings));
     v
 }
 
@@ -568,6 +590,7 @@ fn writing_independent(
     s: &Scene,
     style: &Style,
     clean: bool,
+    writings: usize,
 ) -> [Check; 3] {
     let want = fingerprint(s);
     let n = m.num_atoms();
@@ -580,7 +603,7 @@ fn writing_independent(
     // 真正比过几次、因为"换出来不是同一个分子"跳过了几次、以及试遍种子都换不
     // 出新写法几次。一次都没比过的话这一条是空过的,必须看得见。
     let (mut compared, mut skipped, mut unshuffled) = (0usize, 0usize, 0usize);
-    for k in 1..=WRITINGS {
+    for k in 1..=writings {
         // 试几个种子,直到搅出一个确实换了存储序的写法
         let mut found: Option<(String, MolBuilder)> = None;
         for t in 0..SEED_TRIES {
@@ -655,7 +678,7 @@ fn writing_independent(
                         want.len()
                     )),
                 ),
-                ("写法无关·比满", compared == WRITINGS, None),
+                ("写法无关·比满", compared == writings, None),
                 ("写法无关·没查成", false, None),
             ];
         }
@@ -680,7 +703,7 @@ fn writing_independent(
                 )
             }),
         ),
-        ("写法无关·比满", compared == WRITINGS, None),
+        ("写法无关·比满", compared == writings, None),
         ("写法无关·没查成", compared == 0, None),
     ]
 }
