@@ -23,6 +23,7 @@
 //! | 楔形可读 | 画出楔形的中心,反读回来就是它该有的构型 | 无 |
 //! | 键长全等 | 所有键画出来一样长 | 布局没退化 |
 //! | 不出画布 | 每个图元都在画布里 | 无 |
+//! | 线端不压字 | 没有线的端点落在标签的字形盒里 | 两端标签塞得下 |
 //!
 //! 带"布局没退化"前提的两条,是因为退化的坐标本身就不成形状 —— 那时要求图
 //! 画得对没有意义,而**退化这件事已经报在 [`Depiction::degraded`] 里了**。
@@ -33,8 +34,8 @@ use omgkit_core::MolBuilder;
 use omgkit_depict::{
     generate,
     geom::{point_in_polygon, Point2},
-    label::label_for,
-    render::{h_side, scene, Primitive, Scene},
+    label::Label,
+    render::{is_squeezed, label_at, scene, Primitive, Scene},
     style::Style,
 };
 
@@ -264,45 +265,43 @@ fn accidental_collinear(m: &MolBuilder, d: &omgkit_depict::Depiction) -> usize {
         .count()
 }
 
-/// 两端标签加起来比这根键还长的键有几根。
-///
-/// 口径与 `render::trim` 的压缩兜底一致:沿键的方向量到标签盒边,加上 margin,
-/// 两端之和超过键长的九成就算塞不下。
-fn squeezed_bonds(m: &MolBuilder, d: &omgkit_depict::Depiction, style: &Style) -> usize {
-    use omgkit_depict::label::{label_for, Label};
-    use omgkit_depict::render::h_side;
+/// 画出来的标签,一个原子一个 —— 与 `scene` 同源。
+fn labels_of(m: &MolBuilder, d: &omgkit_depict::Depiction, style: &Style) -> Vec<Option<Label>> {
+    (0..u32::try_from(m.num_atoms()).expect("原子数超出 u32"))
+        .map(|a| label_at(m, a, style, &d.coords))
+        .collect()
+}
 
-    let labels: Vec<Option<Label>> = (0..u32::try_from(m.num_atoms()).expect("原子数超出 u32"))
-        .map(|a| label_for(m, a, style, h_side(m, a, &d.coords)))
-        .collect();
+/// 两端标签加起来比这根键还长的键 —— 每根键一个标志。
+///
+/// **口径向实现要,不在这里重写。** 先前这里手抄了一份居中盒的算法,而实现
+/// 早已改成偏心盒(整串朝一侧挪了 `dx`,好让元素符号落在原子上),两边算出来
+/// 的净空对不上 —— 多报了 547 例(1818 → 1271)。`render::is_squeezed` 因此
+/// 是公开的。
+fn squeezed(
+    m: &MolBuilder,
+    d: &omgkit_depict::Depiction,
+    style: &Style,
+    labels: &[Option<Label>],
+) -> Vec<bool> {
     m.bonds()
         .iter()
-        .filter(|b| {
-            let (pa, pb) = (d.coords[b.begin as usize], d.coords[b.end as usize]);
-            let len = pa.dist(pb);
-            if len < 1e-9 {
-                return false;
-            }
-            let dir = (pb - pa) * (1.0 / len);
-            let need = |l: &Option<Label>| {
-                l.as_ref().map_or(0.0, |l| {
-                    // 居中的轴对齐盒,沿 dir 到盒边
-                    let (ax, ay) = (dir.x.abs(), dir.y.abs());
-                    let tx = if ax > 1e-12 {
-                        l.half_w / ax
-                    } else {
-                        f64::INFINITY
-                    };
-                    let ty = if ay > 1e-12 {
-                        l.half_h / ay
-                    } else {
-                        f64::INFINITY
-                    };
-                    tx.min(ty) + style.margin()
-                })
-            };
-            need(&labels[b.begin as usize]) + need(&labels[b.end as usize]) >= len * 0.9
+        .map(|b| {
+            is_squeezed(
+                d.coords[b.begin as usize],
+                d.coords[b.end as usize],
+                labels[b.begin as usize].as_ref(),
+                labels[b.end as usize].as_ref(),
+                style,
+            )
         })
+        .collect()
+}
+
+fn squeezed_bonds(m: &MolBuilder, d: &omgkit_depict::Depiction, style: &Style) -> usize {
+    squeezed(m, d, style, &labels_of(m, d, style))
+        .iter()
+        .filter(|x| **x)
         .count()
 }
 
@@ -366,6 +365,7 @@ fn checks(
         wedges_read_back(m, d),
         bond_lengths_equal(m, d, clean),
         inside_canvas(m, d, s, style),
+        lines_clear_of_labels(m, d, s, style),
         no_atom_sits_on_another(m, d),
         no_angle_is_pinched(m, d, clean),
     ];
@@ -812,7 +812,7 @@ fn inside_canvas(m: &MolBuilder, d: &omgkit_depict::Depiction, s: &Scene, style:
     let scale = style.bond_length_pt;
     let pts = canvas_pts(m, d, style);
     for a in 0..u32::try_from(m.num_atoms()).expect("原子数超出 u32") {
-        let Some(l) = label_for(m, a, style, h_side(m, a, &d.coords)) else {
+        let Some(l) = label_at(m, a, style, &d.coords) else {
             continue;
         };
         let c = pts[a as usize] + Point2::new(l.dx * scale, 0.0);
@@ -834,6 +834,121 @@ fn inside_canvas(m: &MolBuilder, d: &omgkit_depict::Depiction, s: &Scene, style:
         }
     }
     ("不出画布", true, None)
+}
+
+/// 一根键画出来的每条线,端点都要停在它自己两端标签的字形盒外。
+///
+/// # 这条判据是怎么来的
+///
+/// `render::trim` 只管**主线**:它从原子中心出发,按盒边加 margin 切一刀。
+/// 双键的第二条线当时不走这条路 —— 它的端点是斜切算出来的角平分线交点,而
+/// 角平分线是从**原子中心**量的,端原子有标签时那个交点就落在字里面。
+///
+/// 实测咖啡因咪唑环上的 C=N(ACS):`N` 的半宽 3.61pt、半高 3.59pt,主线停在离
+/// 中心 5.56pt 处,内侧线却停在 3.20pt —— 压在字上,而且比主线还伸得靠前,
+/// 看上去像一个指着 N 的楔子。全量 3044 处(17.2%)。
+///
+/// **实现已经改了**(端原子有标签就不斜切,再加一道 `escape_boxes` 把横向
+/// 平移出来的线端点推出盒),这条判据留下来守着它。
+///
+/// # 只查这根键自己的两端
+///
+/// 别的键的线压到这个标签上,那是**布局**没摆开,已经报在 `未解冲突`、
+/// `有键交叉`、`原子不重合` 里了,不该在这条上再报一遍 —— 实测头几例正是
+/// 这样:两个羧基挤到一起,C=O 的线压到了另一个羧基的 O 上。
+///
+/// # 塞不下的键跳过
+///
+/// 两端标签加起来比键还长时 `trim` 走压缩兜底,端点落进盒里是明知故犯 ——
+/// ACS 规范下 `O⁻—N⁺` 两端要 1.375 个键长的净空,一个键长塞不下。口径由
+/// `render::is_squeezed` 给,不在这边重写。
+///
+/// # 两处判据比实现严,记在这里
+///
+/// 实现只把 `from` 推出**近端**那个盒、`to` 推出远端那个;判据拿每条线的两个
+/// 端点比两端的盒。于是两类构型实现满足不了:(a) 短键上一条线的**远**端点落进
+/// **近**端原子的盒;(b) 刚好卡在 `trim` 的 `SQUEEZE` 阈值下方、却触发
+/// `escape_boxes` 自己那档压缩的键。扫过真实标签集合 × 两套规范 × 全角度:
+/// (b) 几何上可达(5464 种构型),但压缩后端点仍落在这条判据留了线宽余量的盒
+/// 之外,报不出来;(a) 语料里不出现。**这条哪天红了,断层多半就在这两处。**
+fn lines_clear_of_labels(
+    m: &MolBuilder,
+    d: &omgkit_depict::Depiction,
+    s: &Scene,
+    style: &Style,
+) -> Check {
+    use omgkit_core::BondOrder;
+    use omgkit_depict::render::drawn_orders;
+
+    let scale = style.bond_length_pt;
+    let pts = canvas_pts(m, d, style);
+    let labels = labels_of(m, d, style);
+    let tight = squeezed(m, d, style, &labels);
+    let orders = drawn_orders(m);
+
+    // `scene` 按键的次序发图元,一根键发几个由画出来的键级定 —— 与那边同源。
+    let mut it = s.items.iter();
+    // 真比过几对(线端点 × 标签)。**不能拿"过了一个分子"当查到** —— 全量语料
+    // 里有 86 个分子×规范一个端点都没得比(没有落在非 tight 键上的带标签端),
+    // 那时这条判据是空过的,得如实反映在"查到"那一列里。
+    let mut compared = 0usize;
+    for (bi, b) in m.bonds().iter().enumerate() {
+        let n = match orders[bi] {
+            BondOrder::Double => 2,
+            BondOrder::Triple => 3,
+            _ => 1,
+        };
+        let mine: Vec<&Primitive> = (0..n).filter_map(|_| it.next()).collect();
+        if tight[bi] {
+            continue;
+        }
+        for a in [b.begin, b.end] {
+            let Some(l) = &labels[a as usize] else {
+                continue;
+            };
+            // **盒心不在原子上** —— 整串朝一侧挪了 `dx`
+            let bc = pts[a as usize] + Point2::new(l.dx * scale, 0.0);
+            // 线本身有粗细,压边一丝不算划字
+            let (hw, hh) = (
+                l.half_w * scale - style.line_width_pt,
+                l.half_h * scale - style.line_width_pt,
+            );
+            if hw <= 0.0 || hh <= 0.0 {
+                continue;
+            }
+            for p in mine.iter().filter_map(|x| match x {
+                Primitive::Line { from, to, .. } => Some([*from, *to]),
+                _ => None,
+            }) {
+                for p in p {
+                    compared += 1;
+                    if (p.x - bc.x).abs() < hw && (p.y - bc.y).abs() < hh {
+                        return (
+                            "线端不压字",
+                            true,
+                            Some(format!(
+                                "键 {bi} 的线端点 ({:.2},{:.2}) 落在原子 {a} 的标签 {} 里\
+                                 (盒心 ({:.2},{:.2})±({hw:.2},{hh:.2}))",
+                                p.x,
+                                p.y,
+                                l.plain(),
+                                bc.x,
+                                bc.y
+                            )),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // **图元与键的对应必须严丝合缝。** 上面按 `drawn_orders` 数着消耗图元;
+    // 哪根键将来多发或少发一个(芳香圈、配位键、跨过交叉点断成两段),整条
+    // 判据就静默错位,开始拿这根键的线去比另一根键的标签 —— 而它照样报绿。
+    assert!(
+        it.all(|x| matches!(x, Primitive::Text { .. })),
+        "图元与键对不上号:按键消耗完之后剩下的不全是标签"
+    );
+    ("线端不压字", compared > 0, None)
 }
 
 fn canvas_pts(m: &MolBuilder, d: &omgkit_depict::Depiction, style: &Style) -> Vec<Point2> {

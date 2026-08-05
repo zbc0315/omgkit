@@ -115,14 +115,26 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
     let labels: Vec<Option<Label>> = (0..mol.num_atoms())
         .map(|i| {
             let a = u32::try_from(i).expect("原子数超出 u32");
-            let side = h_side(mol, a, &depiction.coords);
-            // 共线的二度原子即便是骨架碳也要画出来 —— 见 [`is_collinear`]
-            label_for(mol, a, style, side).or_else(|| {
-                is_collinear(mol, a, &depiction.coords)
-                    .then(|| crate::label::label_forced(mol, a, style, side))
+            label_at(mol, a, style, &depiction.coords)
+        })
+        .collect();
+
+    // 标签的字形盒,画布坐标系。**盒心不在原子上** —— 整串朝一侧挪了 `dx`,
+    // 好让元素符号落在原子位置上,见 [`Label::dx`](crate::label::Label::dx)。
+    let boxes: Vec<Option<(Point2, f64, f64)>> = labels
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            l.as_ref().map(|l| {
+                (
+                    pts[i] + Point2::new(l.dx * scale, 0.0),
+                    l.half_w * scale,
+                    l.half_h * scale,
+                )
             })
         })
         .collect();
+    let margin_pt = style.margin() * scale;
 
     let mut items = Vec::new();
 
@@ -146,6 +158,14 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
         let (qa, qb) = trim(pa, pb, &labels[bg as usize], &labels[en as usize], style);
         let (a, bb) = (to_pt(qa), to_pt(qb));
         let w = style.line_width_pt;
+        // 从主线**横向平移**出来的那些线(双键的第二条、叁键的两条外侧线),
+        // 平移会把端点带回盒里 —— 见 [`escape_boxes`]。主线不走这一步,它归
+        // [`trim`] 管,连"塞不下时压缩"那档兜底一起。
+        let sidelined = |from: Point2, to: Point2| {
+            let (from, to) =
+                escape_boxes(from, to, boxes[bg as usize], boxes[en as usize], margin_pt);
+            Primitive::Line { from, to, width: w }
+        };
 
         match orders[bi] {
             BondOrder::Double => {
@@ -159,16 +179,8 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
                 if off.norm() < 1e-9 {
                     // 没有偏向的一侧(孤立双键):两条线对称分布
                     let half = n * 0.5;
-                    items.push(Primitive::Line {
-                        from: a + half,
-                        to: bb + half,
-                        width: w,
-                    });
-                    items.push(Primitive::Line {
-                        from: a - half,
-                        to: bb - half,
-                        width: w,
-                    });
+                    items.push(sidelined(a + half, bb + half));
+                    items.push(sidelined(a - half, bb - half));
                 } else {
                     items.push(Primitive::Line {
                         from: a,
@@ -177,10 +189,23 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
                     });
                     // 第二条线两端**斜切**到与相邻键接上,见 [`mitre_end`]。
                     // 相邻键取不到(端基、共线)时退回按固定比例缩进。
+                    //
+                    // **端原子有标签就不斜切。** 斜切点是从原子中心量的角平分线
+                    // 交点,而主线为了让开字已经缩回去了 —— 两者不在一个起跑线上,
+                    // 算出来的斜切点直接落在字里,还比主线伸得更靠前。这时跟着
+                    // 主线的端点平移就对了:主线让开多少,它就让开多少。
+                    // RDKit 同规则,`doubleBondEnd` 的 `trunc` 取 `!atomLabels_[at]`。
                     let fallback = (bb - a) * 0.12;
-                    let from = mitre_end(mol, bg, en, &pts, n).unwrap_or(a + n + fallback);
-                    let to = mitre_end(mol, en, bg, &pts, n).unwrap_or(bb + n - fallback);
-                    items.push(Primitive::Line { from, to, width: w });
+                    let end = |e: u32, o: u32, p: Point2, back: Point2| {
+                        if labels[e as usize].is_some() {
+                            p + n
+                        } else {
+                            mitre_end(mol, e, o, &pts, n).unwrap_or(p + n + back)
+                        }
+                    };
+                    let from = end(bg, en, a, fallback);
+                    let to = end(en, bg, bb, fallback * -1.0);
+                    items.push(sidelined(from, to));
                 }
             }
             BondOrder::Triple => {
@@ -191,16 +216,8 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
                     to: bb,
                     width: w,
                 });
-                items.push(Primitive::Line {
-                    from: a + n,
-                    to: bb + n,
-                    width: w,
-                });
-                items.push(Primitive::Line {
-                    from: a - n,
-                    to: bb - n,
-                    width: w,
-                });
+                items.push(sidelined(a + n, bb + n));
+                items.push(sidelined(a - n, bb - n));
             }
             _ => match wedge {
                 crate::stereo::Wedge::Up { .. } => items.push(Primitive::Wedge {
@@ -335,12 +352,13 @@ pub fn bounds(coords: &[Point2], mol: &MolBuilder, style: &Style) -> (f64, f64, 
         let a = u32::try_from(i).expect("原子数超出 u32");
         // **要用真正会画出来的那个标签。**
         //
-        // 两处先前都错着:写死 `HSide::Right`(氢挂哪边其实看坐标),以及完全
-        // 不看 `dx` —— 整串朝一侧挪了之后**盒心不在原子上**,画布按"盒心在原子
-        // 上"算就会短一截,标签戳到画布外面去。实测踩到过 2 处
-        // (`不出画布` 那条硬性质当场破)。
-        let (dx, hw, hh) = label_for(mol, a, style, h_side(mol, a, coords))
-            .map_or((0.0, 0.0, 0.0), |l| (l.dx, l.half_w, l.half_h));
+        // 三处先前都错着:写死 `HSide::Right`(氢挂哪边其实看坐标)、完全不看
+        // `dx`(整串朝一侧挪了之后**盒心不在原子上**,画布按"盒心在原子上"算
+        // 就会短一截),以及只问 `label_for` —— 共线的骨架碳是 [`label_at`] 补
+        // 出来的符号,`scene` 画它,画布却没给它留地方。三处各实测踩到过
+        // 2、2、4 处,`不出画布` 那条硬性质当场破。
+        let (dx, hw, hh) =
+            label_at(mol, a, style, coords).map_or((0.0, 0.0, 0.0), |l| (l.dx, l.half_w, l.half_h));
         x0 = x0.min(p.x + dx - hw);
         y0 = y0.min(p.y - hh);
         x1 = x1.max(p.x + dx + hw);
@@ -350,6 +368,28 @@ pub fn bounds(coords: &[Point2], mol: &MolBuilder, style: &Style) -> (f64, f64, 
         return (0.0, 0.0, 0.0, 0.0);
     }
     (x0, y0, x1, y1)
+}
+
+/// 这个原子**真正会画出来**的标签。
+///
+/// 与 [`label_for`] 的差别是共线的二度原子:骨架碳本来不画符号,但两根键连成
+/// 一条直线时顶点处没有拐角,图上根本看不出那里有个原子,所以补一个 ——
+/// 见 [`is_collinear`]。
+///
+/// [`scene`] 画什么、[`bounds`] 按什么留白、判据按什么重建,**必须是同一个
+/// 来源**。三处各写各的话,补出来的那个符号就会有的地方算、有的地方不算 ——
+/// 实测就是这样破的 `不出画布`:`scene` 给共线的骨架碳画了 `CH`,`bounds`
+/// 不知道,半宽 7.22pt 的字直接戳出画布右边(全量 4 处)。
+///
+/// **有一处没跟过来,要说清楚:**[`refine::radii`](crate::refine) 仍只问
+/// `label_for`,共线的骨架碳在那里按裸原子的半径 0.25 个键长算,而它将被画出的
+/// `CH` 盒半径是 0.559 —— 布局给它留的地方不到实际的一半。这不是漏改:消冲突
+/// 跑的时候坐标还在动,"共线不共线"当时判不了,`label_at` 在那个阶段没有定义。
+pub fn label_at(mol: &MolBuilder, atom: u32, style: &Style, coords: &[Point2]) -> Option<Label> {
+    let side = h_side(mol, atom, coords);
+    label_for(mol, atom, style, side).or_else(|| {
+        is_collinear(mol, atom, coords).then(|| crate::label::label_forced(mol, atom, style, side))
+    })
 }
 
 /// 氢挂哪一侧:挂在**键伸出去的反方向**,免得氢和键叠在一起。
@@ -503,7 +543,10 @@ pub fn is_collinear(mol: &MolBuilder, a: u32, coords: &[Point2]) -> bool {
 /// 一眼就看得出来。
 ///
 /// 标签是 `text-anchor="middle"` 摆的,盒以原子为心,所以这里按居中的轴对齐盒算。
-fn box_reach(from: Point2, d: Point2, half_w: f64, half_h: f64) -> f64 {
+///
+/// `from` 是**相对盒心**的位置,要在盒内 —— 盒外的点算出来是到对面那条边的
+/// 距离,不是它想要的东西。判据要按同一套口径量净空,所以这个函数是公开的。
+pub fn box_reach(from: Point2, d: Point2, half_w: f64, half_h: f64) -> f64 {
     let t = |o: f64, dd: f64, h: f64| {
         if dd.abs() < 1e-12 {
             f64::INFINITY
@@ -514,6 +557,109 @@ fn box_reach(from: Point2, d: Point2, half_w: f64, half_h: f64) -> f64 {
     t(from.x, d.x, half_w).min(t(from.y, d.y, half_h)).max(0.0)
 }
 
+/// 两端要让的净空加起来超过线段的这个比例,就只能按比例压缩。
+///
+/// [`trim`]、[`escape_boxes`] 与判据的"塞不下"都取这一个数 —— 三处各写一个
+/// 字面量的话,改其中一处就会让判据与实现悄悄错位。
+const SQUEEZE: f64 = 0.9;
+
+/// 这一端要让出多少净空:从原子沿 `dir` 走出标签盒,再加一个 margin。
+///
+/// # 判据必须调这个函数
+///
+/// 净空的口径有两处容易抄错:盒是**偏心**的(整串挪了 `dx`,好让元素符号落在
+/// 原子上,见 [`Label::dx`](crate::label::Label::dx)),而且**两端要各算各的**
+/// —— 盒不再左右对称,一个值两边通用不成立。
+///
+/// 审计里 `squeezed_bonds` 就抄过一份**居中盒**的版本:实现改成偏心盒之后判据
+/// 没跟上,「有标签在键上塞不下」多报了 547 例(1818 → 1271)。同一个坑更早
+/// 还塌过一次(`canvas_pts` 抄 `bounds`,`环内双键` 炸出 1403 处假阳)。
+pub fn label_clearance(l: Option<&Label>, dir: Point2, style: &Style) -> f64 {
+    l.map_or(0.0, |l| {
+        box_reach(Point2::new(-l.dx, 0.0), dir, l.half_w, l.half_h) + style.margin()
+    })
+}
+
+/// 这根键塞不塞得下两端的标签。
+///
+/// 塞不下时裁键只能按比例压缩,**端点会落进盒里** —— 那不是切算错了,是
+/// ACS 规范下标签本来就占 0.69 个键长,`O⁻—N⁺` 两端要 1.375 个键长的净空,
+/// 一个键长装不下。判据据此跳过这类键,口径要与实现完全一致,所以公开。
+pub fn is_squeezed(
+    pa: Point2,
+    pb: Point2,
+    la: Option<&Label>,
+    lb: Option<&Label>,
+    style: &Style,
+) -> bool {
+    let len = pa.dist(pb);
+    if len < 1e-9 {
+        return false;
+    }
+    let d = (pb - pa) * (1.0 / len);
+    label_clearance(la, d, style) + label_clearance(lb, d * -1.0, style) >= len * SQUEEZE
+}
+
+/// 两端要让的加起来比线段还长时按比例压缩 —— 否则线段会反向,画出一条穿过
+/// 标签的短线。剩下的 `1 − SQUEEZE` 那一小截好歹还看得出这里有根键。
+fn squeeze(ca: f64, cb: f64, len: f64) -> (f64, f64) {
+    if ca + cb >= len * SQUEEZE {
+        let k = len * SQUEEZE / (ca + cb).max(1e-9);
+        (ca * k, cb * k)
+    } else {
+        (ca, cb)
+    }
+}
+
+/// 端点落进标签盒里的话,沿线段自己的方向推出去。盒外的端点原样返回。
+///
+/// # 为什么 [`trim`] 管不到这些线
+///
+/// `trim` 切的是**键轴**那条线:从原子中心出发,沿键的方向量到盒边。双键的
+/// 第二条线、叁键的两条外侧线都是把它**横向平移**出来的,而横向平移会把端点
+/// 带回盒里 —— 盒宽的标签尤其明显:主线从上方出盒时只让开了半高,再横着挪
+/// 0.18 个键长,仍然在半宽之内。实测 `HC`(半宽 7.22pt、半高 3.59pt)上
+/// 14 处如此。
+///
+/// 盒是**偏心**的(整串挪了 `dx`),所以按端点相对盒心的位置算,不能按原子算。
+///
+/// # 盒内/盒外这一刀没有容差,是想清楚了的
+///
+/// 两个分支差整整一个 margin(ACS 1.6pt、CD 2.0pt),看着像该加个容差。但
+/// **容差只会把这个跳变挪个地方,消不掉它** —— "推到盒外"与"不动"之间本来
+/// 就差一个 margin。本文件别处的容差(`h_side` 的 `TIE`、`offset_dir` 的
+/// `tie`、`mitre_end` 的量化排序)守的是**离散选择**:符号一翻,`OH` 就变成
+/// `HO`、第二条线就画到环外,而那个符号取决于求和次序。这里两边给出的都是
+/// 合法几何,同一份坐标永远走同一支,写法无关不受影响。
+///
+/// 实测全量语料上所有平移端点到这条分界的最近距离是 **0.068pt**(ChemDraw 下
+/// 芳香 `N⁺` 六元环),比浮点噪声大十几个数量级 —— 目前不在刀锋上。
+fn escape_boxes(
+    from: Point2,
+    to: Point2,
+    ba: Option<(Point2, f64, f64)>,
+    bb: Option<(Point2, f64, f64)>,
+    margin: f64,
+) -> (Point2, Point2) {
+    let len = from.dist(to);
+    if len < 1e-9 {
+        return (from, to);
+    }
+    let d = (to - from) * (1.0 / len);
+    let out = |p: Point2, dir: Point2, bx: Option<(Point2, f64, f64)>| -> f64 {
+        let Some((c, hw, hh)) = bx else { return 0.0 };
+        let r = p - c;
+        // **盒外的点不能交给 `box_reach`** —— 它算的是到对面那条边的距离
+        if r.x.abs() >= hw || r.y.abs() >= hh {
+            return 0.0;
+        }
+        box_reach(r, dir, hw, hh) + margin
+    };
+    let (ca, cb) = (out(from, d, ba), out(to, d * -1.0, bb));
+    let (ca, cb) = squeeze(ca, cb, len);
+    (from + d * ca, to - d * cb)
+}
+
 fn trim(
     pa: Point2,
     pb: Point2,
@@ -522,23 +668,11 @@ fn trim(
     style: &Style,
 ) -> (Point2, Point2) {
     let d = (pb - pa).normalized();
-    // **两端要各算各的。** 盒心不在原子上(整串挪开了,好让元素符号落在原子
-    // 位置上,见 [`Label::dx`](crate::label::Label::dx)),所以盒不再左右对称,
-    // 一个值两边通用是不成立的 —— 起点朝 `d` 出盒,终点朝 `−d` 出盒。
-    let cut = |l: &Option<Label>, dir: Point2| {
-        l.as_ref().map_or(0.0, |l| {
-            box_reach(Point2::new(-l.dx, 0.0), dir, l.half_w, l.half_h) + style.margin()
-        })
-    };
-    let (ca, cb) = (cut(la, d), cut(lb, d * -1.0));
-    let len = pa.dist(pb);
-    // 两端加起来比整根键还长时按比例压缩 —— 否则线段会反向,画出一条穿过标签的短线
-    let (ca, cb) = if ca + cb >= len * 0.9 {
-        let k = len * 0.9 / (ca + cb).max(1e-9);
-        (ca * k, cb * k)
-    } else {
-        (ca, cb)
-    };
+    let (ca, cb) = (
+        label_clearance(la.as_ref(), d, style),
+        label_clearance(lb.as_ref(), d * -1.0, style),
+    );
+    let (ca, cb) = squeeze(ca, cb, pa.dist(pb));
     (pa + d * ca, pb - d * cb)
 }
 
@@ -842,6 +976,15 @@ mod tests {
             "CC(=O)Nc1ccc(O)cc1",
             "[O-][N+](=O)c1ccccc1S(=O)(=O)O",
             "NCCO",
+            // 咖啡因:环内双键的端点带标签。**它在这条上并不吃劲** —— 内侧线
+            // 压到 `N` 上时只差 0.14pt 就够不着这条判据留的线宽余量,那份
+            // "越过主线伸过去"的难看由
+            // [`a_double_bond_inner_line_does_not_reach_past_the_main_line_into_a_label`]
+            // 那条量。留在这里是为了这一类形状也走一遍盒的规则。
+            "CN1C=NC2=C1C(=O)N(C)C(=O)N2C",
+            // 盒**宽**的标签:主线从上方出盒只让开半高,内侧线再横着挪 0.18 个
+            // 键长仍在半宽之内 —— 不斜切也不够,还得沿线把端点推出盒去
+            "c1cc2ccc[n+]3c2c(c1)SCC3",
         ] {
             for style in &Style::ALL {
                 let m = prep(smi);
@@ -850,28 +993,20 @@ mod tests {
                 let bnd = bounds(&d.coords, &m, style);
                 let scale = style.bond_length_pt;
                 let labels: Vec<Option<Label>> = (0..u32::try_from(m.num_atoms()).unwrap())
-                    .map(|a| label_for(&m, a, style, h_side(&m, a, &d.coords)))
+                    .map(|a| label_at(&m, a, style, &d.coords))
                     .collect();
-                // 挨着"塞不下"的键的原子整个跳过 —— 见上面那段
+                // 挨着"塞不下"的键的原子整个跳过 —— 见上面那段。
+                // **口径要问实现要,不许在这儿再写一遍**,见 [`is_squeezed`]。
                 let squeezed: Vec<bool> = {
                     let mut v = vec![false; m.num_atoms()];
                     for b in m.bonds() {
-                        let (pa, pb) = (d.coords[b.begin as usize], d.coords[b.end as usize]);
-                        let len = pa.dist(pb);
-                        if len < 1e-9 {
-                            continue;
-                        }
-                        let dir = (pb - pa) * (1.0 / len);
-                        let need = |l: &Option<Label>, dd: Point2| {
-                            l.as_ref().map_or(0.0, |l| {
-                                box_reach(Point2::new(-l.dx, 0.0), dd, l.half_w, l.half_h)
-                                    + style.margin()
-                            })
-                        };
-                        if need(&labels[b.begin as usize], dir)
-                            + need(&labels[b.end as usize], dir * -1.0)
-                            >= len * 0.9
-                        {
+                        if is_squeezed(
+                            d.coords[b.begin as usize],
+                            d.coords[b.end as usize],
+                            labels[b.begin as usize].as_ref(),
+                            labels[b.end as usize].as_ref(),
+                            style,
+                        ) {
                             v[b.begin as usize] = true;
                             v[b.end as usize] = true;
                         }
@@ -1181,6 +1316,86 @@ mod tests {
                 checked += 1;
             }
             assert_eq!(checked, 3, "苯环该有三根凯库勒双键");
+        }
+    }
+
+    #[test]
+    fn a_double_bond_inner_line_does_not_reach_past_the_main_line_into_a_label() {
+        // 咖啡因咪唑环上的 C=N。**先前内侧线比主线还伸得靠前**:主线为了让开
+        // `N` 缩到离原子中心 5.56pt,内侧线的端点却在 3.20pt —— 那是
+        // [`mitre_end`] 从**原子中心**量的角平分线交点,它压根不知道主线已经
+        // 缩过了。画出来是一个指着 N 的楔子,而 `N` 的半高只有 3.59pt,内侧线
+        // 直接压在字上。
+        //
+        // 契约:端原子有标签时,内侧线**沿键轴**的落点不许越过主线的落点。
+        // 只量沿轴的投影 —— 横向那 0.18 个键长是双键本来就该有的间距。
+        //
+        // 咖啡因不是随便挑的:此前那条 `no_drawn_line_runs_across_an_atom_label`
+        // 列的五个分子里,没有一个的**环内**双键端点带标签,于是这一整类漏了
+        // 出去。全量语料上这条错了 3044 处(17.2%)。
+        for style in &Style::ALL {
+            let m = prep("CN1C=NC2=C1C(=O)N(C)C(=O)N2C");
+            let d = generate(&m, style);
+            let s = scene(&m, &d, style);
+            let bnd = bounds(&d.coords, &m, style);
+            let scale = style.bond_length_pt;
+            let pts: Vec<Point2> = d.coords.iter().map(|p| to_canvas(*p, bnd, scale)).collect();
+
+            let mut checked = 0usize;
+            for (bi, b) in m.bonds().iter().enumerate() {
+                if drawn_orders(&m)[bi] != BondOrder::Double {
+                    continue;
+                }
+                let (pa, pb) = (pts[b.begin as usize], pts[b.end as usize]);
+                let len = pa.dist(pb);
+                let axis = (pb - pa) * (1.0 / len);
+                let normal = Point2::new(-axis.y, axis.x);
+                let ls = lines_of_bond(&s, pa, pb);
+                assert_eq!(ls.len(), 2, "[{}] 双键该画两条线", style.name);
+                // 主线贴着键轴,内侧线离轴一个间距。都离轴的是对称画法
+                // (端基双键),那时没有"主线"可比,跳过。
+                let off = |(u, v): &(Point2, Point2)| {
+                    (((*u - pa).dot(normal)).abs() + ((*v - pa).dot(normal)).abs()) / 2.0
+                };
+                let (main, inner) = if off(&ls[0]) < off(&ls[1]) {
+                    (ls[0], ls[1])
+                } else {
+                    (ls[1], ls[0])
+                };
+                if off(&main) > 0.05 * len {
+                    continue;
+                }
+                for (a, t_of) in [
+                    (b.begin, 1.0_f64), // 在 pa 这头,投影越小越靠外
+                    (b.end, -1.0),
+                ] {
+                    if label_at(&m, a, style, &d.coords).is_none() {
+                        continue;
+                    }
+                    // 把两条线各自离这个原子最近的那个端点投影到键轴上
+                    let near = |(u, v): &(Point2, Point2)| {
+                        let (tu, tv) = ((*u - pa).dot(axis), (*v - pa).dot(axis));
+                        if t_of > 0.0 {
+                            tu.min(tv)
+                        } else {
+                            tu.max(tv)
+                        }
+                    };
+                    let (tm, ti) = (near(&main), near(&inner));
+                    assert!(
+                        (ti - tm) * t_of >= -0.01,
+                        "[{}] 咖啡因键 {bi} 的内侧线越过主线伸向带标签的原子 {a}:\
+                         主线停在 {tm:.2},内侧线停在 {ti:.2}(键长 {len:.2})",
+                        style.name
+                    );
+                    checked += 1;
+                }
+            }
+            assert!(
+                checked > 0,
+                "[{}] 咖啡因一处都没查到 —— 判据空过了",
+                style.name
+            );
         }
     }
 
@@ -1634,11 +1849,18 @@ mod tests {
             "CC#N",
             "CN1C=NC2=C1C(=O)N(C)C(=O)N2C",
             "O=C=O",
+            // 补出来的符号也要有地方放:这个分子有个共线的骨架碳,`scene` 给它
+            // 画了 `CH`,而 [`bounds`] 先前只问 `label_for`,当它不存在 ——
+            // 半宽 7.22pt 的字直接戳出画布右边。全量语料上 4 处。
+            "c1ccc2c(c1)[C@@H]3CC[C@H]2[n+]4c3cccc4",
         ] {
             for style in &Style::ALL {
                 let m = prep(smi);
-                let s = scene(&m, &generate(&m, style), style);
+                let d = generate(&m, style);
+                let s = scene(&m, &d, style);
                 for it in &s.items {
+                    // 文字走下面那段 —— **字宽不是 `size/2`**,`CH` 的半宽 7.22pt
+                    // 比字号的一半还大 2.22pt,按 `size/2` 量会把出界量少算
                     let pts: Vec<(Point2, f64)> = match it {
                         Primitive::Line { from, to, width } => {
                             vec![(*from, *width / 2.0), (*to, *width / 2.0)]
@@ -1647,7 +1869,7 @@ mod tests {
                         | Primitive::Hash { from, to, wide, .. } => {
                             vec![(*from, *wide / 2.0), (*to, *wide / 2.0)]
                         }
-                        Primitive::Text { at, size, .. } => vec![(*at, *size / 2.0)],
+                        Primitive::Text { .. } => continue,
                     };
                     for (p, r) in pts {
                         assert!(
@@ -1665,6 +1887,30 @@ mod tests {
                             s.height
                         );
                     }
+                }
+
+                let bnd = bounds(&d.coords, &m, style);
+                let scale = style.bond_length_pt;
+                for a in 0..u32::try_from(m.num_atoms()).unwrap() {
+                    let Some(l) = label_at(&m, a, style, &d.coords) else {
+                        continue;
+                    };
+                    let c = to_canvas(d.coords[a as usize], bnd, scale)
+                        + Point2::new(l.dx * scale, 0.0);
+                    let (hw, hh) = (l.half_w * scale, l.half_h * scale);
+                    assert!(
+                        c.x - hw >= -0.01
+                            && c.x + hw <= s.width + 0.01
+                            && c.y - hh >= -0.01
+                            && c.y + hh <= s.height + 0.01,
+                        "[{}] {smi}:标签 {} 在 ({:.2},{:.2})±({hw:.2},{hh:.2}),画布 {:.2}×{:.2}",
+                        style.name,
+                        l.plain(),
+                        c.x,
+                        c.y,
+                        s.width,
+                        s.height
+                    );
                 }
             }
         }
