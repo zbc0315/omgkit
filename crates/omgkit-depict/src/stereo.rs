@@ -217,6 +217,13 @@ fn candidate_bonds(mol: &MolBuilder, a: u32, used: &[bool], ranks: &[u32]) -> Ve
 ///
 /// 这个函数**只看几何**,不看 `chiral_tag`。它与 [`assign_wedges`] 合起来是
 /// 一次往返;单独看,它是"图上画出来的构型是什么"的答案。
+/// 三个画出来的邻居张不出这么大的体积,就判"这张图定不出手性"。
+///
+/// 单位是**键长的立方**。数值取自 RDKit `Chirality.cpp` 的 `ZERO_VOLUME_TOL`,
+/// 照抄是因为**我们导出的 molblock 就是交给它读的** —— 两边用同一把尺,
+/// "别人读得回来"才谈得上。
+const ZERO_VOLUME_TOL: f64 = 0.1;
+
 #[must_use]
 pub fn read_chirality(
     mol: &MolBuilder,
@@ -280,18 +287,75 @@ pub fn read_chirality(
         }
     }
 
-    // 隐式氢没有画出来:它在**楔形的反面**。所有楔形都没有的话,这个中心的
+    // 隐式氢没有画出来,得把它摆到该在的地方。所有楔形都没有的话,这个中心的
     // 构型在图上根本读不出来 —— 如实返回 None,不猜。
     //
     // 这条只管有隐式氢的情形。四个邻居都画出来的中心不需要摆氢,楔形正负抵消
     // 也照样读得出来 —— 一并早退的话,那种中心会被误判成"读不出",而它的
     // 几何其实一点不含糊。
+    //
+    // # 面内那一份不能一律取零
+    //
+    // 先前摆的是 `[0, 0, -zsum]` —— 认为氢**投影到中心上**,只在楔形的反面。
+    // 那只在**三个邻居把中心围住**时成立。
+    //
+    // 四面体的四个键方向之和为零,所以**它们的 2D 投影之和也为零**:三个投影
+    // 若全落在中心的同一侧(最大空隙 > 180°),第四个必然落在**对面的空扇区**
+    // 里,不可能落在中心上。桥环退化布局里这种中心很常见(全量 420 个三邻居
+    // 中心里 45 个如此,张角只有 120–137°)。
+    //
+    // 摆错的后果是**读出对映体**,而线条本身毫无毛病。外部判官
+    // (`harness/check_wedge_readback.py`,拿 RDKit 从导出的 molblock 反读)量到
+    // **21 个中心画成了对映体而且没进 `unwedged`** —— 全部出在这里。
+    //
+    // 改成按同一条恒等式摆:面内取三个邻居**单位方向之和的负值**。三个邻居
+    // 均匀分布时这个和恰为零,退化成先前的做法;挤在一侧时它指进空扇区。
+    // 一个公式管两种情形,中间是连续的。
     if let Some(k) = h_slot {
         let zsum: f64 = pts.iter().map(|p| p[2]).sum();
         if zsum.abs() < 1e-9 {
             return None;
         }
-        pts[k] = [0.0, 0.0, -zsum.signum()];
+        // # 先问一句:这三根键**定得出**手性吗
+        //
+        // 三个画出来的邻居里若有两根几乎**共线**,它们张不出面积,楔形再怎么
+        // 画也定不出手性 —— 与氢摆在哪无关。判据就是三者的三重积
+        // `v1·(v2×v3)`(键长 1 为单位),它等于"底面的 2D 叉积 × 楔形那一维"。
+        //
+        // 这条口径与 RDKit 的 `Chirality.cpp` 一致:那里同样不摆氢,直接算三个
+        // 邻居的三重积,`|vol| ≤ ZERO_VOLUME_TOL = 0.1` 就判 `CHI_UNSPECIFIED`。
+        // 常数照抄,因为**我们的 molblock 就是交给它读的**,两边用同一把尺才谈
+        // 得上"别人读得回来"。
+        //
+        // 实测全量语料 404 个三邻居中心里只有 1 个落在这条线下(|vol| = 0.0905,
+        // 那两根键相差 184.4°),下一个是 1.24 —— 中间空 13 倍。
+        let v: Vec<[f64; 3]> = pts
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != k)
+            .map(|(_, p)| *p)
+            .collect();
+        let cross = [
+            v[1][1] * v[2][2] - v[1][2] * v[2][1],
+            v[1][2] * v[2][0] - v[1][0] * v[2][2],
+            v[1][0] * v[2][1] - v[1][1] * v[2][0],
+        ];
+        let vol = v[0][0] * cross[0] + v[0][1] * cross[1] + v[0][2] * cross[2];
+        if vol.abs() <= ZERO_VOLUME_TOL {
+            return None;
+        }
+
+        let mut sx = 0.0_f64;
+        let mut sy = 0.0_f64;
+        for p in &v {
+            let n = p[0].hypot(p[1]);
+            if n < 1e-9 {
+                return None; // 邻居与中心重合,方向无从谈起
+            }
+            sx += p[0] / n;
+            sy += p[1] / n;
+        }
+        pts[k] = [-sx, -sy, -zsum.signum()];
     }
 
     // 有向体积:det[p1-p0, p2-p0, p3-p0]。符号的含义由
@@ -594,6 +658,111 @@ mod tests {
             - d(1, 1) * (d(2, 0) * d(3, 2) - d(2, 2) * d(3, 0))
             + d(1, 2) * (d(2, 0) * d(3, 1) - d(2, 1) * d(3, 0));
         assert!(det < 0.0, "参照构型的有向体积应当为负,实得 {det}");
+    }
+
+    /// 手搭一个中心:三个邻居按给定角度摆,第一根键带一个实楔形。
+    fn cramped(angles_deg: [f64; 3]) -> (MolBuilder, Vec<Point2>, Vec<Wedge>) {
+        let mut m = MolBuilder::new();
+        let c = m.add_atom(6);
+        let mut coords = vec![Point2::ORIGIN];
+        let mut wedges = Vec::new();
+        for (i, a) in angles_deg.iter().enumerate() {
+            // 三个邻居各不相同,免得被 `genuine_tetrahedral` 当成假中心
+            let n = m.add_atom(if i == 0 {
+                8
+            } else if i == 1 {
+                7
+            } else {
+                9
+            });
+            m.add_bond(c, n, BondOrder::Single).unwrap();
+            let r = a.to_radians();
+            coords.push(Point2::new(r.cos(), r.sin()));
+            wedges.push(if i == 0 {
+                Wedge::Up { narrow: c }
+            } else {
+                Wedge::None
+            });
+        }
+        if let Some(at) = m.atom_mut(c) {
+            at.num_implicit_hs = 1;
+            at.chiral_tag = ChiralTag::Cw;
+        }
+        (m, coords, wedges)
+    }
+
+    #[test]
+    fn a_cramped_stereocentre_is_not_read_as_if_the_h_sat_on_the_centre() {
+        // 三个邻居全挤在中心的一侧时,**隐式氢不可能投影到中心上** —— 四面体
+        // 的四个键方向之和为零,所以它们的 2D 投影之和也为零,三个都在半平面
+        // 里,第四个必然在对面的空扇区。
+        //
+        // 判据的形式:同一个几何,把氢摆在中心 vs 摆进空扇区,**读出来必须不同**。
+        // 不同才说明这个位置是**吃劲**的 —— 先前摆在中心,全量语料上 21 个中心
+        // 因此画成了对映体(外部判官 `harness/check_wedge_readback.py` 量的)。
+        //
+        // **哪一个才对不由这条判据说了算**,它只钉住"位置吃劲"。对错由外部判官
+        // 定:改成摆进空扇区之后,那 21 处不一致全部消失(459 → 480 一致,
+        // 0 处不一致)。
+        // **角度是搜出来的,不是随手写的。** 头一版写了 `[0, 60, 120]`(空隙
+        // 240°,确实挤在一侧),两个模型读出来**一样** —— 那时判据是空过的。
+        // 穷举 10° 栅格上全部"挤在一侧且三重积够大"的组合,3484 组里能区分的
+        // 才有效;这里取空隙 240° 的那一组,两边 det 是 −0.366 / +2.000。
+        let angles = [0.0, 30.0, 240.0];
+        let (m, coords, wedges) = cramped(angles);
+        let got = read_chirality(&m, &coords, &wedges, 0).expect("这个几何读得出来");
+
+        // 把氢摆回中心,手算同一个行列式
+        let z = 1.0; // 只有第一根键带楔形,窄端在中心
+        let p: Vec<[f64; 3]> = (1..4)
+            .map(|i| {
+                let q = coords[i];
+                [q.x, q.y, if i == 1 { z } else { 0.0 }]
+            })
+            .collect();
+        // 参照序:氢占槽位 1
+        let old = [p[0], [0.0, 0.0, -z], p[1], p[2]];
+        let d = |i: usize, j: usize| old[i][j] - old[0][j];
+        let det = d(1, 0) * (d(2, 1) * d(3, 2) - d(2, 2) * d(3, 1))
+            - d(1, 1) * (d(2, 0) * d(3, 2) - d(2, 2) * d(3, 0))
+            + d(1, 2) * (d(2, 0) * d(3, 1) - d(2, 1) * d(3, 0));
+        let old_tag = if det < 0.0 {
+            ChiralTag::Ccw
+        } else {
+            ChiralTag::Cw
+        };
+        assert_ne!(
+            got, old_tag,
+            "把氢摆在中心与摆进空扇区读出了同一个构型 —— 这个几何没有区分力,\
+             判据是空过的,换一组角度"
+        );
+    }
+
+    #[test]
+    fn two_nearly_collinear_bonds_cannot_pin_a_configuration() {
+        // 三根键里有两根几乎**共线**时,它们张不出面积,楔形再怎么画也定不出
+        // 手性 —— 与氢摆在哪无关。这时必须**如实返回 `None`**,不许猜。
+        //
+        // 实测踩到过:一个笼状分子的中心,两根键相差 184.4°,三重积只有
+        // 0.0905。先前照读不误,而外部实现(RDKit,同一个口径、同一个常数
+        // `ZERO_VOLUME_TOL = 0.1`)读出来是"未指定" —— 我们说画出来了,别人
+        // 读不到,那就是在骗人。
+        //
+        // 拒掉之后 `assign_wedges` 会接着试下一根候选键,实测那个中心因此**换了
+        // 一根键**,外部实现读出了正确的构型 —— 不是被消音。
+        let (m, coords, wedges) = cramped([90.0, 0.1, 180.0]); // 后两根差 179.9°
+        assert_eq!(
+            read_chirality(&m, &coords, &wedges, 0),
+            None,
+            "两根键几乎共线,这张图定不出手性,该返回 None"
+        );
+
+        // 同样的三根键张开一点就读得出来 —— 证明上面那条不是因为别的原因返回 None
+        let (m2, c2, w2) = cramped([90.0, 20.0, 180.0]);
+        assert!(
+            read_chirality(&m2, &c2, &w2, 0).is_some(),
+            "张开之后应当读得出来"
+        );
     }
 
     #[test]
