@@ -276,6 +276,22 @@ fn candidate_bonds(
 ///
 /// 这个函数**只看几何**,不看 `chiral_tag`。它与 [`assign_wedges`] 合起来是
 /// 一次往返;单独看,它是"图上画出来的构型是什么"的答案。
+/// 这个原子的第四个配体是不是一对**孤对电子**。
+///
+/// 三配位的 S、Se、P、As 上那对孤对与隐式氢是同一件事:看不见,但占一个配体
+/// 位,构型因此确定。亚砜 `R–S(=O)–R′`、亚膦酸酯都是这样。
+///
+/// **氮不算。** 三配位氮的孤对翻转极快(氨的翻转垒只有 24 kJ/mol),常温下
+/// 两个构型互变,画出楔形是在断言一个不存在的构型。少数被环卡住的(氮杂环丙烷、
+/// Tröger 碱)确实稳定,但那要看环张力,不是看元素 —— 这里宁可**漏报**也不
+/// 乱画,漏了如实进 `unwedged`。
+///
+/// 带正电的不算:季铵、锍盐上没有孤对,四个配体全在,走 `(4, 0)` 那一支。
+fn has_lone_pair(mol: &MolBuilder, a: u32) -> bool {
+    let at = mol.atoms()[a as usize];
+    at.formal_charge <= 0 && matches!(at.atomic_num, 15 | 16 | 33 | 34 | 52)
+}
+
 /// 三个画出来的邻居张不出这么大的体积,就判"这张图定不出手性"。
 ///
 /// 单位是**键长的立方**。数值取自 RDKit `Chirality.cpp` 的 `ZERO_VOLUME_TOL`,
@@ -301,7 +317,16 @@ pub fn read_chirality(
                 refs.push(Ligand::Atom(*n, *bi));
             }
         }
-        (3, 1) => {
+        // 三根键 + 一个**看不见的第四配体**。两种情形是同一件事:
+        //
+        // - `(3, 1)` 隐式氢:碳上的常例;
+        // - `(3, 0)` **孤对电子**:亚砜的 S、亚砜亚胺、膦氧化物的 P …… 三配位
+        //   加一对孤对,构型照样确定,画法也一样 —— 楔形打在三根键之一上,
+        //   孤对在它的反面。
+        //
+        // 先前 `(3, 0)` 直接返回 `None`,于是这些中心一律进 `unwedged`:全量
+        // 语料 18 个画不出构型的中心里,**14 个是这一档**。
+        (3, 1) | (3, 0) if hs == 1 || has_lone_pair(mol, a) => {
             refs.push(Ligand::Atom(nbrs[0].0, nbrs[0].1));
             refs.push(Ligand::ImplicitH);
             refs.push(Ligand::Atom(nbrs[1].0, nbrs[1].1));
@@ -821,6 +846,75 @@ mod tests {
         assert!(
             read_chirality(&m2, &c2, &w2, 0).is_some(),
             "张开之后应当读得出来"
+        );
+    }
+
+    #[test]
+    fn a_lone_pair_counts_as_the_fourth_ligand() {
+        // 亚砜的硫是三配位 + 一对**孤对电子**,构型照样确定,画法也和碳上的
+        // 隐式氢一样 —— 楔形打在三根键之一,孤对在它的反面。
+        //
+        // 先前 `read_chirality` 只认 `(4 邻居, 0 氢)` 与 `(3, 1)`,`(3, 0)` 一律
+        // 返回 `None`,于是这些中心全进 `unwedged`:全量语料 18 个画不出构型的
+        // 中心里 **14 个是这一档**,补上之后只剩 4 个。
+        //
+        // **孤对占哪个槽位由外部判官定,不由这条判据定。** 实测:挪到槽位 3 是
+        // 偶置换,读出来一模一样(所以那个变异是空的);挪到槽位 0 是奇置换,
+        // 14 个中心**全部翻成对映体**,判官当场红。
+        for smi in ["C[S@@](=O)CC", "C[S@](=O)CC"] {
+            let m = prep(smi);
+            let ranks = omgkit_io::canon::canonical_ranks(&m);
+            let d = generate(&m, &Style::ACS_1996);
+            let w = assign_wedges(&m, &d.coords, &ranks);
+            assert!(
+                w.unwedged.is_empty(),
+                "{smi}:亚砜的硫没画出构型 {:?}",
+                w.unwedged
+            );
+        }
+
+        // **区分力**:一个分子和它的对映体必须得到相反的楔形。反读函数若与
+        // 几何无关,两者会拿到同一个 —— 那时上面那条照样绿。
+        let wedge_of = |smi: &str| {
+            let m = prep(smi);
+            let ranks = omgkit_io::canon::canonical_ranks(&m);
+            let d = generate(&m, &Style::ACS_1996);
+            let w = assign_wedges(&m, &d.coords, &ranks);
+            w.bonds
+                .iter()
+                .find_map(|x| match x {
+                    Wedge::Up { .. } => Some(true),
+                    Wedge::Down { .. } => Some(false),
+                    Wedge::None => None,
+                })
+                .expect("该有一个楔形")
+        };
+        assert_ne!(
+            wedge_of("C[S@@](=O)CC"),
+            wedge_of("C[S@](=O)CC"),
+            "亚砜的一对对映体拿到了同一个楔形 —— 反读没有区分力"
+        );
+    }
+
+    #[test]
+    fn a_three_coordinate_nitrogen_is_not_given_a_wedge() {
+        // 三配位氮的孤对**翻转极快**(氨的翻转垒只有 24 kJ/mol),常温下两个
+        // 构型互变 —— 画出楔形是在断言一个不存在的构型。
+        //
+        // 少数被环卡住的(氮杂环丙烷、Tröger 碱)确实稳定,但那要看环张力,
+        // 不是看元素。这里宁可**漏报**也不乱画:漏的如实进 `unwedged`,下游
+        // 拿到的是"未指定",不会当真。
+        //
+        // **三个取代基必须各不相同。** 头一版写的 `C[N@](C)CC` 有两个甲基,
+        // `genuine_tetrahedral` 先把它当假中心滤掉了 —— 那时把氮加进孤对表
+        // 这条判据照样绿,是空过的。
+        let m = prep("C[N@](CC)CCC");
+        let ranks = omgkit_io::canon::canonical_ranks(&m);
+        let d = generate(&m, &Style::ACS_1996);
+        let w = assign_wedges(&m, &d.coords, &ranks);
+        assert!(
+            w.bonds.iter().all(|x| x.narrow().is_none()),
+            "给三配位氮画了楔形 —— 那个构型常温下不存在"
         );
     }
 
