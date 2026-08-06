@@ -46,6 +46,10 @@ pub mod orient;
 // 位图输出(PNG / JPEG)。模块自己的 `//!` 已经写清楚了 —— 这里再挂一层 `///`
 // 的话,两段文档会合并,而合并后整段的链接是按**外层**(crate 根)的作用域解析的,
 // 于是 `[`to_png`]` 这类同模块内的链接全部解析不了,`cargo doc` 直接报错。
+/// 桥环的几何摆法。**目前只给离线的模板生成器用**,运行时还走
+/// [`rings::relax`] —— 先拿它把表刷好、量清楚,再决定要不要接进在线路径。
+#[cfg(test)]
+mod arcs;
 #[cfg(feature = "raster")]
 pub mod raster;
 pub mod refine;
