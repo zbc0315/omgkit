@@ -12,8 +12,9 @@
 //!
 //! # 坐标从哪来 —— 不是手画的
 //!
-//! 由 `rings.rs` 里的 `regenerate_templates` 生成:对每个骨架跑两万次**带扰动**
-//! 的多起点松弛,按**现成的** `Quality`(自交数、最大键长偏差、量化坐标序列)
+//! 由 `rings.rs` 里的 `regenerate_templates` 生成:对每个骨架跑**带扰动**
+//! 的多起点松弛(基础两万次,仍自交的接着搜到四十万),按**现成的** `Quality`
+//! (自交数、最大键长偏差、量化坐标序列)
 //! 挑最好的那个。判优的口径与运行时完全一样,只是搜得久得多 ——
 //! **这张表就是一次昂贵搜索的缓存**,不是另一套标准。
 //!
@@ -156,6 +157,60 @@ mod tests {
         "CC1(C)[C@@H]2CC[C@@]1(C)C(=O)C2",                  // 樟脑
         "CN1[C@H]2CC[C@@H]1C[C@@H](C2)OC(=O)C(CO)c1ccccc1", // 阿托品
     ];
+
+    /// 表里的坐标自己有多少处自交。
+    ///
+    /// 生成器打出来的 `// 出现 N 次,自交 M` 只是**注释** —— 人改一行坐标它不会
+    /// 变红。而"自交非零的条目从 10 条降到 6 条"这个成果,先前就全挂在那串注释上。
+    /// 这条判据把坐标重新算一遍。
+    #[test]
+    fn the_stored_coordinates_do_not_cross_more_than_they_used_to() {
+        let mut total = 0usize;
+        let mut worst: Vec<(usize, &str)> = Vec::new();
+        for (skel, coords) in TABLE {
+            let mut m = omgkit_io::smiles::parse(skel).expect("表里的骨架该能解析");
+            omgkit_chem::pipeline::sanitize(&mut m).expect("表里的骨架该能 sanitize");
+            let ranks = omgkit_io::canon::canonical_ranks(&m);
+            assert_eq!(
+                ranks.len(),
+                coords.len(),
+                "{skel}:表里 {} 组坐标,骨架 {} 个原子",
+                coords.len(),
+                ranks.len()
+            );
+            // 坐标是按骨架自己的规范秩存的
+            let pos: Vec<Point2> = (0..m.num_atoms())
+                .map(|i| {
+                    let (x, y) = coords[ranks[i] as usize];
+                    Point2::new(x, y)
+                })
+                .collect();
+            let segs: Vec<(Point2, Point2)> = m
+                .bonds()
+                .iter()
+                .map(|b| (pos[b.begin as usize], pos[b.end as usize]))
+                .collect();
+            let mut cross = 0usize;
+            for (k, (u1, v1)) in segs.iter().enumerate() {
+                for (u2, v2) in &segs[k + 1..] {
+                    if crate::geom::segments_cross(*u1, *v1, *u2, *v2) {
+                        cross += 1;
+                    }
+                }
+            }
+            if cross > 0 {
+                worst.push((cross, skel));
+            }
+            total += cross;
+        }
+        worst.sort_unstable();
+        // 现值:6 条自交,总数 8(2+2+1+1+1+1)。**只许降不许升。**
+        assert!(
+            total <= 8,
+            "表里的自交总数涨到了 {total},还剩 {} 条自交:{worst:?}",
+            worst.len()
+        );
+    }
 
     #[test]
     fn the_table_is_actually_used() {

@@ -889,7 +889,27 @@ mod generator {
     use crate::geom::Point2;
 
     const TOP: usize = 50;
+    /// 每个骨架的基础搜索预算。
     const TRIES: usize = 20_000;
+    /// 基础预算跑完仍自交时,最多再搜到这个数,**一到 0 交叉就停**。
+    ///
+    /// # 这个数是量出来的
+    ///
+    /// 吗啡骨架先前定格在自交 1,当时的说法是"这是几何下限"—— **那是错的**。
+    /// 它的骨架图是**平面图**(18 原子 22 键,`networkx.check_planarity` 为真),
+    /// 按 Fáry 定理必有无交叉的直线画法。加大预算实测:
+    ///
+    /// | 预算 | 最好的自交数 | 键长偏差 |
+    /// |---:|---:|---:|
+    /// | 2 万(原) | 1 | 0.230 |
+    /// | 22.4 万 | **0** | 0.620 |
+    /// | 50 万 | 0 | 0.443 |
+    ///
+    /// 0 交叉的解键长更不齐,但 [`Quality`] 的次序本来就是交叉优先 ——
+    /// 交叉会让人读错,键长不齐只是难看。
+    ///
+    /// **只有还在自交的骨架才付这笔钱**,而且一到 0 就停,所以总耗时涨得有限。
+    const ESCALATE: usize = 400_000;
 
     fn splitmix(state: &mut u64) -> u64 {
         *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -897,6 +917,94 @@ mod generator {
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
+    }
+
+    /// 搜一条骨架,返回它在表里那一行。搜不出来(解析/sanitize 失败等)返回 `None`。
+    ///
+    /// 抽成函数是为了能并行 —— 各条骨架彼此独立,`std::thread::scope` 一 spawn
+    /// 就行,每条自己一条种子流,确定性不受影响。
+    fn one_skeleton(skel: &str, n: usize) -> Option<String> {
+        let mut m = omgkit_io::smiles::parse(skel).ok()?;
+        omgkit_chem::pipeline::sanitize(&mut m).ok()?;
+        let ranks = omgkit_io::canon::canonical_ranks(&m);
+        let atoms: Vec<u32> = (0..u32::try_from(m.num_atoms()).ok()?).collect();
+        let mut sorted = atoms.clone();
+        sorted.sort_by_key(|a| (ranks[*a as usize], *a));
+        let cnt = sorted.len();
+        let idx: BTreeMap<u32, usize> = sorted.iter().enumerate().map(|(i, a)| (*a, i)).collect();
+        let bonded: Vec<(usize, usize)> = m
+            .bonds()
+            .iter()
+            .filter_map(|b| Some((*idx.get(&b.begin)?, *idx.get(&b.end)?)))
+            .collect();
+
+        let rs = omgkit_chem::sssr::ring_set(&m);
+        let sys = group(&omgkit_chem::rings::fused_ring_systems(&m), &rs);
+        let s = sys.iter().max_by_key(|s| s.atoms.len())?;
+
+        // **不能调 `relax`** —— 它先查表,于是 `best` 的初值来自它正在生成的
+        // 那张表,生成器就不是语料的纯函数了。更要命的是升不升级由 `best` 定:
+        // 表里已经是 0 交叉的骨架,一进来就判"不用升级",**永远搜不到更好的解**。
+        // 实测就是这么栽的:morphine 的偏差卡在 0.620,而跑满能到 0.443。
+        //
+        // 所以这里把 `relax` 的多起点部分照抄一遍,**只是不查表**。
+        let mut best: Option<(Quality, BTreeMap<u32, Point2>)> = None;
+        for seed in 0..SEEDS {
+            let out = relax_from(&m, &sorted, seed, &s.rings, &ranks);
+            let q = quality(&m, &out, &ranks);
+            if best.as_ref().is_none_or(|(b, _)| q < *b) {
+                best = Some((q, out));
+            }
+        }
+        let mut best = best?;
+
+        let mut st = 0x51ED_270B_D5AB_C0DEu64 ^ (cnt as u64);
+        let r = BOND_LEN * cnt as f64 / std::f64::consts::TAU;
+        // 基础预算 `TRIES`;跑完还自交才接着搜到 `ESCALATE`。
+        //
+        // **升不升级在 `k == TRIES` 处一次性决定,决定了就跑满。** 先前写的是
+        // "一到 0 交叉就 break",而 [`Quality`] 是三档的 —— 自交归零之后第二档
+        // "键长偏差"就不再优化了,拿到的是**第一个** 0 交叉解而不是**最好的**
+        // 那个。实测差得很多:morphine 那条偏差 0.620,跑满是 0.443;34 原子
+        // 那条 0.384 → 0.293。全量语料的交叉/退化/冲突一处不动,纯赚。
+        for k in 0..ESCALATE.max(TRIES) {
+            if k == TRIES && best.0 .0 == 0 {
+                break;
+            }
+            let mut p = vec![Point2::ORIGIN; cnt];
+            for (i, q) in p.iter_mut().enumerate() {
+                let j = (splitmix(&mut st) % 1000) as f64 / 1000.0 - 0.5;
+                let t = std::f64::consts::TAU * (i as f64 + j * 3.0) / cnt as f64;
+                let rad = r * (1.0 + ((splitmix(&mut st) % 1000) as f64 / 1000.0 - 0.5) * 0.6);
+                *q = Point2::new(rad, 0.0).rotated(t);
+            }
+            let out = settle(p, cnt, &bonded, &sorted);
+            let q = quality(&m, &out, &ranks);
+            if q < best.0 {
+                best = (q, out);
+            }
+        }
+
+        // 按**骨架自己的规范秩**存坐标,查表时才对得上
+        let mut by_rank: Vec<(u32, Point2)> = best
+            .1
+            .iter()
+            .map(|(a, p)| (ranks[*a as usize], *p))
+            .collect();
+        by_rank.sort_by_key(|x| x.0);
+        let mut line = format!("    (\"{skel}\", &[");
+        for (_, p) in &by_rank {
+            line.push_str(&format!("({:.6}, {:.6}), ", p.x, p.y));
+        }
+        // **偏差也打出来。** 先前只打自交数,而"提前退出"丢的恰恰是偏差 ——
+        // 不打出来,那个错就不会出现在 diff 里。
+        #[allow(clippy::cast_precision_loss)]
+        let dev = best.0 .1 as f64 / 1e6;
+        line.push_str(&format!(
+            "]),   // 出现 {n} 次,自交 {},偏差 {dev:.3}",
+            best.0 .0
+        ));
+        Some(line)
     }
 
     #[test]
@@ -968,65 +1076,23 @@ mod generator {
         keep.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
         // 二、对每个骨架跑带扰动的多起点,按现成的 Quality 挑最好的
+        //
+        // **各条骨架彼此完全独立,所以并行跑。** 每条自己一条 splitmix 种子流、
+        // 结果按下标收回再统一打印 —— 确定性一点不掉。去掉提前退出之后串行要
+        // 15 分钟,并行之后由最长的那条决定。
+        let lines: Vec<Option<String>> = std::thread::scope(|sc| {
+            let handles: Vec<_> = keep
+                .iter()
+                .map(|(skel, n)| sc.spawn(move || one_skeleton(skel, *n)))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
         println!("// 本表由 rings.rs 的 `regenerate_templates` 生成,勿手改。");
         println!("pub(crate) const TABLE: &[(&str, &[(f64, f64)])] = &[");
         let mut kept = 0usize;
-        for (skel, n) in &keep {
-            let Ok(mut m) = omgkit_io::smiles::parse(skel) else {
-                continue;
-            };
-            if omgkit_chem::pipeline::sanitize(&mut m).is_err() {
-                continue;
-            }
-            let ranks = omgkit_io::canon::canonical_ranks(&m);
-            let atoms: Vec<u32> = (0..u32::try_from(m.num_atoms()).unwrap()).collect();
-            let mut sorted = atoms.clone();
-            sorted.sort_by_key(|a| (ranks[*a as usize], *a));
-            let cnt = sorted.len();
-            let idx: BTreeMap<u32, usize> =
-                sorted.iter().enumerate().map(|(i, a)| (*a, i)).collect();
-            let bonded: Vec<(usize, usize)> = m
-                .bonds()
-                .iter()
-                .filter_map(|b| Some((*idx.get(&b.begin)?, *idx.get(&b.end)?)))
-                .collect();
-
-            let rs = omgkit_chem::sssr::ring_set(&m);
-            let sys = group(&omgkit_chem::rings::fused_ring_systems(&m), &rs);
-            let Some(s) = sys.iter().max_by_key(|s| s.atoms.len()) else {
-                continue;
-            };
-            let (base, _) = relax(&m, &s.atoms, &ranks, &s.rings);
-            let mut best = (quality(&m, &base, &ranks), base);
-
-            let mut st = 0x51ED_270B_D5AB_C0DEu64 ^ (cnt as u64);
-            let r = BOND_LEN * cnt as f64 / std::f64::consts::TAU;
-            for _ in 0..TRIES {
-                let mut p = vec![Point2::ORIGIN; cnt];
-                for (i, q) in p.iter_mut().enumerate() {
-                    let j = (splitmix(&mut st) % 1000) as f64 / 1000.0 - 0.5;
-                    let t = std::f64::consts::TAU * (i as f64 + j * 3.0) / cnt as f64;
-                    let rad = r * (1.0 + ((splitmix(&mut st) % 1000) as f64 / 1000.0 - 0.5) * 0.6);
-                    *q = Point2::new(rad, 0.0).rotated(t);
-                }
-                let out = settle(p, cnt, &bonded, &sorted);
-                let q = quality(&m, &out, &ranks);
-                if q < best.0 {
-                    best = (q, out);
-                }
-            }
-            // 按**骨架自己的规范秩**存坐标,查表时才对得上
-            let mut by_rank: Vec<(u32, Point2)> = best
-                .1
-                .iter()
-                .map(|(a, p)| (ranks[*a as usize], *p))
-                .collect();
-            by_rank.sort_by_key(|x| x.0);
-            print!("    (\"{skel}\", &[");
-            for (_, p) in &by_rank {
-                print!("({:.6}, {:.6}), ", p.x, p.y);
-            }
-            println!("]),   // 出现 {n} 次,自交 {}", best.0 .0);
+        for l in lines.into_iter().flatten() {
+            println!("{l}");
             kept += 1;
         }
         println!("];");
