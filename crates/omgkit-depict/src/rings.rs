@@ -26,7 +26,10 @@ use omgkit_core::MolBuilder;
 use crate::geom::{regular_polygon, Point2, BOND_LEN};
 
 /// 布局中不得不退化的地方。
+///
+/// 标了 `non_exhaustive`:以后加新的退化种类不该是下游的破坏性变更。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Degradation {
     /// 桥环或笼状体系:没有规则能给出平面上的好解,坐标由弹簧松弛得到。
     ///
@@ -34,6 +37,18 @@ pub enum Degradation {
     BridgedRingSystem {
         /// 涉及的原子
         atoms: Vec<u32>,
+        /// 坐标是不是查表来的,以及没命中时是哪一种没命中。
+        ///
+        /// # 为什么要分开报
+        ///
+        /// 命中模板的解是一次昂贵搜索的结果(两万次带扰动的多起点),通常没有
+        /// 自交;没命中就只有运行时那 5 个初值的松弛,**实测常常是自交的**。
+        /// 两者都叫"退化",但坏的程度差着量级 —— 下游要拒绝渲染还是人工介入,
+        /// 分不出来就没法定。
+        ///
+        /// 没命中还意味着一件可操作的事:**这个骨架该补进
+        /// `harness/corpus/bridged.smi` 再重跑生成器。**
+        template: crate::templates::Status,
     },
 }
 
@@ -76,10 +91,8 @@ pub(crate) fn layout_local(
 
     if sys.rings.is_empty() {
         // 环感知说这里有环、SSSR 却一个都没给出来。不猜,直接走退化。
-        return (
-            relax(mol, &sys.atoms, ranks, &sys.rings),
-            Some(bridged(&sys.atoms)),
-        );
+        let (pos, st) = relax(mol, &sys.atoms, ranks, &sys.rings);
+        return (pos, Some(bridged(&sys.atoms, st)));
     }
 
     // 起手环:先按大小(大环更能定住整体形状),再按规范秩 —— 不看存储下标
@@ -140,8 +153,9 @@ pub(crate) fn layout_local(
         let Some((i, u, v)) = best else {
             // 剩下的环都不是邻稠 —— 桥环。整个系统交给松弛。
             // 桥环一经识别就**丢掉部分结果**,整个系统重排 —— 见 relax 的注释
-            degraded = Some(bridged(&sys.atoms));
-            return (relax(mol, &sys.atoms, ranks, &sys.rings), degraded);
+            let (pos, st) = relax(mol, &sys.atoms, ranks, &sys.rings);
+            degraded = Some(bridged(&sys.atoms, st));
+            return (pos, degraded);
         };
 
         fuse_on_bond(order[i], u, v, &mut pos);
@@ -170,10 +184,10 @@ fn canonical_cycle(atoms: &[u32], ranks: &[u32]) -> Vec<u32> {
     }
 }
 
-fn bridged(atoms: &[u32]) -> Degradation {
+fn bridged(atoms: &[u32], template: crate::templates::Status) -> Degradation {
     let mut a = atoms.to_vec();
     a.sort_unstable();
-    Degradation::BridgedRingSystem { atoms: a }
+    Degradation::BridgedRingSystem { atoms: a, template }
 }
 
 /// 环的确定性排序键:环上规范秩的**有序**多重集。
@@ -261,12 +275,21 @@ fn centroid(pts: impl Iterator<Item = Point2>) -> Point2 {
 ///
 /// 键长拉向 [`BOND_LEN`],非键原子互斥。给不出标准键角,也不保证消得掉重叠 ——
 /// 这正是调用方要把它记进 [`Degradation`] 的原因。
-fn relax(mol: &MolBuilder, atoms: &[u32], ranks: &[u32], rings: &[&Ring]) -> BTreeMap<u32, Point2> {
+fn relax(
+    mol: &MolBuilder,
+    atoms: &[u32],
+    ranks: &[u32],
+    rings: &[&Ring],
+) -> (BTreeMap<u32, Point2>, crate::templates::Status) {
     // **先查表。** 松弛是局部下降,5 个初值本身就常常给出自交的解 —— 实测最常见
     // 的 8 个骨架里 5 个自交,双环[2.2.2]辛烷和金刚烷都在内。表里存的是同一个
     // `quality` 口径下搜得久得多的结果,见 [`crate::templates`]。
-    if let Some(p) = crate::templates::lookup(mol, atoms, ranks) {
-        return p;
+    // **查表的状态一并带出去。** 先前调用方为了知道"命中没有"又调了一次
+    // `lookup`,而那里面是建分子 + sanitize + 规范化 —— 每个桥环系统、每种
+    // 规范、审计里每种写法都白付一遍。
+    let (hit, status) = crate::templates::lookup(mol, atoms, ranks);
+    if let Some(p) = hit {
+        return (p, status);
     }
     // **原子按规范秩排序,不按存储下标。** 初值、乃至浮点求和的次序都因此固定,
     // 于是同一个分子的任何写法得到同一张图。
@@ -295,7 +318,7 @@ fn relax(mol: &MolBuilder, atoms: &[u32], ranks: &[u32], rings: &[&Ring]) -> BTr
             best = Some((key, out));
         }
     }
-    best.expect("SEEDS 至少为 1").1
+    (best.expect("SEEDS 至少为 1").1, status)
 }
 
 /// 试几个初值。**每多一个都要有个说法**,而且要拿全量语料量过。
@@ -709,6 +732,100 @@ mod tests {
     }
 
     #[test]
+    fn not_in_the_table_and_no_fingerprint_at_all_are_reported_apart() {
+        // 两种"没命中"指向完全不同的动作:一个是"补进 `bridged.smi` 重跑生成器",
+        // 另一个是"去查那个分子本身"。混成一档的话审计给的指路是错的 ——
+        // 实测全量语料里没命中的那 8 例**全是** `NoFingerprint`。
+        use crate::templates::Status;
+
+        // 指纹算得出来、表里没有:一个编出来的大笼
+        let m = prep("C1CC2CCC3CCC4CCC5CCC1C1C2C3C4C51");
+        let ranks = omgkit_io::canon::canonical_ranks(&m);
+        let rs = omgkit_chem::sssr::ring_set(&m);
+        let syss = group(&omgkit_chem::rings::fused_ring_systems(&m), &rs);
+        let sys = syss.iter().max_by_key(|s| s.atoms.len()).expect("有环系统");
+        assert_eq!(
+            crate::templates::lookup(&m, &sys.atoms, &ranks).1,
+            Status::NotInTable,
+            "指纹算得出来、表里没有,该报 NotInTable"
+        );
+
+        // 指纹根本算不出来:**二茂铁**。铁与环戊二烯基的五个碳全成键,骨架
+        // 全碳化之后那个原子度数 9,`sanitize` 过不去。补语料对它没有用 ——
+        // 要改的是骨架抽取本身怎么对待这类 η5 配位。
+        //
+        // **分子取自 `harness/corpus/large.smi` 第 2135、5558 行**,不是编的:
+        // 全量审计报的 8 处 `NoFingerprint` 全部出自这两个分子。
+        let mut found = 0usize;
+        for smi in [
+            "C12C3=C4C5=C1[Fe]23456789C%10C6=C7C8=C9%10",
+            "CN(C)C[C-]12C3=C4C5=C1[Fe++]23456789[C-]%10C6=C7C8=C9%10",
+        ] {
+            let m = prep(smi);
+            let ranks = omgkit_io::canon::canonical_ranks(&m);
+            let rs = omgkit_chem::sssr::ring_set(&m);
+            for sys in group(&omgkit_chem::rings::fused_ring_systems(&m), &rs) {
+                if crate::templates::lookup(&m, &sys.atoms, &ranks).1 == Status::NoFingerprint {
+                    found += 1;
+                }
+            }
+        }
+        assert!(
+            found > 0,
+            "这两个分子该有环系统报 NoFingerprint,实际一个都没有 —— 判据验不到东西了"
+        );
+    }
+
+    #[test]
+    fn a_bridged_skeleton_says_whether_its_coordinates_came_from_the_table() {
+        // 命中模板与只能松弛,坏的程度差着量级:前者是两万次带扰动多起点搜出来
+        // 的,通常不自交;后者只有运行时那 5 个初值。两者都叫"退化",下游要
+        // 拒绝渲染还是人工介入,分不出来就没法定。
+        //
+        // 前三个取自 `harness/corpus/bridged.smi`(表里有),最后一个刻意不在表里。
+        for (smi, want) in [
+            ("C1CC2CCC1CC2", true),
+            ("C1C2CC3CC1CC(C2)C3", true),
+            (
+                "CN1CC[C@]23c4c5ccc(O)c4O[C@H]2[C@@H](O)C=C[C@H]3[C@H]1C5",
+                true,
+            ),
+            ("C1CC2CCC3CCC4CCC5CCC1C1C2C3C4C51", false),
+        ] {
+            let m = prep(smi);
+            let ranks = omgkit_io::canon::canonical_ranks(&m);
+            let rs = omgkit_chem::sssr::ring_set(&m);
+            let syss = group(&omgkit_chem::rings::fused_ring_systems(&m), &rs);
+            let sys = syss.iter().max_by_key(|s| s.atoms.len()).expect("有环系统");
+            let (_, deg) = layout_local(&m, sys, &ranks);
+            let Some(Degradation::BridgedRingSystem { atoms, template }) = deg else {
+                panic!("{smi} 该报桥环退化,得到 {deg:?}");
+            };
+            assert_eq!(
+                template == crate::templates::Status::Hit,
+                want,
+                "{smi} 的查表状态报成了 {template:?}"
+            );
+            // **光报"表里有"是不够的** —— 注释说的是"坐标是不是查表来的"。
+            // 实测把 `relax` 里那个查表短路关掉(坐标改由 5 起点松弛给出、
+            // 标志位仍报 Hit),先前这条判据是绿的。所以还要验坐标真的等于
+            // 表里那一组。
+            if want {
+                let (pos, _) = layout_local(&m, sys, &ranks);
+                let (tpl, _) = crate::templates::lookup(&m, &atoms, &ranks);
+                let tpl = tpl.expect("报了 Hit 就该查得到");
+                for (a, p) in &tpl {
+                    let got = pos.get(a).expect("每个原子都该有坐标");
+                    assert!(
+                        got.dist(*p) < 1e-9,
+                        "{smi} 原子 {a}:画出来的 {got:?} 不是表里的 {p:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_bridged_system_says_so_instead_of_pretending() {
         // 双环[2.2.2]辛烷:三个六元环两两共用不止一根键,平面上没有好解。
         // 判据不是"画得好看",是"**如实说自己画不好**"。
@@ -786,11 +903,22 @@ mod generator {
     #[ignore]
     fn regenerate_templates() {
         // 一、扫语料,按出现次数排出最常见的桥环骨架
+        //
+        // **两份语料。** `large.smi` 是通用语料,按频次取前 `TOP`;`bridged.smi`
+        // 是专门收"经典难画"的桥环骨架(生物碱、萜类、教科书上的笼),里面每一
+        // 个骨架**无条件全收** —— 它们在通用语料里各出现零到一次,按频次排永远
+        // 挤不进前 `TOP`,而正是它们让吗啡那类分子画成一团乱麻。
         let text = std::fs::read_to_string("../../harness/corpus/large.smi").unwrap();
+        let extra = std::fs::read_to_string("../../harness/corpus/bridged.smi").unwrap();
         let mut freq: BTreeMap<String, usize> = BTreeMap::new();
-        for line in text.lines() {
+        let mut must: BTreeSet<String> = BTreeSet::new();
+        for (line, is_extra) in text
+            .lines()
+            .map(|l| (l, false))
+            .chain(extra.lines().map(|l| (l, true)))
+        {
             let smi = line.split_whitespace().next().unwrap_or("");
-            if smi.is_empty() {
+            if smi.is_empty() || smi.starts_with('#') {
                 continue;
             }
             let Ok(mut m) = omgkit_io::smiles::parse(smi) else {
@@ -810,18 +938,40 @@ mod generator {
                     continue;
                 }
                 if let Some(k) = crate::templates::skeleton_of(&m, &sys.atoms, &ranks) {
-                    *freq.entry(k).or_default() += 1;
+                    // **频次只由 `large.smi` 定。** 额外语料若也计数,它贡献的
+                    // 那一两次会把排名搅动 —— 实测原本第 47~50 名的 4 个骨架
+                    // 被挤出了前 `TOP`,凭空丢了模板。额外语料只管覆盖面。
+                    if is_extra {
+                        must.insert(k);
+                    } else {
+                        *freq.entry(k).or_default() += 1;
+                    }
                 }
             }
         }
         let mut v: Vec<(String, usize)> = freq.into_iter().collect();
+        // 频次降序、同频按骨架字典序 —— 与写法无关,重跑逐字节可复现
         v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        // 前 `TOP` 名,加上 `bridged.smi` 里的全部
+        let mut keep: Vec<(String, usize)> = v
+            .iter()
+            .enumerate()
+            .filter(|(i, (k, _))| *i < TOP || must.contains(k))
+            .map(|(_, kv)| kv.clone())
+            .collect();
+        // `must` 里可能有 `large.smi` 一次都没出现过的骨架 —— 它们不在 `v` 里
+        for k in &must {
+            if !keep.iter().any(|(s, _)| s == k) {
+                keep.push((k.clone(), 0));
+            }
+        }
+        keep.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
         // 二、对每个骨架跑带扰动的多起点,按现成的 Quality 挑最好的
         println!("// 本表由 rings.rs 的 `regenerate_templates` 生成,勿手改。");
         println!("pub(crate) const TABLE: &[(&str, &[(f64, f64)])] = &[");
         let mut kept = 0usize;
-        for (skel, n) in v.iter().take(TOP) {
+        for (skel, n) in &keep {
             let Ok(mut m) = omgkit_io::smiles::parse(skel) else {
                 continue;
             };
@@ -846,7 +996,7 @@ mod generator {
             let Some(s) = sys.iter().max_by_key(|s| s.atoms.len()) else {
                 continue;
             };
-            let base = relax(&m, &s.atoms, &ranks, &s.rings);
+            let (base, _) = relax(&m, &s.atoms, &ranks, &s.rings);
             let mut best = (quality(&m, &base, &ranks), base);
 
             let mut st = 0x51ED_270B_D5AB_C0DEu64 ^ (cnt as u64);

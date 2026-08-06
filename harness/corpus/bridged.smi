@@ -1,0 +1,64 @@
+# 桥环/笼状骨架语料。每行 `SMILES<TAB>名字`,# 开头为注释、空行忽略。
+#
+# # 为什么单独一份
+#
+# `templates_data.rs` 那张表是从 `large.smi` 出现过的骨架生成的,而 `large.smi`
+# 是一份通用语料 —— 生物碱、萜类这些"经典难画"的桥环骨架它基本没有。吗啡就是
+# 例子:它的环系 18 个原子、指纹 `C1C2CCCC34C5C(CC4CCCC23)CCCC15`,不在表里,
+# 于是退回 5 起点弹簧松弛,落到一个自交的局部极小,图上一团乱麻。
+#
+# 桥环在平面上没有算法解,业界的答案就是模板 —— Steinbeck 讲 CDK 的 SDG 时原话
+# 是"对某些桥环体系,没有已知算法能给出好结果,因此需要模板机制";ChemDraw 给的
+# 也是模板面板(甾体、糖、生物碱),而不是让 cleanup 去算。机制我们早就有,缺的
+# 是覆盖面,所以补语料而不是改算法。
+#
+# # 这份表管的是**骨架**,不是化学
+#
+# `templates::skeleton_of` 把取代基剥掉、原子一律当碳、键级一律当单键、立体全丢。
+# 所以这里**一律不写立体**:写了也进不了表,而写错了会让人把这份文件当成立体
+# 回归样本用。名字指的是**那个骨架**,不是某个具体的立体异构体。
+#
+# # 第一版这里错得很难看,值得记
+#
+# 头一版 32 条里 **9 条根本不是那个分子**:马钱子碱少两个碳、雪松烯多两个碳还
+# 不是桥环、立方烷写成了 9 个碳、棱晶烷 7 个碳、扭烷含两个五元环、桉叶素的氧
+# 与偕二甲基对调了、双环[2.1.0]戊烷写成了双环[1.1.1]戊烷……另有 7 条立体写错。
+#
+# 我当时"用 RDKit 验过能解析"就收了 —— **能解析不等于是那个分子**。这些错分子
+# 既往表里塞了垃圾解(其中一条自交 2),又挡掉了 7 个本该收进来的真骨架。
+#
+# 现在的规矩:结构式要么是能自己数清楚的简单笼,要么核对过分子式与连接方式;
+# 拿不准的宁可不收。
+
+# ---- 生物碱(不写立体,见上) ----
+CN1CCC23c4c5ccc(O)c4OC2C(O)C=CC3C1C5	morphine 骨架
+COc1ccc2nccc(C(O)C3CC4CCN3CC4C=C)c2c1	quinine 骨架
+O=C1CC2OCC=C3CN4CCC56C4CC3C2C5N1c1ccccc16	strychnine 骨架
+CN1C2CCC1CC(C2)OC(=O)C(CO)c1ccccc1	atropine 骨架
+CN1C2CCC1C(C(=O)OC)C(C2)OC(=O)c1ccccc1	cocaine 骨架
+CN1C2CC(OC(=O)C(CO)c3ccccc3)CC1C1OC21	scopolamine 骨架
+
+# ---- 萜类 ----
+CC1(C)C2CCC1(C)C(=O)C2	camphor 骨架
+CC1CCC2C(C)C(=O)OC3OC4(C)CCC1C23OO4	artemisinin 骨架
+C1CC2CC3CCCC3(C1)C2	cedrane 骨架
+C1CCC2C3CCC2C(C1)C3	longifolene 骨架
+
+# ---- 教科书上的笼(能自己数清楚的) ----
+C1C2CC3CC1CC(C2)C3	adamantane
+C1CC2CCC1CC2	bicyclo[2.2.2]octane
+C1CC2CCC1C2	bicyclo[2.2.1]heptane(norbornane)
+C1CC2CC1C2	bicyclo[2.1.1]hexane
+C1CC2C1C2	bicyclo[2.1.0]pentane(housane)
+C1C2CC1C2	bicyclo[1.1.1]pentane
+C12C3C4C1C5C2C3C45	cubane
+C12C3C1C4C2C34	prismane
+C1=CC2C=CC1C=C2	barrelene
+C1CC2CC3C1CC2CC3	twistane
+C1CC2CC1C1C3CC(C4CC43)C21	dieldrin 骨架
+
+# ---- 带取代基的桥环(骨架同上,留着当回归样本) ----
+O=C(O)C1C2CCC(C2)C1	norbornane-2-carboxylic acid 骨架
+OC1CC2CCC1C2	norborneol 骨架
+O=C1CC2CCC1C2	bicyclo[2.2.1]heptan-2-one 骨架
+O=C(O)C1CC2CCC1CC2	bicyclo[2.2.2]octane-carboxylic acid 骨架

@@ -56,19 +56,45 @@ pub(crate) fn skeleton_of(mol: &MolBuilder, atoms: &[u32], ranks: &[u32]) -> Opt
     Some(omgkit_io::canon::canonical_smiles(&b).smiles)
 }
 
-/// 查表:这个环系有没有预存的坐标。
+/// 查表的结果。**"没命中"要分成两种** —— 它们指向完全不同的动作。
+///
+/// 先前只有一个 `bool`,把后两种混成一档。而实测全量语料里没命中的那几例
+/// **全是 `NoFingerprint`**(骨架全碳化之后度数超 4,`sanitize` 不过)——
+/// 报"该补进语料"是条走不通的路,100% 的情形都指错了方向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    /// 表里有,坐标就是表给的
+    Hit,
+    /// 指纹算出来了,表里没有。
+    /// **这个骨架该补进 `harness/corpus/bridged.smi` 再重跑生成器。**
+    NotInTable,
+    /// 指纹根本算不出来 —— 抠出来的骨架自己 sanitize 不过。补语料没用,
+    /// 要查的是那个分子本身。
+    NoFingerprint,
+}
+
+/// 查表:这个环系有没有预存的坐标,以及没有的话是哪一种没有。
 ///
 /// 返回的坐标按**父分子的原子编号**给出,已经对上号了。
-pub(crate) fn lookup(
+///
+/// **状态与坐标一起返回**,别让调用方为了知道"命中没有"再调一次 —— 这里面是
+/// 建分子 + sanitize + 规范化,每个桥环系统、每种规范、审计里每种写法都要付。
+pub fn lookup(
     mol: &MolBuilder,
     atoms: &[u32],
     ranks: &[u32],
-) -> Option<BTreeMap<u32, Point2>> {
-    let skel = skeleton_of(mol, atoms, ranks)?;
-    let coords = TABLE.iter().find(|(k, _)| *k == skel).map(|(_, v)| *v)?;
+) -> (Option<BTreeMap<u32, Point2>>, Status) {
+    let Some(skel) = skeleton_of(mol, atoms, ranks) else {
+        return (None, Status::NoFingerprint);
+    };
+    let Some(coords) = TABLE.iter().find(|(k, _)| *k == skel).map(|(_, v)| *v) else {
+        return (None, Status::NotInTable);
+    };
 
     // 重建同一个骨架,拿它自己的规范秩去对坐标 —— 存的时候就是按这个存的。
     // 规范秩与存储序无关,所以两边算出来必然一致。
+    //
+    // 下面任何一步失败都当"表里没有"退回松弛:表在,只是对不上号。
     let mut order: Vec<u32> = atoms.to_vec();
     order.sort_by_key(|a| (ranks[*a as usize], *a));
     let mut b = MolBuilder::new();
@@ -84,22 +110,30 @@ pub(crate) fn lookup(
         .collect();
     for bd in mol.bonds() {
         if let (Some(x), Some(y)) = (idx.get(&bd.begin), idx.get(&bd.end)) {
-            b.add_bond(*x, *y, BondOrder::Single).ok()?;
+            if b.add_bond(*x, *y, BondOrder::Single).is_err() {
+                return (None, Status::NotInTable);
+            }
         }
     }
-    omgkit_chem::pipeline::sanitize(&mut b).ok()?;
+    if omgkit_chem::pipeline::sanitize(&mut b).is_err() {
+        return (None, Status::NotInTable);
+    }
     let skel_ranks = omgkit_io::canon::canonical_ranks(&b);
     if skel_ranks.len() != coords.len() {
-        return None; // 表坏了 —— 不猜,退回松弛
+        return (None, Status::NotInTable); // 表坏了 —— 不猜,退回松弛
     }
 
     let mut out = BTreeMap::new();
     for (i, parent) in back.iter().enumerate() {
-        let r = *skel_ranks.get(i)? as usize;
-        let (x, y) = *coords.get(r)?;
-        out.insert(*parent, Point2::new(x, y));
+        let Some(r) = skel_ranks.get(i) else {
+            return (None, Status::NotInTable);
+        };
+        let Some((x, y)) = coords.get(*r as usize) else {
+            return (None, Status::NotInTable);
+        };
+        out.insert(*parent, Point2::new(*x, *y));
     }
-    Some(out)
+    (Some(out), Status::Hit)
 }
 
 include!("templates_data.rs");
@@ -132,7 +166,7 @@ mod tests {
             let ranks = omgkit_io::canon::canonical_ranks(&m);
             let rs = omgkit_chem::sssr::ring_set(&m);
             for sys in crate::rings::group(&omgkit_chem::rings::fused_ring_systems(&m), &rs) {
-                if lookup(&m, &sys.atoms, &ranks).is_some() {
+                if lookup(&m, &sys.atoms, &ranks).0.is_some() {
                     hits += 1;
                 }
             }

@@ -123,7 +123,9 @@ fn main() {
 
     for (lineno, line) in text.lines().enumerate() {
         let smi = line.split_whitespace().next().unwrap_or("");
-        if smi.is_empty() {
+        // `#` 开头是注释。先前没跳,靠"解析失败"混过去 —— 于是 `跳过 N` 这个数
+        // 把注释行和真正解析不了的分子混在了一起,后者就藏进去了。
+        if smi.is_empty() || smi.starts_with('#') {
             continue;
         }
         let Some(m) = prep(smi) else {
@@ -220,6 +222,31 @@ fn main() {
             }
             if crowded_centres(&grown, &d) > 0 {
                 *quality.entry("—— 有立体中心的取代基挤在一侧").or_default() += 1usize;
+            }
+            // 桥环退化里,查表命中与没命中要分开数 —— 命中的是一次昂贵搜索
+            // 的结果,通常不自交;没命中只有运行时那 5 个初值,实测常常自交。
+            //
+            // **"没命中"还要再分两种,它们指向完全不同的动作。** 先前混成一档,
+            // 而实测全量语料里那 4 例**全是**指纹算不出来 —— 文案让人去补语料,
+            // 是条走不通的路。
+            for g in &d.degraded {
+                let omgkit_depict::rings::Degradation::BridgedRingSystem { template, .. } = g
+                else {
+                    continue;
+                };
+                match template {
+                    omgkit_depict::templates::Status::Hit => {}
+                    omgkit_depict::templates::Status::NotInTable => {
+                        *quality
+                            .entry("——   其中表里没有(骨架该补进 bridged.smi)")
+                            .or_default() += 1usize;
+                    }
+                    omgkit_depict::templates::Status::NoFingerprint => {
+                        *quality
+                            .entry("——   其中骨架指纹算不出来(要查那个分子本身)")
+                            .or_default() += 1usize;
+                    }
+                }
             }
             *quality
                 .entry(if !d.degraded.is_empty() {
