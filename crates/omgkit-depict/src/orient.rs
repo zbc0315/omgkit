@@ -39,16 +39,25 @@ pub(crate) fn canonicalise(coords: &mut [Point2], ranks: &[u32]) {
     if coords.len() < 2 {
         return;
     }
-    // 先挪到质心,让旋转与镜像都绕着一个与编号无关的点做
-    let n = coords.len() as f64;
-    let c = coords.iter().fold(Point2::ORIGIN, |s, p| s + *p) * (1.0 / n);
-    for p in coords.iter_mut() {
-        *p = *p - c;
-    }
-
     // 按规范秩排好的下标 —— 指纹要按这个顺序取,才与原子编号无关
     let mut order: Vec<usize> = (0..coords.len()).collect();
     order.sort_by_key(|i| (ranks[*i], *i));
+
+    // 先挪到质心,让旋转与镜像都绕着一个与编号无关的点做。
+    //
+    // **累加次序必须也与编号无关。** 浮点加法不满足结合律,按存储序求和,
+    // 同一分子的两种写法算出的质心会差最后一位(~1e-16),整张图跟着平移那么多。
+    // 平时看不出来,但**坐标恰好落在四舍五入的边界上时就会翻**:审计的图元指纹
+    // 取 3 位小数,实测 59.9615 那样的值一边进 59.962、另一边进 59.961,
+    // 「写法无关」当场报违例。
+    //
+    // 这个坑先前一直藏着,是模板表换成几何求解(键长精确为 1、坐标大量落在
+    // 半整数上)之后才浮出来的 —— 精确的几何把浮点噪声推到了边界上。
+    let n = coords.len() as f64;
+    let c = order.iter().fold(Point2::ORIGIN, |s, i| s + coords[*i]) * (1.0 / n);
+    for p in coords.iter_mut() {
+        *p = *p - c;
+    }
 
     let mut best: Option<(Key, Vec<Point2>)> = None;
     for mirror in [false, true] {
@@ -163,6 +172,51 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn shuffling_the_storage_order_does_not_move_the_picture() {
+        // 质心是**浮点求和**算出来的,而加法不满足结合律 —— 按存储序累加的话,
+        // 同一组坐标换个存储序算出的质心会差最后一位(~1e-16),整张图跟着平移
+        // 那么多。平时看不出来,但**坐标恰好落在四舍五入的边界上时就会翻**:
+        // 审计的图元指纹取 3 位小数,一边进 x.xx2、另一边进 x.xx1。
+        //
+        // 这条判据不靠语料 —— 它直接把同一组点换个次序喂进来。用的是**故意
+        // 造出末位差别**的值:0.1 这类二进制表示不精确的数,累加次序一变,
+        // 和就差最后一位。
+        let n = 24usize;
+        let pts: Vec<Point2> = (0..n)
+            .map(|i| {
+                #[allow(clippy::suboptimal_flops)]
+                let t = 0.1 * i as f64 + 0.3;
+                Point2::new(
+                    t.cos() * (1.0 + 0.1 * i as f64),
+                    t.sin() * (1.0 + 0.7 * i as f64),
+                )
+            })
+            .collect();
+        // 秩就是"第几个点",两种存储序下同一个点拿到同一个秩
+        let perm: Vec<usize> = (0..n).map(|i| (i * 7 + 3) % n).collect();
+
+        let mut a: Vec<Point2> = pts.clone();
+        let ranks_a: Vec<u32> = (0..n).map(|i| u32::try_from(i).unwrap()).collect();
+        canonicalise(&mut a, &ranks_a);
+
+        let mut b: Vec<Point2> = perm.iter().map(|i| pts[*i]).collect();
+        let ranks_b: Vec<u32> = perm.iter().map(|i| u32::try_from(*i).unwrap()).collect();
+        canonicalise(&mut b, &ranks_b);
+
+        for (i, &j) in perm.iter().enumerate() {
+            // **逐位相等,不给容差。** 契约是"逐字节相同的图元";质心差最后
+            // 一位就足以在四舍五入的边界上翻出可见的差别,拿 1e-12 的容差量
+            // 根本量不到 —— 实测那样写这条判据是空过的。
+            assert!(
+                a[j].x.to_bits() == b[i].x.to_bits() && a[j].y.to_bits() == b[i].y.to_bits(),
+                "换个存储序之后点 {j} 从 {:?} 挪到了 {:?}",
+                a[j],
+                b[i]
+            );
         }
     }
 

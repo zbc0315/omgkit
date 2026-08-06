@@ -403,11 +403,24 @@ fn relax_from(
     let idx: BTreeMap<u32, usize> = atoms.iter().enumerate().map(|(i, a)| (*a, i)).collect();
     let n = atoms.len();
 
-    let bonded: Vec<(usize, usize)> = mol
+    // **按规范秩下标定序,不按键的存储序。** `settle` 是照这个次序累加力的,
+    // 而浮点加法不满足结合律 —— 存储序随写法变,同一分子的两种写法算出的坐标
+    // 就会差最后几位。平时看不出来,**坐标恰好落在四舍五入边界上时就会翻**;
+    // 模板换成几何求解之后正是这样炸出来的(镍配合物,差 10.6 个单位)。
+    //
+    // `idx` 是按规范秩排好的原子在 `atoms` 里的下标,所以按 `(小, 大)` 排序
+    // 就与写法无关了。
+    //
+    // **这一处也没有判据守着。** 与 `place_at` 同理:`settle` 跑 400 步,末位
+    // 差别在迭代里既可能放大也可能被吃掉,造不出稳定会红的样本。留着是因为
+    // "顺序必须与写法无关"这条本身成立,不是因为量到了收益。
+    let mut bonded: Vec<(usize, usize)> = mol
         .bonds()
         .iter()
         .filter_map(|b| Some((*idx.get(&b.begin)?, *idx.get(&b.end)?)))
+        .map(|(u, v)| if u <= v { (u, v) } else { (v, u) })
         .collect();
+    bonded.sort_unstable();
 
     // 初值 4:**最大的那个环先摆成正多边形**,其余原子沿着已放好的邻居向外
     // 铺开。前四个初值都是"所有原子摆在一个圆上",拓扑上太像,弹簧下降往往
@@ -586,7 +599,26 @@ pub(crate) fn place_at(
     dir: Point2,
 ) -> BTreeMap<u32, Point2> {
     let a = local[&anchor];
-    let c = centroid(local.values().copied());
+    // **求和的次序必须与写法无关。** `local` 是按原子下标建的 `BTreeMap`,
+    // 迭代序就是存储序;浮点加法不满足结合律,同一分子的两种写法算出的质心
+    // 会差最后一位(~1e-16),`theta` 跟着差那么一点,**整个环系被转了 1e-16**。
+    //
+    // 平时看不出来,但下游会把它放大:`orient` 在 24 个候选姿态里挑最小的键,
+    // 1e-16 的差别足以让另一个姿态胜出,最终差出 10 个单位。实测就是这么炸的
+    // (镍配合物,三条一模一样的配体)。
+    //
+    // 点集本身与写法无关(几何一样,只是标号不同),所以**按坐标排序再求和**
+    // 就定死了 —— 不需要把 `ranks` 传进来。
+    //
+    // **这一处没有判据守着,如实说。** 试过写一条"同一组点换个键序,`place_at`
+    // 输出逐位相同"的判据:造了几组点,质心末位确实差,但那点差被后面
+    // `(c - a).normalized()` 的归一化吸收了,输出逐位相同 —— 判据在打不打这个
+    // 补丁下都是绿的,**空过的判据不留**。`orient::canonicalise` 那处同类修复
+    // 有判据(`shuffling_the_storage_order_does_not_move_the_picture`),因为它
+    // 的质心直接进坐标,没有归一化这一步。
+    let mut pts: Vec<Point2> = local.values().copied().collect();
+    pts.sort_by(|u, v| u.x.total_cmp(&v.x).then(u.y.total_cmp(&v.y)));
+    let c = centroid(pts.into_iter());
     let from = (c - a).normalized();
     let to = dir.normalized();
     // from 是零向量只可能出现在"质心恰好落在锚点上"的对称情形,那时转多少都一样
