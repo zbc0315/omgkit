@@ -21,7 +21,7 @@ use omgkit_chem::sssr::Ring;
 use omgkit_core::{BondFlags, BondOrder, MolBuilder};
 
 use crate::geom::Point2;
-use crate::label::{label_for, HSide, Label, Run};
+use crate::label::{label_for, HSide, Label, LabelDir, Run};
 use crate::style::Style;
 use crate::Depiction;
 
@@ -418,20 +418,110 @@ pub fn label_at(mol: &MolBuilder, atom: u32, style: &Style, coords: &[Point2]) -
 /// `HO`、`H2N` 只在键从右边来时才用。
 ///
 /// 判据要重建 `scene` 画出来的东西就得知道氢挂哪边,所以这个函数是公开的。
+///
+/// # 为什么不直接写成 `label_dir(..).h_side()`
+///
+/// 竖排还没接进绘制。在那之前把上下两向折成 `East`,等于**丢掉**这批标签本来
+/// 定得好好的左右选择 —— 全量语料实测 `—— 有标签在键上塞不下` 从 1271 涨到
+/// **1356(+85)**。所以这里仍按老规矩定左右;`label_dir` 的上下两向要等
+/// [`crate::label::Label`] 会竖排了才接得上。
 pub fn h_side(mol: &MolBuilder, atom: u32, coords: &[Point2]) -> HSide {
+    match label_dir(mol, atom, coords) {
+        LabelDir::West => HSide::Left,
+        LabelDir::East => HSide::Right,
+        // 上下两向:按横排的口径回落,与接竖排之前的行为逐字节一致
+        LabelDir::North | LabelDir::South => {
+            let here = coords[atom as usize];
+            let sum: f64 = mol
+                .neighbors(atom)
+                .map(|(n, _)| coords[n as usize].x - here.x)
+                .sum();
+            if sum > 1e-3 {
+                HSide::Left
+            } else {
+                HSide::Right
+            }
+        }
+    }
+}
+
+/// 判"这堆键主要是横的还是竖的"用的斜率阈值:tan 70°。
+///
+/// # 70° 是抄来的,而且这个数不能随便动
+///
+/// RDKit 的 `DrawMol::getAtomOrientation` 用的就是它,注释里写明了取值的由来:
+/// 吲哚的 `NH` 在它的布局下约 72°,要竖着;而 `c1ccccc1C1CCC(N)(N)CC1` 底部
+/// 那两个氨基要横着。70° 把这两种情形分开。
+///
+/// **换成 30° 会踩上一个结构性的坑。** 本库的图被 [`crate::orient`] 吸附到 30°
+/// 栅格上,12 个栅格方向的 `|tan|` 只有 `{0, 0.577, 1.732, ∞}` 四个值 ——
+/// **0.577 正是 tan 30°**,于是大批键向量和会**精确落在阈值上**,横竖之分退化成
+/// 由浮点末位决定。tan 70° = 2.747 不是其中任何一个,离最近的 1.732(60°)与
+/// ∞(90°)分别有 10° 和 20°。全量语料实测:阈值取 70° 时只有 **70** 个原子落在
+/// 断点上。
+const VERT_SLOPE: f64 = 2.747_477_419_454_622; // tan(70°)
+
+/// 判横竖时的容差。
+///
+/// # 两簇之间空着 12 个数量级
+///
+/// 判别量取 `|sy| - tan70·|sx|`(不是 `sy/sx`,竖直时那个会溢出)。全量语料
+/// 17662 个分子×规范、19694 个带氢标签实测:
+///
+/// | | 个数 | 判别量 |
+/// |---|---:|---|
+/// | 精确落在断点上 | 70(其中度 ≥ 3 的 58 个) | ≤ 4.658e-15 |
+/// | 真正有横竖之分 | 19624 | ≥ 4.461e-3 |
+///
+/// 中间空着 12 个数量级,1e-9 落在正中间,两边都够不着。
+///
+/// **度 ≥ 3 那 58 个是真的破口**:`sum` 是按 `mol.neighbors` 的存储序累加的,
+/// 而三项以上的浮点加法不满足结合律 —— 不定死的话,同一分子的两种写法会在
+/// 横竖之间摇摆。度 1、度 2 不受影响(单项、两项加法与次序无关)。
+const DIR_TIE: f64 = 1e-9;
+
+/// 标签往哪个方向伸:**背离键伸出去的方向**,免得压在键上。
+///
+/// # 端基永远横排
+///
+/// 度 1 的原子一律给 `East`/`West`。这一条也是照 RDKit 来的(它的注释原话是
+/// "atoms of single degree should always be either W or E, never N or S")——
+/// 端基只有一根键,横着写读起来就是 `–OH`、`–NH2` 这些常规写法;竖排既没必要,
+/// 又会把一串端基排得高低不齐。实测这一条挡下了 22805 个标签。
+///
+/// # 打平时取 `East`
+///
+/// 竖直的键两端 x 本该完全相等,浮点算出来却差个 1e-17 量级的零头。拿
+/// `sum > 0.0` 去判,这个零头的符号就决定了写 `OH` 还是 `HO` —— 而它的符号
+/// 取决于算到那一步的运算次序。实测:乙醇的羟基因此被写成了 `HO`。
+/// 所以近似打平时一律取 `East` —— `OH`、`NH2` 是常规写法,`HO`、`H2N` 只在键
+/// 从右边来时才用。横竖打平时同理取横,见 [`DIR_TIE`]。
+///
+/// 判据要重建 `scene` 画出来的东西就得知道标签朝哪,所以这个函数是公开的。
+pub fn label_dir(mol: &MolBuilder, atom: u32, coords: &[Point2]) -> LabelDir {
     /// 小于这个量的偏移一律当作打平。取键长的千分之一 —— 真正的左右之别
     /// 至少是半个键长的量级,不可能落进来。
     const TIE: f64 = 1e-3;
 
     let here = coords[atom as usize];
-    let mut sum = 0.0;
+    let (mut sx, mut sy) = (0.0, 0.0);
     for (n, _) in mol.neighbors(atom) {
-        sum += coords[n as usize].x - here.x;
+        sx += coords[n as usize].x - here.x;
+        sy += coords[n as usize].y - here.y;
     }
-    if sum > TIE {
-        HSide::Left // 键都朝右,氢写左边
+    // 横竖:比 `|sy|` 与 `tan70·|sx|`。写成差而不是商,竖直时才不会溢出。
+    let vertical = mol.degree(atom) >= 2 && sy.abs() - VERT_SLOPE * sx.abs() > DIR_TIE;
+    if vertical {
+        // 键朝上就把标签甩到下面去
+        if sy > 0.0 {
+            LabelDir::South
+        } else {
+            LabelDir::North
+        }
+    } else if sx > TIE {
+        LabelDir::West // 键都朝右,氢写左边
     } else {
-        HSide::Right
+        LabelDir::East
     }
 }
 
@@ -928,6 +1018,156 @@ mod tests {
             .iter()
             .filter(|i| matches!(i, Primitive::Text { .. }))
             .count()
+    }
+
+    #[test]
+    fn an_atom_whose_bonds_all_point_up_puts_its_hydrogen_straight_below() {
+        // 对乙酰氨基酚的酰胺氮:一根键指左上、一根指右上,横向分量抵消掉了。
+        // 只有左右两向可选时氢会挤到某根键下面,而**正下方整片是空的**。
+        let m = prep("CC(=O)Nc1ccc(O)cc1");
+        let d = generate(&m, &Style::ACS_1996);
+        let n = (0..u32::try_from(m.num_atoms()).unwrap())
+            .find(|a| m.atoms()[*a as usize].atomic_num == 7)
+            .expect("对乙酰氨基酚有一个氮");
+        // 先确认几何确实是"两根键都朝上"—— 否则这条判据验的不是要验的东西
+        let here = d.coords[n as usize];
+        for (nb, _) in m.neighbors(n) {
+            assert!(
+                d.coords[nb as usize].y > here.y,
+                "酰胺氮的邻居 {nb} 没在它上面,这个分子摆得和判据假设的不一样"
+            );
+        }
+        assert_eq!(
+            label_dir(&m, n, &d.coords),
+            LabelDir::South,
+            "两根键都朝上,标签该往下伸"
+        );
+    }
+
+    #[test]
+    fn a_terminal_atom_never_stacks_its_hydrogen() {
+        // 端基只有一根键。竖排既没必要(横着写就是 `–OH`、`–NH2` 这些常规写法),
+        // 又会把一串端基排得高低不齐。RDKit 也是特判掉的。
+        //
+        // 光断言"没有端基竖排"是会空过的 —— 要是这批分子里根本没有键近乎竖直的
+        // 端基,怎么改都是绿的。所以先数出**键确实近乎竖直**的端基有几个。
+        let mut vertical_terminals = 0usize;
+        for smi in [
+            "CCO",
+            "CC(=O)Oc1ccccc1C(=O)O",
+            "NCCO",
+            "OCC(O)C(O)C(O)C(O)C=O",
+            "CN1C=NC2=C1C(=O)N(C)C(=O)N2C",
+        ] {
+            let m = prep(smi);
+            for style in &Style::ALL {
+                let d = generate(&m, style);
+                for a in 0..u32::try_from(m.num_atoms()).unwrap() {
+                    if m.degree(a) != 1 {
+                        continue;
+                    }
+                    let Some(l) = label_at(&m, a, style, &d.coords) else {
+                        continue;
+                    };
+                    if !l.plain().contains('H') {
+                        continue;
+                    }
+                    let (nb, _) = m.neighbors(a).next().expect("度 1 必有一个邻居");
+                    let v = d.coords[nb as usize] - d.coords[a as usize];
+                    if v.y.abs() > VERT_SLOPE * v.x.abs() {
+                        vertical_terminals += 1;
+                    }
+                    assert!(
+                        !label_dir(&m, a, &d.coords).is_vertical(),
+                        "[{}] {smi} 的端基 {a} 被判成了竖排",
+                        style.name
+                    );
+                }
+            }
+        }
+        assert!(
+            vertical_terminals > 0,
+            "这批分子里没有键近乎竖直的端基,判据是空过的"
+        );
+    }
+
+    #[test]
+    fn whether_a_label_stacks_does_not_depend_on_how_it_was_written() {
+        // 判别量 `|sy| - tan70·|sx|` 是按 `mol.neighbors` 的存储序累加出来的,
+        // 而三项以上的浮点加法不满足结合律 —— 度 ≥ 3 的原子上,同一个分子的两种
+        // 写法会算出末位不同的判别量。落在断点上时,横竖就由那一位决定了。
+        //
+        // 取的是**语料里真出现过的**分子,不是自己编的。
+        for smi in [
+            "CC(=O)Nc1ccc(O)cc1",
+            "NC(=O)c1ccccc1N",
+            "OC(=O)C(N)Cc1ccccc1",
+            "CN1C=NC2=C1C(=O)N(C)C(=O)N2C",
+        ] {
+            let m = prep(smi);
+            let n = m.num_atoms();
+            let ranks = omgkit_io::canon::canonical_ranks(&m);
+            for style in &Style::ALL {
+                let d = generate(&m, style);
+                // 按规范秩记下每个原子的方向 —— 与原子编号无关的指纹
+                let mut order: Vec<usize> = (0..n).collect();
+                order.sort_by_key(|i| (ranks[*i], *i));
+                let base: Vec<LabelDir> = order
+                    .iter()
+                    .map(|i| label_dir(&m, u32::try_from(*i).unwrap(), &d.coords))
+                    .collect();
+
+                let mut compared = 0usize;
+                for seed in 0..12u64 {
+                    let w = omgkit_io::smiles::write_with_priority(&m, &shuffled(n, seed));
+                    let Ok(mut m2) = omgkit_io::smiles::parse(&w.smiles) else {
+                        continue;
+                    };
+                    if omgkit_chem::pipeline::sanitize(&mut m2).is_err() {
+                        continue;
+                    }
+                    if omgkit_io::canon::canonical_smiles(&m2).smiles
+                        != omgkit_io::canon::canonical_smiles(&m).smiles
+                    {
+                        continue;
+                    }
+                    let r2 = omgkit_io::canon::canonical_ranks(&m2);
+                    let d2 = generate(&m2, style);
+                    let mut o2: Vec<usize> = (0..m2.num_atoms()).collect();
+                    o2.sort_by_key(|i| (r2[*i], *i));
+                    let got: Vec<LabelDir> = o2
+                        .iter()
+                        .map(|i| label_dir(&m2, u32::try_from(*i).unwrap(), &d2.coords))
+                        .collect();
+                    compared += 1;
+                    assert_eq!(
+                        base, got,
+                        "[{}] {smi} 写成 {} 之后标签朝向变了",
+                        style.name, w.smiles
+                    );
+                }
+                assert!(compared > 0, "{smi} 一种写法都没比上,判据是空过的");
+            }
+        }
+    }
+
+    /// splitmix64 + Fisher-Yates。**不用 `(i*k+k)%n` 这种仿射映射** —— 它保持
+    /// 相邻关系,置换出来的写法太像原来的,判据会空过。
+    fn shuffled(n: usize, seed: u64) -> Vec<u32> {
+        let mut s = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut next = || {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        let mut v: Vec<u32> = (0..u32::try_from(n).unwrap()).collect();
+        for i in (1..n).rev() {
+            let j = usize::try_from(next() % (i as u64 + 1)).unwrap();
+            v.swap(i, j);
+        }
+        v
     }
 
     #[test]

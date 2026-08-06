@@ -143,6 +143,48 @@ pub enum HSide {
     Left,
 }
 
+/// 标签往哪个方向伸。
+///
+/// 氢(以及电荷、同位素)相对元素符号摆在哪 —— 四个方向。[`HSide`] 是它退化到
+/// 左右两向的样子,`East` 对应 [`HSide::Right`],`West` 对应 [`HSide::Left`]。
+///
+/// # 为什么要有上下两向
+///
+/// 对乙酰氨基酚的酰胺氮:两根键一根指左上、一根指右上,横向分量几乎抵消。只有
+/// 左右两向可选时,氢只能挤到某一根键的下面,而**正下方整片是空的**。
+///
+/// 方向由 [`crate::render::label_dir`] 按键的走向定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabelDir {
+    /// 氢在符号右边,`NH2`
+    East,
+    /// 氢在符号左边,`H2N`
+    West,
+    /// 氢在符号**上方**,另起一行
+    North,
+    /// 氢在符号**下方**,另起一行
+    South,
+}
+
+impl LabelDir {
+    /// 退化成左右两向:上下一律当作 `East`。
+    ///
+    /// 竖排还没接进绘制时,方向判定先落地、行为保持不变,靠这个函数搭桥。
+    #[must_use]
+    pub fn h_side(self) -> HSide {
+        match self {
+            LabelDir::West => HSide::Left,
+            _ => HSide::Right,
+        }
+    }
+
+    /// 是不是竖着排。
+    #[must_use]
+    pub fn is_vertical(self) -> bool {
+        matches!(self, LabelDir::North | LabelDir::South)
+    }
+}
+
 /// 一个原子的标签。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Label {
