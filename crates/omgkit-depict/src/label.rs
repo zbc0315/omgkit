@@ -167,17 +167,6 @@ pub enum LabelDir {
 }
 
 impl LabelDir {
-    /// 退化成左右两向:上下一律当作 `East`。
-    ///
-    /// 竖排还没接进绘制时,方向判定先落地、行为保持不变,靠这个函数搭桥。
-    #[must_use]
-    pub fn h_side(self) -> HSide {
-        match self {
-            LabelDir::West => HSide::Left,
-            _ => HSide::Right,
-        }
-    }
-
     /// 是不是竖着排。
     #[must_use]
     pub fn is_vertical(self) -> bool {
