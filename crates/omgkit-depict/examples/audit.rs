@@ -959,7 +959,9 @@ fn inside_canvas(m: &MolBuilder, d: &omgkit_depict::Depiction, s: &Scene, style:
         let Some(l) = label_at(m, a, style, &d.coords) else {
             continue;
         };
-        let c = pts[a as usize] + Point2::new(l.dx * scale, 0.0);
+        // **盒心不在原子上**,横排偏 `dx`、竖排还偏 `dy`。口径向实现要:
+        // `Label::offset_canvas` 就是 `scene` 摆盒用的那一份。
+        let c = pts[a as usize] + l.offset_canvas() * scale;
         let (rx, ry) = (l.half_w * scale, l.half_h * scale);
         if c.x - rx < -0.01 || c.x + rx > s.width + 0.01 || c.y - ry < -0.01 || c.y + ry > s.height
         {
@@ -1050,8 +1052,10 @@ fn lines_clear_of_labels(
             let Some(l) = &labels[a as usize] else {
                 continue;
             };
-            // **盒心不在原子上** —— 整串朝一侧挪了 `dx`
-            let bc = pts[a as usize] + Point2::new(l.dx * scale, 0.0);
+            // **盒心不在原子上** —— 横排朝一侧挪了 `dx`,竖排还上下挪了 `dy`。
+            // 先前这里只加 `dx`,竖排一上线就按"盒心在原子上"算,盒子往上多罩
+            // 了一片实际没字的地方 —— 当场多报 4 处假阳。口径向实现要。
+            let bc = pts[a as usize] + l.offset_canvas() * scale;
             // 线本身有粗细,压边一丝不算划字
             let (hw, hh) = (
                 l.half_w * scale - style.line_width_pt,

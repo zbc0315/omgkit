@@ -38,7 +38,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use omgkit_core::{BondFlags, MolBuilder};
 
 use crate::geom::{segments_cross, Point2};
-use crate::label::{label_for, HSide};
+use crate::label::{label_for, HSide, LabelPlace};
 use crate::style::Style;
 
 /// 没有标签的骨架碳,占位半径。
@@ -237,7 +237,9 @@ pub(crate) fn radii(mol: &MolBuilder, style: &Style) -> Vec<f64> {
     (0..mol.num_atoms())
         .map(|i| {
             let a = u32::try_from(i).expect("原子数超出 u32");
-            // 氢挂哪一侧此刻还定不下来(它要看最终坐标),取两侧中更宽的那个 ——
+            // 氢挂哪一侧此刻还定不下来(它要看最终坐标)。**左右两侧其实一样宽**
+            // —— 同一个多重集,只在求和次序造成的最后一位上差一点(实测
+            // `[13CH4]`、`C[SiH3]` 会差)。`max` 留着是为了确定性,不是为了取宽的。
             // 半径宁可**偏大**:偏大只是把原子推得开一点,偏小会漏判碰撞
             // **这里仍然用"盒心在原子上"的近似,而盒心其实偏开了 `dx`**
             // (整串挪开好让元素符号落在原子位置上)。所以长的那一侧被低估约
@@ -249,11 +251,22 @@ pub(crate) fn radii(mol: &MolBuilder, style: &Style) -> Vec<f64> {
             //
             // 正解是碰撞判定直接用**偏心的盒对盒**,不是一个各向同性的半径 ——
             // 那要改 `remaining` 的判据本身,记在这里等着做。
-            [HSide::Right, HSide::Left]
-                .iter()
-                .filter_map(|s| label_for(mol, a, style, *s))
-                .map(|l| l.half_w.hypot(l.half_h))
-                .fold(BARE_RADIUS, f64::max)
+            //
+            // **竖排的那一档不进来。** 消冲突跑的时候坐标还在动,横竖之分那时
+            // 判不了(`render::label_dir` 在这个阶段没有定义,与 `label_at` 同
+            // 一个理由)。而且把竖排也算进来取最大,就是上面那条已经量过并
+            // 否掉的"各向同性取最大"。实测 ACS 下 `NH` 的外接圆:横排 0.806 em、
+            // 竖排 **0.836 em** —— 竖排几乎不改外接圆(+3.7%),它做的是把各向
+            // 异性**转了 90°**。所以对竖排原子沿用横排值,最坏方向上只差 0.05
+            // 个键长,比"取最大"那 2.3 个百分点便宜得多。
+            [
+                LabelPlace::Horizontal(HSide::Right),
+                LabelPlace::Horizontal(HSide::Left),
+            ]
+            .iter()
+            .filter_map(|s| label_for(mol, a, style, *s))
+            .map(|l| l.half_w.hypot(l.half_h))
+            .fold(BARE_RADIUS, f64::max)
         })
         .collect()
 }

@@ -21,7 +21,7 @@ use omgkit_chem::sssr::Ring;
 use omgkit_core::{BondFlags, BondOrder, MolBuilder};
 
 use crate::geom::Point2;
-use crate::label::{label_for, HSide, Label, LabelDir, Run};
+use crate::label::{label_for, HSide, Label, LabelDir, LabelPlace, Run};
 use crate::style::Style;
 use crate::Depiction;
 
@@ -59,7 +59,7 @@ pub enum Primitive {
         /// 线宽
         width: f64,
     },
-    /// 一个原子的标签,`at` 是**中心**
+    /// 标签的**一行**,`at` 是这一行的中心。竖排的标签发两条 —— 符号一条、氢一条
     Text {
         /// 中心
         at: Point2,
@@ -125,15 +125,17 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
         })
         .collect();
 
-    // 标签的字形盒,画布坐标系。**盒心不在原子上** —— 整串朝一侧挪了 `dx`,
-    // 好让元素符号落在原子位置上,见 [`Label::dx`](crate::label::Label::dx)。
+    // 标签的字形盒,**画布坐标系**。盒心不在原子上 —— 横排时整串朝一侧挪了
+    // `dx`(好让元素符号落在原子位置上),竖排时还上下挪了 `dy`。
+    // 见 [`Label::dx`](crate::label::Label::dx) 与
+    // [`Label::offset_canvas`](crate::label::Label::offset_canvas)。
     let boxes: Vec<Option<(Point2, f64, f64)>> = labels
         .iter()
         .enumerate()
         .map(|(i, l)| {
             l.as_ref().map(|l| {
                 (
-                    pts[i] + Point2::new(l.dx * scale, 0.0),
+                    pts[i] + l.offset_canvas() * scale,
                     l.half_w * scale,
                     l.half_h * scale,
                 )
@@ -256,12 +258,15 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
 
     for (i, l) in labels.iter().enumerate() {
         if let Some(l) = l {
-            // 整串朝一侧挪 `dx`,让**元素符号**落在原子位置上
-            items.push(Primitive::Text {
-                at: to_pt(depiction.coords[i]) + Point2::new(l.dx * scale, 0.0),
-                runs: l.runs.clone(),
-                size: style.atom_label_pt,
-            });
+            // 横排一行、竖排两行,由 `Label::lines` 给。每行的偏移是**布局
+            // 坐标**,落到画布上要把 y 翻过来。
+            for (off, runs) in l.lines() {
+                items.push(Primitive::Text {
+                    at: to_pt(depiction.coords[i]) + Point2::new(off.x, -off.y) * scale,
+                    runs: runs.to_vec(),
+                    size: style.atom_label_pt,
+                });
+            }
         }
     }
 
@@ -370,12 +375,15 @@ pub fn bounds(coords: &[Point2], mol: &MolBuilder, style: &Style) -> (f64, f64, 
         // 就会短一截),以及只问 `label_for` —— 共线的骨架碳是 [`label_at`] 补
         // 出来的符号,`scene` 画它,画布却没给它留地方。三处各实测踩到过
         // 2、2、4 处,`不出画布` 那条硬性质当场破。
-        let (dx, hw, hh) =
-            label_at(mol, a, style, coords).map_or((0.0, 0.0, 0.0), |l| (l.dx, l.half_w, l.half_h));
-        x0 = x0.min(p.x + dx - hw);
-        y0 = y0.min(p.y - hh);
-        x1 = x1.max(p.x + dx + hw);
-        y1 = y1.max(p.y + hh);
+        // **布局坐标**,所以 `offset()` 而不是 `offset_canvas()`。
+        let (off, hw, hh) = label_at(mol, a, style, coords)
+            .map_or((Point2::ORIGIN, 0.0, 0.0), |l| {
+                (l.offset(), l.half_w, l.half_h)
+            });
+        x0 = x0.min(p.x + off.x - hw);
+        y0 = y0.min(p.y + off.y - hh);
+        x1 = x1.max(p.x + off.x + hw);
+        y1 = y1.max(p.y + off.y + hh);
     }
     if x0 > x1 {
         return (0.0, 0.0, 0.0, 0.0);
@@ -399,10 +407,27 @@ pub fn bounds(coords: &[Point2], mol: &MolBuilder, style: &Style) -> (f64, f64, 
 /// `CH` 盒半径是 0.559 —— 布局给它留的地方不到实际的一半。这不是漏改:消冲突
 /// 跑的时候坐标还在动,"共线不共线"当时判不了,`label_at` 在那个阶段没有定义。
 pub fn label_at(mol: &MolBuilder, atom: u32, style: &Style, coords: &[Point2]) -> Option<Label> {
-    let side = h_side(mol, atom, coords);
-    label_for(mol, atom, style, side).or_else(|| {
-        is_collinear(mol, atom, coords).then(|| crate::label::label_forced(mol, atom, style, side))
+    let place = label_place(mol, atom, coords);
+    label_for(mol, atom, style, place).or_else(|| {
+        is_collinear(mol, atom, coords).then(|| crate::label::label_forced(mol, atom, style, place))
     })
+}
+
+/// 标签怎么摆:竖不竖排看几何,**左右怎么选仍归 [`h_side`]**。
+///
+/// 两件事分开是有原因的:竖排摆不成时(带电荷、同位素、自由基,见
+/// [`Label::stacked`](crate::label::Label::stacked))要回落到横排,那时左右的
+/// 选择不能丢。把上下两向一律折成 `East` 试过,全量语料 `—— 有标签在键上
+/// 塞不下` 从 1271 涨到 1356。
+pub fn label_place(mol: &MolBuilder, atom: u32, coords: &[Point2]) -> LabelPlace {
+    let dir = label_dir(mol, atom, coords);
+    if dir.is_vertical() && crate::label::can_stack(mol, atom) {
+        LabelPlace::Stacked {
+            below: dir == LabelDir::South,
+        }
+    } else {
+        LabelPlace::Horizontal(h_side(mol, atom, coords))
+    }
 }
 
 /// 氢挂哪一侧:挂在**键伸出去的反方向**,免得氢和键叠在一起。
@@ -731,9 +756,17 @@ const SQUEEZE: f64 = 0.9;
 /// 审计里 `squeezed_bonds` 就抄过一份**居中盒**的版本:实现改成偏心盒之后判据
 /// 没跟上,「有标签在键上塞不下」多报了 547 例(1818 → 1271)。同一个坑更早
 /// 还塌过一次(`canvas_pts` 抄 `bounds`,`环内双键` 炸出 1403 处假阳)。
+/// # `dir` 必须是**布局坐标**的方向(y 向上)
+///
+/// 盒竖排之后上下不再对称,`dir` 的 y 一旦反了,算出来的净空就是另一头的。
+/// 两个调用方 [`is_squeezed`] 与 `trim` **都在布局坐标里跑**(`scene` 是先
+/// `trim` 再 `to_pt`),所以谁都不用翻 y。
+///
+/// 竖排之前 `dy` 恒为 0、盒上下对称,翻不翻都一样 —— 这条口径是竖排上线时
+/// 被 `线端不压字` 逼出来的,那次翻错了 4 处。
 pub fn label_clearance(l: Option<&Label>, dir: Point2, style: &Style) -> f64 {
     l.map_or(0.0, |l| {
-        box_reach(Point2::new(-l.dx, 0.0), dir, l.half_w, l.half_h) + style.margin()
+        box_reach(l.offset() * -1.0, dir, l.half_w, l.half_h) + style.margin()
     })
 }
 
@@ -824,6 +857,12 @@ fn trim(
     lb: &Option<Label>,
     style: &Style,
 ) -> (Point2, Point2) {
+    // **`pa`/`pb` 是布局坐标**(`scene` 在 `to_pt` 之前就调了这里),所以方向
+    // 直接就是 [`label_clearance`] 要的那个系,不用翻 y。
+    //
+    // 这一处翻过一次 —— 想当然以为 `trim` 在画布上跑,加了个 `(d.x, -d.y)`。
+    // 竖排之前 `dy` 恒为 0、盒上下对称,翻不翻结果一样,所以一直没露头;
+    // 竖排一上线,`线端不压字` 当场破了 4 处。
     let d = (pb - pa).normalized();
     let (ca, cb) = (
         label_clearance(la.as_ref(), d, style),
@@ -1233,12 +1272,16 @@ mod tests {
     }
 
     /// 按规范秩排好的方向序列 —— 与原子编号无关的指纹。
-    fn dirs_by_rank(m: &MolBuilder, coords: &[Point2], ranks: &[u32]) -> Vec<LabelDir> {
+    /// 按规范秩排好的**摆法**序列 —— 与原子编号无关的指纹。
+    ///
+    /// 比 `label_place` 而不是 `label_dir`:前者把 `label_dir`、`h_side` 与
+    /// `can_stack` 三件事一起罩住,后者只罩一件。
+    fn dirs_by_rank(m: &MolBuilder, coords: &[Point2], ranks: &[u32]) -> Vec<LabelPlace> {
         let mut order: Vec<usize> = (0..m.num_atoms()).collect();
         order.sort_by_key(|i| ranks[*i]);
         order
             .iter()
-            .map(|i| label_dir(m, u32::try_from(*i).unwrap(), coords))
+            .map(|i| label_place(m, u32::try_from(*i).unwrap(), coords))
             .collect()
     }
 
@@ -1272,6 +1315,242 @@ mod tests {
                 "{smi} 的原子 {atom} 朝向不对 —— 阈值动了?"
             );
         }
+    }
+
+    #[test]
+    fn a_stacked_label_puts_the_symbol_on_the_atom_and_the_hydrogen_off_to_one_side() {
+        // 竖排的两行:符号那行必须**正落在原子上**(键接的是符号,不是整串),
+        // 氢那行在另一头。盒要把两行都罩住。
+        let m = prep("CC(=O)Nc1ccc(O)cc1");
+        let n = (0..u32::try_from(m.num_atoms()).unwrap())
+            .find(|a| m.atoms()[*a as usize].atomic_num == 7)
+            .expect("对乙酰氨基酚有一个氮");
+        for style in &Style::ALL {
+            let d = generate(&m, style);
+            let l = label_at(&m, n, style, &d.coords).expect("氮该有标签");
+            let at = l.stacked.expect("这个氮该竖排");
+            let lines = l.lines();
+            assert_eq!(lines.len(), 2, "[{}] 竖排该是两行", style.name);
+
+            // 第一行就是符号本身,而且落在原子上
+            assert_eq!(lines[0].1.len(), at);
+            assert_eq!(
+                lines[0].1.iter().map(Run::text).collect::<String>(),
+                "N",
+                "[{}] 第一行不是光一个符号",
+                style.name
+            );
+            assert!(
+                lines[0].0.x.abs() < 1e-12 && lines[0].0.y.abs() < 1e-12,
+                "[{}] 符号那一行没落在原子上,偏了 {:?}",
+                style.name,
+                lines[0].0
+            );
+
+            // 第二行是氢,而且在**下面**(键都朝上)
+            assert_eq!(
+                lines[1].1.iter().map(Run::text).collect::<String>(),
+                "H",
+                "[{}] 第二行不是氢",
+                style.name
+            );
+            assert!(
+                lines[1].0.y < 0.0,
+                "[{}] 两根键都朝上,氢那行该在下面,实际 y = {}",
+                style.name,
+                lines[1].0.y
+            );
+
+            // 盒要罩住两行。两行各占 ±半个大写字高,盒按 `offset` 偏心。
+            let c = l.offset();
+            for (off, _) in &lines {
+                assert!(
+                    (off.x - c.x).abs() <= l.half_w + 1e-9
+                        && (off.y - c.y).abs() <= l.half_h + 1e-9,
+                    "[{}] 行心 {off:?} 跑出了盒 {c:?}±({},{})",
+                    style.name,
+                    l.half_w,
+                    l.half_h
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_stacked_label_leaves_less_room_towards_the_bonds_than_away_from_them() {
+        // 竖排把盒甩到了背离键的那一侧。**朝键那一侧的净空必须变小**,
+        // 否则线会停得离字老远;背离那一侧必须变大,否则线会压到氢上。
+        //
+        // 这条守的是 `label_clearance` 的坐标系。竖排上线时这里翻错过一次
+        // y —— 想当然以为 `trim` 在画布上跑 —— 全量审计的 `线端不压字` 当场
+        // 破了 4 处。一个符号错,盒上下对称时看不出来,竖排之后就致命。
+        let m = prep("CC(=O)Nc1ccc(O)cc1");
+        let n = (0..u32::try_from(m.num_atoms()).unwrap())
+            .find(|a| m.atoms()[*a as usize].atomic_num == 7)
+            .expect("对乙酰氨基酚有一个氮");
+        for style in &Style::ALL {
+            let d = generate(&m, style);
+            let l = label_at(&m, n, style, &d.coords).expect("氮该有标签");
+            assert!(l.stacked.is_some(), "[{}] 这个氮该竖排", style.name);
+            // **布局坐标**:up 是 +y
+            let up = Point2::new(0.0, 1.0);
+            let down = Point2::new(0.0, -1.0);
+            let (cu, cd) = (
+                label_clearance(Some(&l), up, style),
+                label_clearance(Some(&l), down, style),
+            );
+            assert!(
+                cd > cu * 1.5,
+                "[{}] 氢在下面,朝下的净空 {cd:.4} 该明显大于朝上的 {cu:.4}",
+                style.name
+            );
+        }
+    }
+
+    #[test]
+    fn every_drawn_line_of_a_label_fits_inside_the_box_it_reports() {
+        // **盒与落笔是同一个 `Label` 上两条互不相干的算路。** `half_w`/`half_h`/
+        // `dy` 由 `build` 算,而 `lines()` 另算每一行摆哪 —— 全仓先前没有一条
+        // 判据把两者绑在一起。实测两个变异都能全绿溜过去:把竖排的 `half_w`
+        // 改成只按符号算(氢那行的下标就会被键画穿),把氢那行横向挪半个盒宽。
+        //
+        // 这条从 `runs` **独立重算**每一行的字形范围,再断言它落在盒里。
+        for smi in [
+            "CC(=O)Nc1ccc(O)cc1",
+            "C12C(C3C4CC5C(C(C1C3)4)O5)O2",
+            "OCC(O)C(O)C(O)C(O)C=O",
+            "CN1C=NC2=C1C(=O)N(C)C(=O)N2C",
+            "[NH4+].[Cl-]",
+            "C[SiH3]",
+        ] {
+            let m = prep(smi);
+            for style in &Style::ALL {
+                let em = style.label_size();
+                let d = generate(&m, style);
+                let g = d.drawn(&m);
+                for a in 0..u32::try_from(g.num_atoms()).unwrap() {
+                    let Some(l) = label_at(&g, a, style, &d.coords) else {
+                        continue;
+                    };
+                    let c = l.offset();
+                    for (off, runs) in l.lines() {
+                        assert!(!runs.is_empty(), "[{}] {smi} 原子 {a} 有空行", style.name);
+                        // 这一行的字形范围:横向按字宽累加,纵向大写字高再加
+                        // 上标/下标各自越出去的那点
+                        let w: f64 = runs.iter().map(Run::width_em).sum::<f64>() * em;
+                        let up = (CAP_HEIGHT_TEST / 2.0
+                            + if runs.iter().any(|r| matches!(r, Run::Sup(_))) {
+                                SUP_RISE_TEST
+                            } else {
+                                0.0
+                            })
+                            * em;
+                        let dn = (CAP_HEIGHT_TEST / 2.0
+                            + if runs.iter().any(|r| matches!(r, Run::Sub(_))) {
+                                SUB_DROP_TEST
+                            } else {
+                                0.0
+                            })
+                            * em;
+                        for (dx, dy, what) in [
+                            (off.x - w / 2.0, off.y + up, "左上"),
+                            (off.x + w / 2.0, off.y - dn, "右下"),
+                        ] {
+                            assert!(
+                                (dx - c.x).abs() <= l.half_w + 1e-9
+                                    && (dy - c.y).abs() <= l.half_h + 1e-9,
+                                "[{}] {smi} 原子 {a}({}) 的一行 {what}角 ({dx:.4},{dy:.4}) \
+                                 跑出了盒 ({:.4},{:.4})±({:.4},{:.4})",
+                                style.name,
+                                l.plain(),
+                                c.x,
+                                c.y,
+                                l.half_w,
+                                l.half_h
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 字形度量。**判据不许调实现的私有常量** —— 这几个值抄自
+    /// `label.rs` 的模块文档(字体度量表),抄错会让这条判据跟着实现一起错。
+    const CAP_HEIGHT_TEST: f64 = 0.718;
+    const SUP_RISE_TEST: f64 = 0.36;
+    const SUB_DROP_TEST: f64 = 0.14;
+
+    #[test]
+    fn a_charged_atom_does_not_stack() {
+        // 竖排要求符号那一行**只有符号**,否则整行居中会把符号推偏 —— 那正是
+        // `Label::dx` 当初要解决的问题,只是搬进了行内。带电荷/同位素/自由基
+        // 一律回落到横排,而且**左右的选择不能丢**。
+        //
+        // **先直接判 `can_stack` 这个纯函数。** 它只看分子、不看几何,所以
+        // 自由基这一条不用去凑"几何上够竖排"的样本 —— 而那种样本在语料里
+        // 一个都没有(找过:8831 个分子里没有既带氢、几何又够竖排的自由基
+        // 原子),光靠端到端的断言,`num_radical_electrons == 0` 那一条会
+        // 一直空过。
+        for (smi, atom, want) in [
+            ("CCO", 2u32, true),       // 普通羟基,能竖排
+            ("C[NH+](C)C", 1, false),  // 电荷
+            ("C[13CH](C)O", 1, false), // 同位素
+            ("C[CH2]", 1, false),      // 自由基
+            ("CN(C)C", 1, false),      // 没有氢可摆到第二行
+        ] {
+            let m = prep(smi);
+            assert_eq!(
+                crate::label::can_stack(&m, atom),
+                want,
+                "{smi} 的原子 {atom}:can_stack 该是 {want}"
+            );
+        }
+
+        // 再端到端:几何上够条件、但摆不成的,必须真的没竖排。
+        // 分子取自语料:铵盐的氮两根键都朝上,几何上够竖排的条件。
+        let mut found = 0usize;
+        for smi in [
+            "C[NH+](C)CCO",
+            "CC(=O)[NH2+]c1ccccc1",
+            "C[13CH](C)O",
+            "C[CH2]",
+            "O[CH]c1ccccc1",
+        ] {
+            let m = prep(smi);
+            for style in &Style::ALL {
+                let d = generate(&m, style);
+                for a in 0..u32::try_from(m.num_atoms()).unwrap() {
+                    let at = m.atoms()[a as usize];
+                    // **自由基也要进来。** 先前的跳过条件漏了它,于是
+                    // `can_stack` 里 `num_radical_electrons == 0` 那一条一条
+                    // 判据都没有 —— 删掉它 121 条全绿,而真回归了就是那个 `*`
+                    // 段静默消失。
+                    if at.formal_charge == 0 && at.isotope == 0 && at.num_radical_electrons == 0 {
+                        continue;
+                    }
+                    let Some(l) = label_at(&m, a, style, &d.coords) else {
+                        continue;
+                    };
+                    if !l.plain().contains('H') {
+                        continue;
+                    }
+                    if label_dir(&m, a, &d.coords).is_vertical() {
+                        found += 1;
+                    }
+                    assert!(
+                        l.stacked.is_none(),
+                        "[{}] {smi} 的原子 {a}({}) 竖排了",
+                        style.name,
+                        l.plain()
+                    );
+                }
+            }
+        }
+        assert!(
+            found > 0,
+            "这批分子里没有几何上够竖排条件的带电荷原子,判据是空过的"
+        );
     }
 
     #[test]
@@ -1391,12 +1670,13 @@ mod tests {
         // `[NH2+]` 白切 0.39 —— 快四成键长的空白。
         let style = &Style::ACS_1996;
         let m = prep("C=CC(=[NH2+])N");
-        let l = label_for(&m, 3, style, HSide::Right).expect("[NH2+] 该有标签");
+        let l =
+            label_for(&m, 3, style, LabelPlace::Horizontal(HSide::Right)).expect("[NH2+] 该有标签");
 
         // 竖直方向接近:盒边在 half_h,外接圆在 hypot(half_w, half_h)。
         // 盒心横向偏开了 `dx`,而竖直方向不受影响 —— 上下边仍在 ±half_h。
         let up = Point2::new(0.0, 1.0);
-        let reach = box_reach(Point2::new(-l.dx, 0.0), up, l.half_w, l.half_h);
+        let reach = box_reach(l.offset() * -1.0, up, l.half_w, l.half_h);
         assert!(
             (reach - l.half_h).abs() < 1e-9,
             "竖直方向该切到盒的上边 {},实得 {reach}",
@@ -1430,8 +1710,7 @@ mod tests {
         // 横向接近时两者本来就该一致(盒边正是 half_w),别把这条改坏
         let right = Point2::new(1.0, 0.0);
         assert!(
-            (box_reach(Point2::new(-l.dx, 0.0), right, l.half_w, l.half_h) - (l.half_w + l.dx))
-                .abs()
+            (box_reach(l.offset() * -1.0, right, l.half_w, l.half_h) - (l.half_w + l.dx)).abs()
                 < 1e-9,
             "横向该切到盒的右边"
         );
@@ -1517,7 +1796,7 @@ mod tests {
                             continue;
                         };
                         // **盒心不在原子上** —— 整串朝一侧挪了 `dx`
-                        let bc = c + Point2::new(l.dx * scale, 0.0);
+                        let bc = c + l.offset_canvas() * scale;
                         let inside =
                             |p: &Point2| (p.x - bc.x).abs() < hw && (p.y - bc.y).abs() < hh;
                         assert!(
@@ -1584,7 +1863,8 @@ mod tests {
         let d = generate(&m, &Style::ACS_1996);
         let style = Style::ACS_1996;
         let o = 2u32; // 氧,有标签 "OH"
-        let l = label_for(&m, o, &style, HSide::Right).expect("氧应当有标签");
+        let l =
+            label_for(&m, o, &style, LabelPlace::Horizontal(HSide::Right)).expect("氧应当有标签");
         let neighbour = m.neighbors(o).next().expect("氧连着一个碳").0;
         let (_, trimmed) = trim(
             d.coords[neighbour as usize],
@@ -1596,7 +1876,7 @@ mod tests {
         // **不能拿"离原子多远"当判据。** 盒心朝一侧挪了 `dx`(好让元素符号落在
         // 原子位置上),所以离原子远近说明不了有没有盖住字 —— 要量的是**离盒心
         // 多远**,而且要沿着键的方向比盒在那个方向上的半径。
-        let centre = d.coords[o as usize] + Point2::new(l.dx, 0.0);
+        let centre = d.coords[o as usize] + l.offset();
         let dir = (d.coords[o as usize] - d.coords[neighbour as usize]).normalized();
         let from_centre = trimmed - centre;
         // 端点在盒外:两个轴上至少有一个超出
@@ -1608,7 +1888,7 @@ mod tests {
             from_centre.x, from_centre.y, l.half_w, l.half_h
         );
         // 而且要**恰好**停在盒边外一个 margin —— 停太远就是先前那种大片空白
-        let reach = box_reach(Point2::new(-l.dx, 0.0), dir * -1.0, l.half_w, l.half_h);
+        let reach = box_reach(l.offset() * -1.0, dir * -1.0, l.half_w, l.half_h);
         let gap = trimmed.dist(d.coords[o as usize]);
         assert!(
             (gap - (reach + style.margin())).abs() < 1e-9,

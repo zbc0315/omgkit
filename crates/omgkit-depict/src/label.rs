@@ -20,6 +20,7 @@
 
 use omgkit_core::{element, AtomFlags, MolBuilder};
 
+use crate::geom::Point2;
 use crate::style::Style;
 
 /// 上标/下标相对正文的字号比例。排版通例,与期刊规范无关,故不进 [`Style`]。
@@ -112,7 +113,7 @@ pub enum Run {
 }
 
 impl Run {
-    fn text(&self) -> &str {
+    pub(crate) fn text(&self) -> &str {
         match self {
             Run::Normal(s) | Run::Sub(s) | Run::Sup(s) => s,
         }
@@ -126,7 +127,7 @@ impl Run {
     }
 
     /// 宽度,单位 em。
-    fn width_em(&self) -> f64 {
+    pub(crate) fn width_em(&self) -> f64 {
         self.text().chars().map(glyph_width).sum::<f64>() * self.scale()
     }
 }
@@ -197,6 +198,31 @@ pub struct Label {
     /// 所以把整串按这个量挪开,让符号回到原子上。盒还是那个盒,只是**盒心不在
     /// 原子上**了 —— 裁键、判碰撞都要跟着算,见 `render::trim` 与 `refine::radii`。
     pub dx: f64,
+    /// 同 [`Label::dx`],纵向的那一半,**布局坐标(y 向上)**。
+    ///
+    /// 横排时恒为 0。竖排时符号自己占一行、氢占另一行,盒心因此上下偏开。
+    ///
+    /// # 坐标系
+    ///
+    /// `Point2` 在本库同时用于布局系与画布系。**别直接读这个字段做几何** ——
+    /// 用 [`Label::offset`](Label::offset)(布局系)或
+    /// [`Label::offset_canvas`](Label::offset_canvas)(画布系),哪个系在调用点
+    /// 就看得见了。
+    pub dy: f64,
+    /// 竖排时第二行(氢那行)相对符号行的纵向偏移,**布局坐标**。横排为 0。
+    ///
+    /// 负数表示氢在符号下面。
+    pub gap: f64,
+    /// 竖排时,氢那几段从第几段开始;`None` 表示横排。
+    ///
+    /// # 只有"纯符号 + 氢"才竖排
+    ///
+    /// 带电荷、同位素、自由基的标签一律横排。竖排要求**符号那一行只有符号**,
+    /// 否则整行居中会把符号推偏 —— 那正是 [`Label::dx`] 当初要解决的问题,
+    /// 只是搬进了行内。全量语料实测:3202 个竖排候选里 3118 个(**97.4%**)是
+    /// 纯符号 + 氢,带电荷的只有 84 个,同位素与自由基一个都没有。为这 2.6%
+    /// 引入"每行各自的 dx"不划算。
+    pub stacked: Option<usize>,
 }
 
 impl Label {
@@ -205,6 +231,67 @@ impl Label {
     pub fn plain(&self) -> String {
         self.runs.iter().map(Run::text).collect()
     }
+
+    /// 盒心相对原子位置的偏移,**布局坐标(y 向上)**。
+    #[must_use]
+    pub fn offset(&self) -> Point2 {
+        Point2::new(self.dx, self.dy)
+    }
+
+    /// 盒心相对原子位置的偏移,**画布坐标(y 向下)**。
+    #[must_use]
+    pub fn offset_canvas(&self) -> Point2 {
+        Point2::new(self.dx, -self.dy)
+    }
+
+    /// 要落笔的每一行:`(相对原子位置的偏移(布局坐标), 这一行的字段)`。
+    ///
+    /// 横排只有一行。竖排两行 —— 符号一行、氢一行,**两行都横向居中在原子上**。
+    ///
+    /// # 为什么由这里给行,而不是让 `Primitive::Text` 支持多行
+    ///
+    /// 一行一个 `Text` 图元,`Primitive`、`svg`、`raster` 三处一个字都不用改。
+    /// SVG 里换行还得显式给第二行 `x`(只给 `dy` 会沿上一行的笔位继续往右排,
+    /// 这个坑在 `svg.rs` 里已经踩过一次),发两个图元连这个都绕开了。
+    #[must_use]
+    pub fn lines(&self) -> Vec<(Point2, &[Run])> {
+        match self.stacked {
+            None => vec![(Point2::new(self.dx, 0.0), &self.runs[..])],
+            Some(at) => {
+                // 符号那一行落在原子上(偏移 0),氢那一行在 `gap` 处。
+                vec![
+                    (Point2::new(0.0, 0.0), &self.runs[..at]),
+                    (Point2::new(0.0, self.gap), &self.runs[at..]),
+                ]
+            }
+        }
+    }
+}
+
+/// 标签怎么摆:横着(氢在符号左/右)还是竖着(氢在符号上/下)。
+///
+/// 由 [`crate::render::label_at`] 定 —— 竖不竖排看几何([`crate::render::label_dir`]),
+/// 而**左右怎么选仍归 [`crate::render::h_side`]**。两件事分开:竖排摆不成时
+/// (带电荷等,见 [`Label::stacked`])要回落到横排,那时左右的选择不能丢。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabelPlace {
+    /// 横排,氢在符号的哪一侧
+    Horizontal(HSide),
+    /// 竖排。`below` 为真时氢在符号**下面**。
+    Stacked { below: bool },
+}
+
+/// 这个原子的标签能不能竖排。
+///
+/// 要求:有氢可摆到第二行,且**符号那一行只有符号** —— 带电荷、同位素、
+/// 自由基一律不竖排,理由见 [`Label::stacked`]。
+#[must_use]
+pub fn can_stack(mol: &MolBuilder, atom: u32) -> bool {
+    let a = mol.atoms()[atom as usize];
+    total_hs(mol, atom) > 0
+        && a.formal_charge == 0
+        && a.isotope == 0
+        && a.num_radical_electrons == 0
 }
 
 /// 一个原子该显示什么标签。返回 `None` 表示**不画**(骨架碳)。
@@ -214,7 +301,7 @@ impl Label {
 /// 中性、无同位素、无自由基、且**至少连着一个重原子**的碳不画 —— 那是骨架的
 /// 惯例。孤立的碳(甲烷)要画成 `CH4`,否则图上什么都没有。
 #[must_use]
-pub fn label_for(mol: &MolBuilder, atom: u32, style: &Style, h_side: HSide) -> Option<Label> {
+pub fn label_for(mol: &MolBuilder, atom: u32, style: &Style, place: LabelPlace) -> Option<Label> {
     let a = mol.atoms()[atom as usize];
     let plain_carbon = a.atomic_num == 6
         && a.formal_charge == 0
@@ -224,7 +311,7 @@ pub fn label_for(mol: &MolBuilder, atom: u32, style: &Style, h_side: HSide) -> O
     if plain_carbon {
         return None;
     }
-    Some(build(mol, atom, style, h_side))
+    Some(build(mol, atom, style, place))
 }
 
 /// 同 [`label_for`],但**骨架碳也画出来**。
@@ -235,16 +322,16 @@ pub fn label_for(mol: &MolBuilder, atom: u32, style: &Style, h_side: HSide) -> O
 /// 像顺式二烯。RDKit 也是这么办的(`DrawMol::getAtomSymbol`,注释原话是
 /// "allenes need a C")。
 #[must_use]
-pub fn label_forced(mol: &MolBuilder, atom: u32, style: &Style, h_side: HSide) -> Label {
-    build(mol, atom, style, h_side)
+pub fn label_forced(mol: &MolBuilder, atom: u32, style: &Style, place: LabelPlace) -> Label {
+    build(mol, atom, style, place)
 }
 
-fn build(mol: &MolBuilder, atom: u32, style: &Style, h_side: HSide) -> Label {
+fn build(mol: &MolBuilder, atom: u32, style: &Style, place: LabelPlace) -> Label {
     let a = mol.atoms()[atom as usize];
     let hs = total_hs(mol, atom);
     let symbol = element::by_atomic_num(a.atomic_num).map_or("*", |e| e.symbol);
+    let em = style.label_size(); // 一个 em 等于多少个键长
 
-    let mut runs: Vec<Run> = Vec::new();
     let h_runs = |runs: &mut Vec<Run>| {
         if hs > 0 {
             runs.push(Run::Normal("H".into()));
@@ -253,6 +340,57 @@ fn build(mol: &MolBuilder, atom: u32, style: &Style, h_side: HSide) -> Label {
             }
         }
     };
+
+    // ---- 竖排 ----
+    // **摆不成竖排就回落横排。** 先前这里是 `debug_assert`:release 下竖排那支
+    // 只 push 符号与氢,电荷、同位素、自由基一个都不发 —— `[NH4+]` 会画成
+    // `NH4`,那个 `+` 静静没了;0 个氢时第二行是空切片,还会发一条空的
+    // `Primitive::Text`。而 `LabelPlace` 与 `label_for` 都是公开的,调用方给什么
+    // 由不得我们。回落到 `Right` 与打平时的默认一致。
+    let place = match place {
+        LabelPlace::Stacked { .. } if !can_stack(mol, atom) => LabelPlace::Horizontal(HSide::Right),
+        other => other,
+    };
+    if let LabelPlace::Stacked { below } = place {
+        let mut runs: Vec<Run> = vec![Run::Normal(symbol.into())];
+        let at = runs.len();
+        h_runs(&mut runs);
+
+        let sym_w = Run::Normal(symbol.into()).width_em();
+        let h_w: f64 = runs[at..].iter().map(Run::width_em).sum();
+        let h_has_sub = runs[at..].iter().any(|r| matches!(r, Run::Sub(_)));
+
+        // 两行中心的距离。留白照 RDKit 的 1.1 倍字高;**只有氢在上面时**才要
+        // 再让开下标下沉的那一点 —— 那时下标正对着符号。氢在下面时下标朝外,
+        // 让了纯属白撑高:实测 `NH₂` 两行字盒之间的白会从 0.050 涨到 0.147
+        // 个键长,比 `NH` 宽出三倍,看着就是两行没对齐。
+        let gap_em = CAP_HEIGHT * 1.1 + if h_has_sub && !below { SUB_DROP } else { 0.0 };
+        let gap = if below { -gap_em * em } else { gap_em * em };
+
+        // 盒:符号行占 ±CAP/2,氢行以 `gap` 为中心、占 ±CAP/2(下标再多一点)
+        let half_cap = CAP_HEIGHT / 2.0 * em;
+        let h_low = gap - half_cap - if h_has_sub { SUB_DROP * em } else { 0.0 };
+        let h_high = gap + half_cap;
+        let top = half_cap.max(h_high);
+        let bottom = (-half_cap).min(h_low);
+
+        return Label {
+            runs,
+            half_w: sym_w.max(h_w) * em / 2.0,
+            half_h: (top - bottom) / 2.0,
+            // 两行都横向居中在原子上,所以横向不用挪
+            dx: 0.0,
+            dy: (top + bottom) / 2.0,
+            gap,
+            stacked: Some(at),
+        };
+    }
+
+    // ---- 横排 ----
+    let LabelPlace::Horizontal(h_side) = place else {
+        unreachable!("竖排在上面已经返回")
+    };
+    let mut runs: Vec<Run> = Vec::new();
 
     // 记下元素符号在整串里的位置 —— 键要接到**符号**上,不是接到整串的中心
     let mut before_sym_em = 0.0_f64;
@@ -288,7 +426,6 @@ fn build(mol: &MolBuilder, atom: u32, style: &Style, h_side: HSide) -> Label {
         ));
     }
 
-    let em = style.label_size(); // 一个 em 等于多少个键长
     let width_em: f64 = runs.iter().map(Run::width_em).sum();
 
     // 高度:正文占一个大写字高,上标向上、下标向下各多占一点
@@ -308,6 +445,9 @@ fn build(mol: &MolBuilder, atom: u32, style: &Style, h_side: HSide) -> Label {
         half_w: width_em * em / 2.0,
         half_h: top.max(bottom) * em,
         dx,
+        dy: 0.0,
+        gap: 0.0,
+        stacked: None,
     }
 }
 
@@ -349,7 +489,7 @@ mod tests {
 
     fn plain(smi: &str, atom: u32, side: HSide) -> Option<String> {
         let m = prep(smi);
-        label_for(&m, atom, &Style::ACS_1996, side).map(|l| l.plain())
+        label_for(&m, atom, &Style::ACS_1996, LabelPlace::Horizontal(side)).map(|l| l.plain())
     }
 
     #[test]
@@ -403,7 +543,7 @@ mod tests {
                 .symbol;
             for style in &Style::ALL {
                 for side in [HSide::Right, HSide::Left] {
-                    let Some(l) = label_for(&m, atom, style, side) else {
+                    let Some(l) = label_for(&m, atom, style, LabelPlace::Horizontal(side)) else {
                         continue;
                     };
                     let em = style.label_size();
@@ -435,9 +575,21 @@ mod tests {
         // 包围盒必须随内容变。写成常数不会报错,只会让所有标签按同一个尺寸
         // 避让 —— `I` 和 `W` 的实际宽度差三倍多
         let m = prep("NCC");
-        let n = label_for(&m, 0, &Style::ACS_1996, HSide::Right).unwrap();
+        let n = label_for(
+            &m,
+            0,
+            &Style::ACS_1996,
+            LabelPlace::Horizontal(HSide::Right),
+        )
+        .unwrap();
         let m2 = prep("[NH4+]");
-        let nh4 = label_for(&m2, 0, &Style::ACS_1996, HSide::Right).unwrap();
+        let nh4 = label_for(
+            &m2,
+            0,
+            &Style::ACS_1996,
+            LabelPlace::Horizontal(HSide::Right),
+        )
+        .unwrap();
         assert!(
             nh4.half_w > n.half_w,
             "NH4+ 应当比 NH2 宽:{} vs {}",
@@ -455,8 +607,20 @@ mod tests {
         // 占的键长比例是 ChemDraw 默认的 2.08 倍(14.4 pt 键 vs 30 pt 键)。
         // 两边若一样大,那把 Style 传进标签就是白传,消冲突也就无从区分规范。
         let m = prep("NCC");
-        let acs = label_for(&m, 0, &Style::ACS_1996, HSide::Right).unwrap();
-        let cd = label_for(&m, 0, &Style::CHEMDRAW_DEFAULT, HSide::Right).unwrap();
+        let acs = label_for(
+            &m,
+            0,
+            &Style::ACS_1996,
+            LabelPlace::Horizontal(HSide::Right),
+        )
+        .unwrap();
+        let cd = label_for(
+            &m,
+            0,
+            &Style::CHEMDRAW_DEFAULT,
+            LabelPlace::Horizontal(HSide::Right),
+        )
+        .unwrap();
         assert_eq!(acs.plain(), cd.plain(), "文本本身与规范无关");
         let ratio = acs.half_w / cd.half_w;
         assert!(
