@@ -291,14 +291,24 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
 /// **一张图由分子自己决定**。实测:阿司匹林、萘、吡啶都会变。
 ///
 /// 所以先把原子按规范秩重排、键按新编号排序,在这个副本上凯库勒化,再把键级
-/// 映回原来的键号。规范秩与写法无关,于是选出的那套单双键也与写法无关。
+/// 映回原来的键号。
+///
+/// # 秩必须与坐标用的是同一个
+///
+/// 这里先前调的是 `canonical_ranks`,而坐标那边已经换成了
+/// [`crate::ranks_of`]。**两套规范标号并存,头号契约就只能靠"它们碰巧不打架"
+/// 兜着** —— 一旦某个分子的两套标号差一个非平凡自同构,双键相对坐标就会整体
+/// 挪一圈,而线条本身看不出毛病。`canonical_ranks` 的深层平局是任取的,这一点
+/// 语料第 573 行已经证过。
+///
+/// 换过来的代价是零:实测全量语料输出**逐字节相同**。
 ///
 /// 凯库勒化失败(比如芳香体系里有通配原子)时原样返回分子自己的键级 ——
 /// 那时芳香环会画成一圈单线,难看但不假装成功。
 #[must_use]
 pub fn drawn_orders(mol: &MolBuilder) -> Vec<BondOrder> {
     let plain = || mol.bonds().iter().map(|b| b.order).collect::<Vec<_>>();
-    let ranks = omgkit_io::canon::canonical_ranks(mol);
+    let ranks = crate::ranks_of(mol);
     let mut order: Vec<usize> = (0..mol.num_atoms()).collect();
     order.sort_by_key(|i| (ranks[*i], *i));
     let mut pos = vec![0u32; mol.num_atoms()];

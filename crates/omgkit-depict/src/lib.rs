@@ -27,8 +27,7 @@
 //! # 一张图由它自己决定,不由它被写成什么样决定
 //!
 //! 同一个分子的任何 SMILES 写法给出**全等**的图。布局的每一处平局都按
-//! [`canonical_ranks`](omgkit_io::canon::canonical_ranks) 打破,不看原子的存储
-//! 下标。这一条有判据守着。
+//! [`ranks_of`] 打破,不看原子的存储下标。这一条有判据守着。
 //!
 //! # 画不好的地方会说出来
 //!
@@ -36,6 +35,107 @@
 //! [`Depiction::degraded`] 与 [`Depiction::unresolved`] 里,不假装成功。
 
 #![allow(missing_docs)]
+
+/// 布局用的原子秩:**先按对称等价类,类内再按规范 SMILES 的输出次序**。
+///
+/// 不是 [`canonical_ranks`](omgkit_io::canon::canonical_ranks) —— 那一个的
+/// 深层平局是任取的。
+///
+/// # `canonical_ranks` 在哪一步失守
+///
+/// 它自己的模块文档写着「**更深层次的并列仍是任取**」:`break_all_ties` 把每个
+/// 还没分开的格里**存储序最靠前**的那个原子劈出去。对大多数分子这不要紧(细化
+/// 早就分完了),可一旦剩下真正的对称,秩就跟着写法走。
+///
+/// 这不是理论上的。**内消旋分子最吃亏**:1-乙炔基-4-苯基环己醇(语料第 573 行)
+/// 有一个穿过 C1、C4 的镜面,两条环支路**构造上等价、构型上相反**。1-WL 细化
+/// 分不开它们 —— 立体宇称是相对邻居的**等价类**算的,镜面下不变。于是任取一头,
+/// 两种写法把楔形画到了相反的方向;两张图都对,但不是同一张。
+///
+/// **它们并不真的等价** —— 这一点是修法能成立的前提,值得说死。把两种写法各按
+/// 自己的 `canonical_ranks` 写成规范风格的串:
+///
+/// ```text
+/// 写法 1: C#C[C@@]1(CC[C@@H](CC1)c1ccccc1)O
+/// 写法 2: C#C[C@] 1(CC[C@H] (CC1)c1ccccc1)O
+/// ```
+///
+/// 骨架逐字相同,**每一个立体标记都翻了** —— 两套标号差的是一个**反自同构**
+/// (镜面),不是自同构。若真是自同构下等价,两串会完全一样,那么"遍历起点取
+/// 字典序最小"也同样分不开,本函数就白写了。正因为不等价,取最小串把这个自由度
+/// 消掉了。
+///
+/// # 为什么是"类在前、序在后",不是直接用输出次序
+///
+/// 两种秩的**语义不同**,这一点是实测撞出来的:
+///
+/// - [`symmetry_classes`](omgkit_io::canon::symmetry_classes) 是 1-WL 细化的
+///   结果 —— 类编号反映**结构角色**,布局的启发式吃的正是这个。
+/// - [`atom_order`](omgkit_io::smiles::Written::atom_order) 是规范 SMILES 的
+///   **DFS 输出序** —— 唯一、含立体,但结构上是任意的。
+///
+/// 直接拿输出次序当秩(试过,全量实测):头号契约降到 2,可**键交叉从 50 涨到
+/// 78**,重跑模板生成器也只收回到 70。布局把"秩小"当"重要",而 DFS 序不是那个
+/// 意思。
+///
+/// 分两级就两头都拿到了:主键仍是细化出来的类(结构语义原样保留),**只有类内
+/// 那点任取被换成规范次序**。
+///
+/// # 三个方案的全量对照
+///
+/// 8831 分子 × 2 规范 × 30 种写法,**三列都用同一张(旧)模板表**,好把"换秩"
+/// 这一件事单独看清:
+///
+/// | | `canonical_ranks` | 纯输出次序 | **类 + 输出次序** |
+/// |---|---:|---:|---:|
+/// | **写法无关(头号契约)** | 9 | 2 | **3** |
+/// | 其中有键交叉 | 50 | 78 | **48** |
+/// | 干净 | 16191 | 16169 | **16192** |
+/// | 有未解冲突 | 1131 | 1150 | **1130** |
+/// | 标签塞不下 | 859 | 846 | **858** |
+/// | 键角不过窄 | 180 / 16191 | — | **181 / 16192** |
+/// | 硬性质其余八条 | 基准 | 基准 | **一处没动** |
+/// | 外部判官 | 496 / 0 | 496 / 0 | **496 / 0** |
+///
+/// `键角不过窄` 那一格不是新缺陷,是判据的适用范围变大了(一个分子变干净了,
+/// 首次进入这条判据)—— 分母也同步 +1,细节见 `harness/README.md`。
+///
+/// 取第三列:**头号契约降三分之二,而质量指标全部持平或略好**,不是拿别处换的。
+///
+/// 换秩之后模板表跟着重生成了(否则「重跑逐字节相同」这条验收作废),那一步
+/// 另有代价 —— 见 `harness/README.md`。
+///
+/// # 一定要与 [`hydrogens::with_stereo_hs`] 用同一个
+///
+/// 补出来的氢按秩排序追加,它若与这里的秩不同源,同一个分子换种写法补出来的
+/// 氢就会拿到不同的原子号 —— 后面整条管线跟着变。
+#[must_use]
+pub fn ranks_of(mol: &omgkit_core::MolBuilder) -> Vec<u32> {
+    // 细化到不动点的对称等价类 —— 与写法无关,而且**保住了结构语义**
+    let classes = omgkit_io::canon::symmetry_classes(mol);
+    // 规范 SMILES 的输出次序 —— 唯一,含立体,只用来打破类内的平局
+    let w = omgkit_io::canon::canonical_smiles(mol);
+    // **写不全的话,漏掉的原子会静默留在 `pos = 0`**,与类内第一个并列,于是
+    // 那一处平局退回存储序 —— 正是这个函数要消掉的东西。实测全语料(含补氢
+    // 之后)0 个分子写不全,但这条前提本来没人守。
+    debug_assert_eq!(
+        w.atom_order.len(),
+        mol.num_atoms(),
+        "规范 SMILES 没把所有原子写出来,类内平局会退回存储序"
+    );
+    let mut pos = vec![0u32; mol.num_atoms()];
+    for (i, a) in w.atom_order.iter().enumerate() {
+        pos[*a as usize] = u32::try_from(i).expect("原子数超出 u32");
+    }
+    let mut order: Vec<u32> =
+        (0..u32::try_from(mol.num_atoms()).expect("原子数超出 u32")).collect();
+    order.sort_by_key(|a| (classes[*a as usize], pos[*a as usize]));
+    let mut r = vec![0u32; mol.num_atoms()];
+    for (i, a) in order.iter().enumerate() {
+        r[*a as usize] = u32::try_from(i).expect("原子数超出 u32");
+    }
+    r
+}
 
 pub mod chains;
 pub mod geom;
@@ -179,7 +279,7 @@ pub(crate) fn generate_with(
     let grown = (!added.is_empty()).then(|| added.apply(mol));
     let mol = grown.as_ref().unwrap_or(mol);
 
-    let ranks = omgkit_io::canon::canonical_ranks(mol);
+    let ranks = ranks_of(mol);
 
     // **配位键在几何上就是一根线。** 环感知按化学口径把配位键排除在环外
     // (`omgkit_chem::sssr` 的约定),而布局是几何,照那个口径走的话
@@ -345,6 +445,96 @@ mod tests {
                 let keys: Vec<Vec<i64>> = ws.iter().map(|s| shape_key(s, style)).collect();
                 for (w, k) in ws.iter().zip(&keys).skip(1) {
                     assert_eq!(&keys[0], k, "[{}] {w} 与 {} 形状不同", style.name, ws[0]);
+                }
+            }
+        }
+    }
+
+    /// 完整的图元指纹 —— 连楔形的方向都比。`shape_key` 只比两两距离,
+    /// 坐标一模一样而楔形互换的那一类它看不见。
+    fn scene_key(smi: &str, style: &Style) -> Vec<String> {
+        let m = prep(smi);
+        let d = generate(&m, style);
+        let q = |p: Point2| format!("{:.3},{:.3}", p.x, p.y);
+        let mut v: Vec<String> = render::scene(&m, &d, style)
+            .items
+            .iter()
+            .map(|it| match it {
+                render::Primitive::Line { from, to, .. } => {
+                    let (x, y) = (q(*from), q(*to));
+                    // 线不分方向 —— 谁是起点取决于键的 begin/end
+                    if x <= y {
+                        format!("L {x} {y}")
+                    } else {
+                        format!("L {y} {x}")
+                    }
+                }
+                // 楔形分方向:窄端宽端不是一回事
+                render::Primitive::Wedge { from, to, .. } => format!("W {} {}", q(*from), q(*to)),
+                render::Primitive::Hash { from, to, .. } => format!("H {} {}", q(*from), q(*to)),
+                // **文本连内容一起比。** 只比落点的话,`OH` 变成 `HO`、
+                // 竖排翻成横排这类退化看不见 —— 而那正是坐标全同、图元不同的
+                // 另一大类。
+                render::Primitive::Text { at, runs, .. } => format!("T {} {runs:?}", q(*at)),
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn a_mirror_symmetric_molecule_gets_the_same_wedges_whichever_way_it_is_written() {
+        // **头号契约里最隐蔽的一档。** 这些分子换种写法之后**坐标逐字节相同**,
+        // 差的只是楔形与虚楔互换 —— `shape_key` 那条判据完全看不见,得比整份
+        // 图元。
+        //
+        // 根子在 `canonical_ranks` 的深层平局是任取的,而**内消旋分子最吃亏**:
+        // 1-乙炔基-4-苯基环己醇有一个穿过 C1、C4 的镜面,两条环支路构造上等价、
+        // 构型上相反,1-WL 细化分不开,于是任取一头 —— 两张图都对,但不是同
+        // 一张。修法见 [`ranks_of`]。
+        //
+        // 变异验证:把 `ranks_of` 换回 `canonical_ranks`,这条当场红。
+        let groups = [
+            // 573:非手性,楔形/虚楔互换
+            vec![
+                "C(#C)[C@@]1(CC[C@H](C2=CC=CC=C2)CC1)O",
+                "C1C[C@H](CC[C@@]1(O)C#C)c1ccccc1",
+            ],
+            // 2553:笼状胺,坐标多重集相同而线连在不同的点对之间
+            vec!["C1CN2CN1CN3CCN(C2)C3", "C1N2CN(CN3CCN(C2)C3)C1"],
+        ];
+        // **先证明这几对写法真的换了存储序。** 不然改写退化成恒等,这条判据就
+        // 静悄悄地空过了 —— `audit.rs` 的搅拌器为这个失效模式专门立过案(旧那个
+        // 乘法哈希有 10.85% 的改写原样返回)。
+        for ws in &groups {
+            let seqs: Vec<Vec<(u8, u8)>> = ws
+                .iter()
+                .map(|s| {
+                    let m = prep(s);
+                    (0..m.num_atoms())
+                        .map(|i| {
+                            let a = m.atoms()[i];
+                            (a.atomic_num, a.num_explicit_hs + a.num_implicit_hs)
+                        })
+                        .collect()
+                })
+                .collect();
+            assert!(
+                seqs[1..].iter().any(|s| *s != seqs[0]),
+                "{} 与 {} 的存储序一模一样,这一组验不了写法无关",
+                ws[0],
+                ws[1]
+            );
+        }
+        for style in &Style::ALL {
+            for ws in &groups {
+                let keys: Vec<Vec<String>> = ws.iter().map(|s| scene_key(s, style)).collect();
+                for (w, k) in ws.iter().zip(&keys).skip(1) {
+                    assert_eq!(
+                        &keys[0], k,
+                        "[{}] {w} 与 {} 画出来的图元不同",
+                        style.name, ws[0]
+                    );
                 }
             }
         }
