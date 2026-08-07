@@ -983,7 +983,7 @@ mod generator {
     /// 试过的骨架级代理指标(第二档换成它们,在 187 个分子上量整分子交叉/未解):
     /// 键长偏差 92/329、最近原子距离 92/339、靠太近的原子对数 92/337、
     /// 共线原子数 92/333、回转半径 80/300 —— **整分子打分 60/226**。
-    type MolScore = (usize, usize, usize, usize, usize);
+    type MolScore = (usize, usize, usize, usize, usize, usize);
 
     /// 拿真实分子给一个候选打分:`(交叉, 未解冲突, 原子重合, 标签塞不下, 骨架 180°)`。
     ///
@@ -991,7 +991,7 @@ mod generator {
     /// 标签塞不下从 49 涨到 61**;补上之后前三档一处不掉,这两档反而好过现状
     /// (198 / 44)。
     fn score_on_molecules(mols: &[String], skel: &str, coords: &[(f64, f64)]) -> MolScore {
-        let mut out: MolScore = (0, 0, 0, 0, 0);
+        let mut out: MolScore = (0, 0, 0, 0, 0, 0);
         for smi in mols {
             let Ok(mut m) = omgkit_io::smiles::parse(smi) else {
                 continue;
@@ -1013,6 +1013,38 @@ mod generator {
                 // 34→30(变好),而全量审计的键交叉 40→**44**(变坏)。
                 // **优化的量必须与报告的量是同一个。**
                 out.0 += usize::from(!d.crossings.is_empty());
+                // **取代基挤到另一根键上**,与交叉同属"读错结构"那一类:
+                // 两根键只差几度,画出来就是一根,读者会整个漏掉一个取代基。
+                //
+                // 这一档是**看图看出来的** —— 樟脑的偕二甲基塌成一根,而当时
+                // 所有指标都说没事(`未解冲突` 按原子间距离判,挤成 6° 的两个
+                // 原子相距 0.10 个键长,够不着阈值)。实测把它接进来之前,全量
+                // 语料从 15 个分子 62 处涨到了 38 个分子 156 处,没有一条指标
+                // 报得出来。
+                const CRAMPED: f64 = 15.0;
+                let mut cramped = 0usize;
+                for at in 0..u32::try_from(mol.num_atoms()).expect("原子数超出 u32") {
+                    let here = d.coords[at as usize];
+                    let mut angs: Vec<f64> = mol
+                        .neighbors(at)
+                        .map(|(nb, _)| {
+                            (d.coords[nb as usize] - here)
+                                .angle()
+                                .to_degrees()
+                                .rem_euclid(360.0)
+                        })
+                        .collect();
+                    if angs.len() < 3 {
+                        continue;
+                    }
+                    angs.sort_by(|x, y| x.partial_cmp(y).expect("角度不会是 NaN"));
+                    for k in 0..angs.len() {
+                        if (angs[(k + 1) % angs.len()] - angs[k]).rem_euclid(360.0) < CRAMPED {
+                            cramped += 1;
+                        }
+                    }
+                }
+                out.5 += usize::from(cramped > 0);
                 out.1 += usize::from(!d.unresolved.is_empty());
                 // **阈值与 `audit.rs::no_atom_sits_on_another` 同口径(0.05 个
                 // 键长)。** 先前写的是 1e-6,严了五万倍 —— 实测 864 个候选里
@@ -1112,7 +1144,32 @@ mod generator {
                 let flat = flatten(&p, ranks);
                 (score_on_molecules(mols, skel, &flat), q, p)
             })
-            .min_by(|x, y| (x.0, &x.1).cmp(&(y.0, &y.1)))
+            // # 次序:挤压 → 交叉 → 冲突 → 重合 → 塞不下 → 共线 → `Quality`
+            //
+            // **挤压排第一,连交叉都排在它后面。** 本库明写过的轻重是"共线可以
+            // 补符号(渲染会给它补一个元素符号,读者还看得见),交叉会让人读错"
+            // —— 而取代基挤成一根是**读错那一类,且没有任何补救**:那个原子在
+            // 图上彻底消失,没有符号可补。
+            //
+            // 三种次序在全量语料上实测:
+            //
+            // | 排序 | 交叉 | 挤压 | 共线 180° |
+            // |---|---:|---:|---:|
+            // | 旧表(按骨架挑) | 62 | ~30 | 184 |
+            // | 交叉优先 | **38** | 74 | **72** |
+            // | **挤压优先(采用)** | 50 | **28** | 102 |
+            //
+            // 挤压优先在三项上**全面好过旧表**;相对"交叉优先"是用 +12 处交叉、
+            // +30 处共线换掉 46 处挤压 —— 按上面的轻重,这笔买卖是赚的。
+            .min_by(|x, y| {
+                let key = |v: &(MolScore, Quality, BTreeMap<u32, Point2>)| {
+                    (
+                        (v.0 .5, v.0 .0, v.0 .1, v.0 .2, v.0 .3, v.0 .4),
+                        v.1.clone(),
+                    )
+                };
+                key(x).cmp(&key(y))
+            })
             .map(|(_, q, p)| (q, p))
     }
 

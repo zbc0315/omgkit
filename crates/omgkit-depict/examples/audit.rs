@@ -193,6 +193,9 @@ fn main() {
             if accidental_collinear(&grown, &d) > 0 {
                 *quality.entry("—— 有骨架原子被摆成 180°").or_default() += 1usize;
             }
+            if cramped_substituents(&grown, &d) > 0 {
+                *quality.entry("—— 有取代基挤到另一根键上").or_default() += 1usize;
+            }
             // **立体中心的取代基挤在一侧**,单独记一档。
             //
             // 这一档**曾经**是正确性问题:隐式氢先前被摆在中心上,而挤在一侧时
@@ -323,6 +326,47 @@ fn prep(smi: &str) -> Option<MolBuilder> {
 ///
 /// sp 原子(有三键、或两根双键)本来就该 180°,不算。剩下的是布局把 sp3 摆直了
 /// —— 渲染那边会补个符号让它看得见,但坐标本身的毛病要单独报,不许被补符号盖住。
+/// 有几处取代基被挤到离另一根键 **< `CRAMPED`** 的地方。
+///
+/// # 为什么要单独数
+///
+/// 两根键只差几度,画出来就是一根 —— 读者会**整个漏掉一个取代基**。那是读错
+/// 结构,和键交叉同一档,可现有的指标一条都报不出来:`未解冲突` 按**原子间
+/// 距离**判,而挤成 6° 的两个原子相距 0.10 个键长,够不着阈值;`键角不过窄`
+/// 只查度数 ≤ 3 的原子。
+///
+/// **这一档是看图看出来的**:樟脑的偕二甲基塌成一根,而所有指标都说没事。
+fn cramped_substituents(m: &MolBuilder, d: &omgkit_depict::Depiction) -> usize {
+    /// 小于这个角就算挤在一起了。取 15° —— 30° 栅格的一半,正常的两根键
+    /// 至少差一档。
+    const CRAMPED: f64 = 15.0;
+
+    let mut n = 0usize;
+    for a in 0..u32::try_from(m.num_atoms()).expect("原子数超出 u32") {
+        let here = d.coords[a as usize];
+        let mut angs: Vec<f64> = m
+            .neighbors(a)
+            .map(|(nb, _)| {
+                (d.coords[nb as usize] - here)
+                    .angle()
+                    .to_degrees()
+                    .rem_euclid(360.0)
+            })
+            .collect();
+        if angs.len() < 3 {
+            continue; // 度 ≤ 2 的两根键之间只有一个夹角,窄了归 `键角不过窄` 管
+        }
+        angs.sort_by(|x, y| x.partial_cmp(y).expect("角度不会是 NaN"));
+        for k in 0..angs.len() {
+            let gap = (angs[(k + 1) % angs.len()] - angs[k]).rem_euclid(360.0);
+            if gap < CRAMPED {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 fn accidental_collinear(m: &MolBuilder, d: &omgkit_depict::Depiction) -> usize {
     use omgkit_core::BondOrder;
     use omgkit_depict::render::is_collinear;
