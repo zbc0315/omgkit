@@ -54,6 +54,20 @@ all = { level = "warn", priority = -1 }
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 
+# **调试信息只留行号表。** 四道闸里只有 clippy 走 debug 构建,而它**从不运行**
+# 编出来的东西 —— 完整的 DWARF 对它一点用没有,却是产物体积的大头:实测
+# `libomgkit_depict` 的 debug rlib 15M,`strip -S` 之后 1.5M,**九成是调试信息**。
+#
+# 加上 `--all-targets` 会给每个测试二进制、每个 example 各编一份,而 cargo
+# 不回收旧产物(实测同一个 crate 在 `deps` 里堆了 5 份),`target/debug` 因此
+# 涨到 **8.1G**,占整个项目 9.4G 的 86%。
+#
+# `line-tables-only` 保住行号,回溯照样能看到「哪个文件第几行」,只是没有变量
+# 与类型信息。真要单步调试时临时改回 `true` 即可。
+[profile.dev]
+debug = "line-tables-only"
+
+# `[profile.test]` 继承 `dev`,同理。
 [profile.release]
 opt-level = 3
 lto = "thin"
