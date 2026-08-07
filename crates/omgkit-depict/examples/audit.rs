@@ -35,7 +35,7 @@ use omgkit_depict::{
     generate,
     geom::{point_in_polygon, Point2},
     label::Label,
-    render::{is_squeezed, label_at, scene, Primitive, Scene},
+    render::{is_squeezed, label_at, scene, touches_glyphs, Primitive, Scene},
     style::Style,
 };
 
@@ -1123,36 +1123,28 @@ fn lines_clear_of_labels(
             let Some(l) = &labels[a as usize] else {
                 continue;
             };
-            // **盒心不在原子上** —— 横排朝一侧挪了 `dx`,竖排还上下挪了 `dy`。
-            // 先前这里只加 `dx`,竖排一上线就按"盒心在原子上"算,盒子往上多罩
-            // 了一片实际没字的地方 —— 当场多报 4 处假阳。口径向实现要。
-            let bc = pts[a as usize] + l.offset_canvas() * scale;
-            // 线本身有粗细,压边一丝不算划字
-            let (hw, hh) = (
-                l.half_w * scale - style.line_width_pt,
-                l.half_h * scale - style.line_width_pt,
-            );
-            if hw <= 0.0 || hh <= 0.0 {
-                continue;
-            }
+            // **口径向实现要**,见 `render::touches_glyphs`。
+            //
+            // 这里踩过两次坑:先是按"盒心在原子上"算(整串其实朝一侧挪了 `dx`,
+            // 竖排还上下挪了 `dy`),当场多报 4 处假阳;再是拿**整串外接盒**当
+            // 字在的地方 —— 上标把盒顶撑高、盒又上下对称,于是符号正下方那一片
+            // 纯空白也算进盒里,一条恰好停在符号底下一个 margin 处的线会被报成
+            // 压字。字在哪由 `Label::ink` 说了算。
             for p in mine.iter().filter_map(|x| match x {
                 Primitive::Line { from, to, .. } => Some([*from, *to]),
                 _ => None,
             }) {
                 for p in p {
                     compared += 1;
-                    if (p.x - bc.x).abs() < hw && (p.y - bc.y).abs() < hh {
+                    if touches_glyphs(l, pts[a as usize], p, scale, style.line_width_pt) {
                         return (
                             "线端不压字",
                             true,
                             Some(format!(
-                                "键 {bi} 的线端点 ({:.2},{:.2}) 落在原子 {a} 的标签 {} 里\
-                                 (盒心 ({:.2},{:.2})±({hw:.2},{hh:.2}))",
+                                "键 {bi} 的线端点 ({:.2},{:.2}) 压在原子 {a} 的标签 {} 的字上",
                                 p.x,
                                 p.y,
                                 l.plain(),
-                                bc.x,
-                                bc.y
                             )),
                         );
                     }

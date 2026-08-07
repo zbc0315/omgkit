@@ -125,21 +125,17 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
         })
         .collect();
 
-    // 标签的字形盒,**画布坐标系**。盒心不在原子上 —— 横排时整串朝一侧挪了
-    // `dx`(好让元素符号落在原子位置上),竖排时还上下挪了 `dy`。
-    // 见 [`Label::dx`](crate::label::Label::dx) 与
-    // [`Label::offset_canvas`](crate::label::Label::offset_canvas)。
-    let boxes: Vec<Option<(Point2, f64, f64)>> = labels
+    // 标签的字形盒,**画布坐标系**(y 向下),一个字一个。
+    //
+    // 一个原子一个大盒是不够的:上标右上角、竖排另一行的那一侧,盒里都没有字。
+    // 平移出来的线该让的是**字**,不是那片空白 —— 见
+    // [`InkBox`](crate::label::InkBox)。
+    let boxes: Vec<Vec<(Point2, f64, f64)>> = labels
         .iter()
         .enumerate()
         .map(|(i, l)| {
-            l.as_ref().map(|l| {
-                (
-                    pts[i] + l.offset_canvas() * scale,
-                    l.half_w * scale,
-                    l.half_h * scale,
-                )
-            })
+            l.as_ref()
+                .map_or_else(Vec::new, |l| ink_canvas(l, pts[i], scale))
         })
         .collect();
     let margin_pt = style.margin() * scale;
@@ -170,8 +166,13 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
         // 平移会把端点带回盒里 —— 见 [`escape_boxes`]。主线不走这一步,它归
         // [`trim`] 管,连"塞不下时压缩"那档兜底一起。
         let sidelined = |from: Point2, to: Point2| {
-            let (from, to) =
-                escape_boxes(from, to, boxes[bg as usize], boxes[en as usize], margin_pt);
+            let (from, to) = escape_boxes(
+                from,
+                to,
+                &boxes[bg as usize],
+                &boxes[en as usize],
+                margin_pt,
+            );
             Primitive::Line { from, to, width: w }
         };
 
@@ -766,7 +767,107 @@ const SQUEEZE: f64 = 0.9;
 /// 被 `线端不压字` 逼出来的,那次翻错了 4 处。
 pub fn label_clearance(l: Option<&Label>, dir: Point2, style: &Style) -> f64 {
     l.map_or(0.0, |l| {
-        box_reach(l.offset() * -1.0, dir, l.half_w, l.half_h) + style.margin()
+        let pad = style.margin();
+        l.ink
+            .iter()
+            .fold(0.0_f64, |acc, r| acc.max(ray_exit(r, dir, pad)))
+    })
+}
+
+/// 从原子位置沿 `dir` 射出去,穿出这个字形盒**撑开 `pad` 之后**的距离。
+/// 射线连撑开的盒都碰不到就是 0。
+///
+/// # 为什么是"撑开盒",不是"走出盒再加 margin"
+///
+/// margin 要的是**字四周的留白**,四周就是四周。"走出盒再沿键的方向加 margin"
+/// 只在轴对齐时等于四周留白 —— 斜着来的键,那一段 margin 是斜着量的,投到
+/// 垂直于字的方向上只剩 `margin × cos`,擦着盒角进来时几乎为零。撑开盒之后
+/// 端点落在撑开后的边上,离字的 L∞ 距离**等于** `pad`,与来向无关。
+///
+/// "等于"这句话对 [`trim`] 切出来的**主线**是无条件的(全量 118959 个端点逐个
+/// 量过,一个不差、一个不少)。**平移出来的那些线不然** —— [`escape_boxes`]
+/// 自己那一档"两端加起来比线段还长就按比例压缩"会把端点拉回来一点;全量语料上
+/// 有 2 个端点因此只剩 0.84 个 margin。
+///
+/// RDKit 也是这么做的:`MolDraw2D::adjustBondEndForString` 拿的是逐段的
+/// `StringRect`,`doesLineIntersect` 先按 `padding` 撑开再求交。
+///
+/// # 与 [`box_reach`] 的分工
+///
+/// `box_reach` 要求起点在盒内 —— 它算的是"从盒里的一点走到盒边"。字形盒不然:
+/// `OH` 的 `H` 那个盒离原子老远,原子根本不在里面,拿 `box_reach` 去算会得到
+/// 到对面那条边的距离,是个没有意义的数。这里用板相交(slab),盒在射线前面、
+/// 后面、还是压根碰不到,三种情形都答得对。
+///
+/// 返回的是**穿出去**那一头(`t1`),不是碰到那一头 —— 键要让开整个字,不是
+/// 停在字的近边。
+fn ray_exit(r: &crate::label::InkBox, dir: Point2, pad: f64) -> f64 {
+    let (mut t0, mut t1) = (f64::NEG_INFINITY, f64::INFINITY);
+    for (c, d, h) in [
+        (r.centre.x, dir.x, r.half_w + pad),
+        (r.centre.y, dir.y, r.half_h + pad),
+    ] {
+        if d.abs() < 1e-12 {
+            // 射线平行于这块板:原点在板外就永远进不去
+            if c.abs() > h {
+                return 0.0;
+            }
+        } else {
+            let (a, b) = ((c - h) / d, (c + h) / d);
+            t0 = t0.max(a.min(b));
+            t1 = t1.min(a.max(b));
+        }
+    }
+    if t0 > t1 || t1 <= 0.0 {
+        0.0
+    } else {
+        t1
+    }
+}
+
+/// 标签的字形盒换算到**画布坐标**:`(盒心, 半宽, 半高)`,单位 pt。
+///
+/// `at` 是原子的画布位置,`scale` 是一个键长多少 pt。
+///
+/// # 全仓只有这一处翻 y
+///
+/// 字形盒记的是**布局坐标(y 向上)**,画布是 y 向下。这个符号错了不会报错,
+/// 只会让盒罩到镜像的位置去 —— 竖排的标签尤其致命(氢那一行会跑到符号上面),
+/// 而**单元判据一条都抓不到**:实测把这个负号去掉,`cargo test` 全绿,只有
+/// 全量审计报出违例。同一个坑竖排上线时塌过一次。
+///
+/// 所以画布侧的调用方([`scene`]、[`touches_glyphs`]、审计)一律走这一个函数,
+/// 判据 `the_glyph_boxes_land_below_the_symbol_when_the_hydrogen_does` 钉住符号。
+#[must_use]
+pub fn ink_canvas(l: &Label, at: Point2, scale: f64) -> Vec<(Point2, f64, f64)> {
+    l.ink
+        .iter()
+        .map(|r| {
+            (
+                at + Point2::new(r.centre.x, -r.centre.y) * scale,
+                r.half_w * scale,
+                r.half_h * scale,
+            )
+        })
+        .collect()
+}
+
+/// 画布坐标里,这个点压在这个标签的字上吗。
+///
+/// `at` 是原子的**画布**位置,`scale` 是一个键长多少 pt,`slack` 是往里让的
+/// 余量(线本身有粗细,压边一丝不算划字)。
+///
+/// # 为什么不能用整串的外接盒
+///
+/// 外接盒把上标右上角、竖排另一行旁边那些空地也圈了进去。`[NH2+]` 的 `+` 高踞
+/// 右上,盒是上下对称的,于是 `N` 的**正下方 0.25 个键长的纯空白**也算进盒里
+/// —— 一条恰好停在 `N` 底下一个 margin 处的线会被报成"压字",而它离最近的字
+/// 有 1.6pt。判据与审计都调这一个函数,口径才不会各走各的。
+#[must_use]
+pub fn touches_glyphs(l: &Label, at: Point2, p: Point2, scale: f64, slack: f64) -> bool {
+    ink_canvas(l, at, scale).into_iter().any(|(c, hw, hh)| {
+        let (hw, hh) = (hw - slack, hh - slack);
+        hw > 0.0 && hh > 0.0 && (p.x - c.x).abs() < hw && (p.y - c.y).abs() < hh
     })
 }
 
@@ -822,13 +923,21 @@ fn squeeze(ca: f64, cb: f64, len: f64) -> (f64, f64) {
 /// `HO`、第二条线就画到环外,而那个符号取决于求和次序。这里两边给出的都是
 /// 合法几何,同一份坐标永远走同一支,写法无关不受影响。
 ///
-/// 实测全量语料上所有平移端点到这条分界的最近距离是 **0.068pt**(ChemDraw 下
-/// 芳香 `N⁺` 六元环),比浮点噪声大十几个数量级 —— 目前不在刀锋上。
+/// **这条分界现在就有一大片正好压在上面,不能再靠"离得远"来免责。** 逐字形的
+/// 盒上线之前,实测全量语料所有平移端点到分界的最近距离是 0.068pt,那时说得通;
+/// 换成逐字形 + 按 margin 撑开之后重测,66362 对(端点 × 盒)里 **16419 对
+/// (24.7%)的内外量逐比特等于 0**。
+///
+/// 免责的理由因此换了一条,而且更硬:**那些 0 是结构性的,不是巧合。** 轴对齐
+/// 的键横向平移不改另一维坐标,而主线端点本来就精确落在撑开后的盒边上 —— 于是
+/// 平移线的端点也精确落在边上。它是**同一个浮点表达式算出来的同一个值**,不是
+/// 两个近似值撞在一起,所以同一份坐标永远走同一支。全量 `写法无关` 前后都是 9,
+/// 与这一处无关。
 fn escape_boxes(
     from: Point2,
     to: Point2,
-    ba: Option<(Point2, f64, f64)>,
-    bb: Option<(Point2, f64, f64)>,
+    ba: &[(Point2, f64, f64)],
+    bb: &[(Point2, f64, f64)],
     margin: f64,
 ) -> (Point2, Point2) {
     let len = from.dist(to);
@@ -836,14 +945,22 @@ fn escape_boxes(
         return (from, to);
     }
     let d = (to - from) * (1.0 / len);
-    let out = |p: Point2, dir: Point2, bx: Option<(Point2, f64, f64)>| -> f64 {
-        let Some((c, hw, hh)) = bx else { return 0.0 };
-        let r = p - c;
-        // **盒外的点不能交给 `box_reach`** —— 它算的是到对面那条边的距离
-        if r.x.abs() >= hw || r.y.abs() >= hh {
-            return 0.0;
+    // 端点落在**哪一个字**里就推出哪一个;一个都没落进去就不动。
+    // 盒按 margin 撑开,与 [`label_clearance`] 同一口径 —— 两条路给出的留白
+    // 必须是同一个,否则主线与平移线在同一个标签旁边停在不同的地方。
+    // 取最大是因为撑开之后相邻的字形盒会重叠,一个点可能落进好几个。
+    let out = |p: Point2, dir: Point2, bxs: &[(Point2, f64, f64)]| -> f64 {
+        let mut best = 0.0_f64;
+        for (c, hw, hh) in bxs {
+            let (hw, hh) = (hw + margin, hh + margin);
+            let r = p - *c;
+            // **盒外的点不能交给 `box_reach`** —— 它算的是到对面那条边的距离
+            if r.x.abs() >= hw || r.y.abs() >= hh {
+                continue;
+            }
+            best = best.max(box_reach(r, dir, hw, hh));
         }
-        box_reach(r, dir, hw, hh) + margin
+        best
     };
     let (ca, cb) = (out(from, d, ba), out(to, d * -1.0, bb));
     let (ca, cb) = squeeze(ca, cb, len);
@@ -1093,6 +1210,7 @@ fn offset_dir(
 mod tests {
     use super::*;
     use crate::generate;
+    use crate::label::label_forced;
 
     fn prep(smi: &str) -> MolBuilder {
         let mut m = omgkit_io::smiles::parse(smi).unwrap();
@@ -1485,6 +1603,389 @@ mod tests {
     const CAP_HEIGHT_TEST: f64 = 0.718;
     const SUP_RISE_TEST: f64 = 0.36;
     const SUB_DROP_TEST: f64 = 0.14;
+    const SUB_SUP_SCALE_TEST: f64 = 0.6;
+
+    /// Helvetica 的字形度量,千分之一 em:`(前进宽度, 墨迹左, 下, 右, 上)`。
+    ///
+    /// **从 AFM 独立转写的第二份**。判据不许调实现的那张表 —— 抄错的话两边
+    /// 一起错,判据照样全绿。
+    ///
+    /// 覆盖面是这条判据的命门。审核时实测过:只收七个测试分子用得到的那 11 个
+    /// 字符时,改坏 `e`、`r`、`*` 的墨迹、改坏 `P` 的前进宽度 → **全绿**,也就
+    /// 是 `Br`、`Fe`、`Na`、`Mg` 这些符号的度量抄错了没有任何东西会红。现在按
+    /// **全部 118 号元素**驱动(见
+    /// [`a_bond_never_starts_from_inside_a_two_letter_symbol`]),凡元素符号用得
+    /// 到的字符都得在这张表里,缺了当场 `panic`。
+    fn afm(c: char) -> (f64, f64, f64, f64, f64) {
+        let m: (i32, i32, i32, i32, i32) = match c {
+            'A' => (667, 14, 0, 654, 718),
+            'B' => (667, 74, 0, 627, 718),
+            'C' => (722, 44, -19, 681, 737),
+            'D' => (722, 81, 0, 674, 718),
+            'E' => (667, 86, 0, 616, 718),
+            'F' => (611, 86, 0, 583, 718),
+            'G' => (778, 48, -19, 704, 737),
+            'H' => (722, 77, 0, 646, 718),
+            'I' => (278, 91, 0, 188, 718),
+            'J' => (500, 17, -19, 428, 718),
+            'K' => (667, 76, 0, 663, 718),
+            'L' => (556, 76, 0, 537, 718),
+            'M' => (833, 73, 0, 761, 718),
+            'N' => (722, 76, 0, 646, 718),
+            'O' => (778, 39, -19, 739, 737),
+            'P' => (667, 86, 0, 622, 718),
+            'Q' => (778, 39, -56, 739, 737),
+            'R' => (722, 88, 0, 684, 718),
+            'S' => (667, 49, -19, 620, 737),
+            'T' => (611, 14, 0, 597, 718),
+            'U' => (722, 79, -19, 644, 718),
+            'V' => (667, 20, 0, 647, 718),
+            'W' => (944, 16, 0, 928, 718),
+            'X' => (667, 19, 0, 648, 718),
+            'Y' => (667, 14, 0, 653, 718),
+            'Z' => (611, 23, 0, 588, 718),
+            'a' => (556, 36, -15, 530, 538),
+            'b' => (556, 58, -15, 517, 718),
+            'c' => (500, 30, -15, 477, 538),
+            'd' => (556, 35, -15, 499, 718),
+            'e' => (556, 40, -15, 516, 538),
+            'f' => (278, 14, 0, 262, 728),
+            'g' => (556, 40, -220, 499, 538),
+            'h' => (556, 65, 0, 491, 718),
+            'i' => (222, 67, 0, 155, 718),
+            'j' => (222, -16, -210, 155, 718),
+            'k' => (500, 67, 0, 501, 718),
+            'l' => (222, 67, 0, 155, 718),
+            'm' => (833, 65, 0, 769, 538),
+            'n' => (556, 65, 0, 491, 538),
+            'o' => (556, 35, -14, 521, 538),
+            'p' => (556, 58, -207, 517, 538),
+            'q' => (556, 35, -207, 494, 538),
+            'r' => (333, 77, 0, 332, 538),
+            's' => (500, 32, -15, 464, 538),
+            't' => (278, 14, -7, 257, 669),
+            'u' => (556, 68, -15, 489, 523),
+            'v' => (500, 8, 0, 492, 523),
+            'w' => (722, 14, 0, 709, 523),
+            'x' => (500, 11, 0, 490, 523),
+            'y' => (500, 11, -214, 489, 523),
+            'z' => (500, 31, 0, 469, 523),
+            '+' => (584, 39, 0, 545, 505),
+            '-' => (333, 44, 232, 289, 322),
+            '*' => (389, 39, 431, 349, 718),
+            '0'..='9' => (556, 25, -19, 523, 703),
+            other => panic!("判据的字形表里没有 {other:?},补上再说"),
+        };
+        let k = |v: i32| f64::from(v) / 1000.0;
+        (k(m.0), k(m.1), k(m.2), k(m.3), k(m.4))
+    }
+
+    /// 按判据自己那张字形表,重算一个标签每个字该占的矩形:
+    /// `(盒心 x, 盒心 y, 半宽, 半高)`,布局坐标。
+    ///
+    /// **一个字都不问实现要** —— 连每一行居中用的行宽也按 `afm` 的前进宽度
+    /// 自己加。审核时实测:这一处借实现的 `Run::width_em` 的话,**单字符那一行
+    /// 的前进宽度抄错会两边一起偏、正好抵消**,`P` 的变异就是这么溜过去的。
+    fn expected_ink(l: &Label, em: f64) -> Vec<(f64, f64, f64, f64)> {
+        let scale_of = |r: &Run| {
+            if matches!(r, Run::Normal(_)) {
+                1.0
+            } else {
+                SUB_SUP_SCALE_TEST
+            }
+        };
+        let mut out = Vec::new();
+        for (off, runs) in l.lines() {
+            // 一行整体按**前进宽度**居中在锚点上,这是 `text-anchor="middle"`
+            let w: f64 = runs
+                .iter()
+                .map(|r| r.text().chars().map(|c| afm(c).0).sum::<f64>() * scale_of(r) * em)
+                .sum();
+            let mut x = off.x - w / 2.0;
+            for r in runs {
+                let s = scale_of(r);
+                // 基线不在锚点上 —— `dominant-baseline="central"` 落在锚点上的
+                // 是字高中线,基线在下方半个(缩放后的)字高处;上标下标再各自
+                // 抬/沉
+                let base = -CAP_HEIGHT_TEST * s / 2.0
+                    + match r {
+                        Run::Normal(_) => 0.0,
+                        Run::Sub(_) => -SUB_DROP_TEST,
+                        Run::Sup(_) => SUP_RISE_TEST,
+                    };
+                for ch in r.text().chars() {
+                    let (adv, gx0, gy0, gx1, gy1) = afm(ch);
+                    out.push((
+                        x + (gx0 + gx1) / 2.0 * s * em,
+                        off.y + (base + (gy0 + gy1) / 2.0 * s) * em,
+                        (gx1 - gx0) / 2.0 * s * em,
+                        (gy1 - gy0) / 2.0 * s * em,
+                    ));
+                    x += adv * s * em;
+                }
+            }
+        }
+        out
+    }
+
+    /// `l.ink[i]` 与判据自己算出来的第 `i` 个盒是不是同一个。
+    fn same_box(r: crate::label::InkBox, want: (f64, f64, f64, f64)) -> bool {
+        (r.centre.x - want.0).abs() < 1e-9
+            && (r.centre.y - want.1).abs() < 1e-9
+            && (r.half_w - want.2).abs() < 1e-9
+            && (r.half_h - want.3).abs() < 1e-9
+    }
+
+    #[test]
+    fn each_glyph_box_is_where_that_piece_of_text_actually_lands() {
+        // **字形盒是裁键的依据,它错了线就压字。** 而 `ink` 由 `build` 算、
+        // 落笔由 `lines()` 算,又是两条互不相干的算路 —— 上一条判据
+        // ([`every_drawn_line_of_a_label_fits_inside_the_box_it_reports`])
+        // 把 `lines()` 绑在了整串盒上,这条把 `ink` 也绑上去。
+        for smi in [
+            "CC(=O)Nc1ccc(O)cc1",
+            "[NH4+].[Cl-]",
+            "C=CC(=[NH2+])N",
+            "C[SiH3]",
+            "[13CH4]",
+            "OCC(O)C(O)C(O)C(O)C=O",
+            "[O-][N+](=O)c1ccccc1S(=O)(=O)O",
+        ] {
+            let m = prep(smi);
+            for style in &Style::ALL {
+                let em = style.label_size();
+                let d = generate(&m, style);
+                let g = d.drawn(&m);
+                for a in 0..u32::try_from(g.num_atoms()).unwrap() {
+                    let Some(l) = label_at(&g, a, style, &d.coords) else {
+                        continue;
+                    };
+                    let want = expected_ink(&l, em);
+                    assert_eq!(
+                        want.len(),
+                        l.ink.len(),
+                        "[{}] {smi} 原子 {a}({}):字形盒的个数与落笔的字数对不上",
+                        style.name,
+                        l.plain()
+                    );
+                    for (i, w) in want.into_iter().enumerate() {
+                        let r = l.ink[i];
+                        assert!(
+                            same_box(r, w),
+                            "[{}] {smi} 原子 {a}({}) 第 {i} 个字:字形盒报的是 \
+                             ({:.5},{:.5})±({:.5},{:.5}),落笔在 ({:.5},{:.5})±({:.5},{:.5})",
+                            style.name,
+                            l.plain(),
+                            r.centre.x,
+                            r.centre.y,
+                            r.half_w,
+                            r.half_h,
+                            w.0,
+                            w.1,
+                            w.2,
+                            w.3
+                        );
+                        // 横向必须在整串外接盒之内 —— 前进宽度含左右边距,墨迹
+                        // 只会更窄。**纵向不查**:`Hg`、`Ag`、`Np` 的下伸部比名义
+                        // 字高多出 0.22 em,那一截本来就伸在外接盒之外,见
+                        // [`Label::ink`](crate::label::Label::ink)。
+                        let c = l.offset();
+                        assert!(
+                            (r.centre.x - c.x).abs() + r.half_w <= l.half_w + 1e-9,
+                            "[{}] {smi} 原子 {a}({}) 第 {i} 个字横向跑出了整串外接盒",
+                            style.name,
+                            l.plain()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_glyph_boxes_land_below_the_symbol_when_the_hydrogen_does() {
+        // **全仓翻 y 只有 [`ink_canvas`] 那一处**,这条钉住它的符号。
+        //
+        // 符号错了不会报错,只会让盒罩到镜像的位置去。审核时实测把那个负号去掉,
+        // `cargo test` **全绿** —— 只有全量审计报得出来(`scene` 的盒 3 处、
+        // `touches_glyphs` 607 处)。同一个坑竖排上线时塌过一次,所以补这一条。
+        let m = prep("CC(=O)Nc1ccc(O)cc1");
+        let n = (0..u32::try_from(m.num_atoms()).unwrap())
+            .find(|a| m.atoms()[*a as usize].atomic_num == 7)
+            .expect("对乙酰氨基酚有一个氮");
+        for style in &Style::ALL {
+            let d = generate(&m, style);
+            let l = label_at(&m, n, style, &d.coords).expect("氮该有标签");
+            let at = l.stacked.expect("这个氮该竖排");
+            assert!(l.gap < 0.0, "[{}] 氢该在符号下面", style.name);
+            // 布局坐标里氢那一行的 y 是负的(在下),画布坐标里就该是**正的**
+            let boxes = ink_canvas(&l, Point2::ORIGIN, style.bond_length_pt);
+            let (sym_y, h_y) = (boxes[0].0.y, boxes[at].0.y);
+            assert!(
+                h_y > sym_y + 1.0,
+                "[{}] 画布 y 向下,氢那一行该比符号更靠下:符号 {sym_y:.3},氢 {h_y:.3}",
+                style.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_end_gets_pushed_a_full_margin_clear_of_the_glyphs() {
+        // `escape_boxes` 与 `label_clearance` 是**两条路**:主线归 `trim`,双键的
+        // 第二条线、叁键的外侧线是横向平移出来的,归这里。两条给出的留白必须
+        // 是同一个,否则同一个标签旁边两条线停在不同的地方。
+        //
+        // **这条先前没有判据。** 审核时实测把 `escape_boxes` 里那句撑开去掉,
+        // 全量 367070 条线的坐标指纹**变了**,而 134 条判据全绿、全量审计逐项
+        // 一样 —— `线端不压字` 抓不到是因为它留了一个线宽的余量,端点正好落在
+        // 墨迹边上时不算违例。
+        let margin = 0.5_f64;
+        let bx = vec![(Point2::ORIGIN, 1.0, 1.0)];
+        let far = Point2::new(10.0, 0.0);
+        // (a) 落在盒外、但离盒不到一个 margin —— 要推到撑开后的边上
+        let (q, _) = escape_boxes(Point2::new(1.2, 0.0), far, &bx, &[], margin);
+        assert!(
+            (q.x - 1.5).abs() < 1e-9,
+            "离盒 0.2、margin 0.5 的端点该推到 1.5,实得 {:.4}",
+            q.x
+        );
+        // (b) 落在盒里 —— 同样推到撑开后的边上
+        let (q, _) = escape_boxes(Point2::new(0.5, 0.0), far, &bx, &[], margin);
+        assert!(
+            (q.x - 1.5).abs() < 1e-9,
+            "盒里的端点该推到 1.5,实得 {:.4}",
+            q.x
+        );
+        // (c) 已经让开一个 margin 以上 —— 不许动它,否则就成了"一律往外推"
+        let p = Point2::new(1.6, 0.0);
+        let (q, _) = escape_boxes(p, far, &bx, &[], margin);
+        assert!(
+            (q.x - p.x).abs() < 1e-9,
+            "已经够远的端点不该动,实得 {:.4}",
+            q.x
+        );
+    }
+
+    #[test]
+    fn a_glyph_the_bond_flies_past_does_not_make_it_stop() {
+        // 射线与盒的几种退化情形。**完全错开**这一支先前没有判据:去掉
+        // `t0 > t1` 那一刀,`cargo test` 全绿,全量只让"塞不下"从 859 悄悄变成
+        // 860 —— 指标动了而没有一条判据红。
+        let bx = |x: f64, y: f64| crate::label::InkBox {
+            centre: Point2::new(x, y),
+            half_w: 0.1,
+            half_h: 0.1,
+        };
+        let diag = Point2::new(1.0, 1.0).normalized();
+        let right = Point2::new(1.0, 0.0);
+        // 盒在右边、射线斜着往右上飞过去 —— 两条板的区间不重叠,碰不到
+        assert!(
+            ray_exit(&bx(2.0, 0.0), diag, 0.0).abs() < 1e-12,
+            "斜着飞过去的射线不该被这个盒挡住"
+        );
+        // 同一个盒,射线改成正右方 —— 这回真穿过去了,得停在盒的右边
+        assert!(
+            (ray_exit(&bx(2.0, 0.0), right, 0.0) - 2.1).abs() < 1e-12,
+            "正对着的盒该让射线停在 2.1"
+        );
+        // 盒在射线**后面** —— 也碰不到
+        assert!(
+            ray_exit(&bx(-2.0, 0.0), right, 0.0).abs() < 1e-12,
+            "身后的盒不该影响往前切多少"
+        );
+        // 射线平行于某条板、而原点在板外
+        assert!(
+            ray_exit(&bx(2.0, 5.0), right, 0.0).abs() < 1e-12,
+            "平行于这块板、又在板外,永远进不去"
+        );
+    }
+
+    #[test]
+    fn a_bond_never_starts_from_inside_a_two_letter_symbol() {
+        // **这条判据有两个用处,都要紧。**
+        //
+        // 一、把字形度量表**整张**过一遍 —— 见 [`afm`] 的文档。
+        //
+        // 二、钉住"字与字之间的缝"。字形盒之间的左右边距不属于任何盒,而原子
+        //    位置(整串按前进宽度居中的那个点)有时正落在缝里 —— `Ir` 最甚,
+        //    离最近的墨迹盒 0.0344 个键长。**盒按 margin 撑开**才让它不成问题;
+        //    这条断言净空恒大于 0,并把实测的最小富余量钉在这儿。
+        let mut worst = f64::INFINITY;
+        let mut worst_at = String::new();
+        let mut n = 0usize;
+        for z in 1..=118u8 {
+            let Some(e) = omgkit_core::element::by_atomic_num(z) else {
+                continue;
+            };
+            let smi = format!("[{}]", e.symbol);
+            let Ok(mut m) = omgkit_io::smiles::parse(&smi) else {
+                continue;
+            };
+            if omgkit_chem::pipeline::sanitize(&mut m).is_err() {
+                continue;
+            }
+            n += 1;
+            for style in &Style::ALL {
+                let em = style.label_size();
+                for place in [
+                    LabelPlace::Horizontal(HSide::Right),
+                    LabelPlace::Horizontal(HSide::Left),
+                    LabelPlace::Stacked { below: true },
+                    LabelPlace::Stacked { below: false },
+                ] {
+                    let l = label_forced(&m, 0, style, place);
+                    // 一、字形盒逐个对上判据自己那张表
+                    let want = expected_ink(&l, em);
+                    assert_eq!(want.len(), l.ink.len(), "{smi} 的 {} 字数对不上", l.plain());
+                    for (i, w) in want.into_iter().enumerate() {
+                        let r = l.ink[i];
+                        assert!(
+                            same_box(r, w),
+                            "[{}] {smi} 的 {} 第 {i} 个字:字形盒报 \
+                             ({:.5},{:.5})±({:.5},{:.5}),该是 ({:.5},{:.5})±({:.5},{:.5})",
+                            style.name,
+                            l.plain(),
+                            r.centre.x,
+                            r.centre.y,
+                            r.half_w,
+                            r.half_h,
+                            w.0,
+                            w.1,
+                            w.2,
+                            w.3
+                        );
+                    }
+                    // 二、四面八方都得让开点东西,不能一路画到原子中心
+                    for k in 0..360 {
+                        let t = f64::from(k).to_radians();
+                        let dir = Point2::new(t.cos(), t.sin());
+                        let c = label_clearance(Some(&l), dir, style);
+                        assert!(
+                            c > 0.0,
+                            "[{}] {smi} 的 {} 朝 {k}° 的净空是 0 —— 键会一路画到原子中心,\
+                             从两个字母中间穿过去",
+                            style.name,
+                            l.plain()
+                        );
+                        // 富余量按 margin 计:1 表示恰好靠撑开那一步救回来的
+                        let slack = c / style.margin();
+                        if slack < worst {
+                            worst = slack;
+                            worst_at = format!("[{}] {} {k}°", style.name, l.plain());
+                        }
+                    }
+                }
+            }
+        }
+        assert!(n >= 100, "只跑到 {n} 个元素,这条判据没覆盖到该覆盖的面");
+        // 实测最小富余是 1.24 个 margin(`Ir`,竖直方向)。**这个下界不许悄悄
+        // 变小** —— 它一旦掉到 1.0,就说明有元素的原子位置落在字母缝里而撑开
+        // 已经救不回来了。
+        assert!(
+            worst > 1.2,
+            "最小净空只剩 {worst:.3} 个 margin({worst_at}),快穿过字母缝了"
+        );
+    }
 
     #[test]
     fn a_charged_atom_does_not_stack() {
@@ -1666,59 +2167,101 @@ mod tests {
     }
 
     #[test]
-    fn a_bond_stops_at_the_label_box_not_at_its_circumscribed_circle() {
-        // 键线在标签外停住是对的,**但停在哪儿有讲究**。先前按标签盒的外接圆
-        // 切,圆一定包住盒,所以线绝不会压到字上 —— 代价是在盒窄的那个方向上
-        // 停得太远:竖直方向去接一个横向宽的标签,白白空出 `hypot(w,h) − h`。
+    fn a_bond_stops_at_the_glyphs_not_at_the_box_around_the_whole_string() {
+        // 键线在标签外停住是对的,**但停在哪儿有讲究**。这条判据钉的是一道
+        // 三级台阶,每往下一级都是实打实的空白被收回来:
         //
-        // 实测全量语料 129330 个带标签的键端,平均白切 0.075 个键长,最糟的
-        // `[NH2+]` 白切 0.39 —— 快四成键长的空白。
+        // ```
+        // 外接圆 hypot(w,h)  >  整串外接盒 half_h  >  字形盒
+        // ```
+        //
+        // 1. **外接圆**:最早的切法。圆一定包住盒,所以线绝不会压到字上 ——
+        //    代价是在盒窄的那个方向上停得太远。实测全量语料 129330 个带标签的
+        //    键端,平均白切 0.075 个键长,最糟的 `[NH2+]` 白切 0.39。
+        // 2. **整串外接盒**:上标把盒顶撑到 `CAP/2 + SUP_RISE`,而盒是上下
+        //    对称的,**盒底也跟着掉下去同样多 —— 那一整片纯空白**。`[NH2+]`
+        //    的 `+` 高高在右上角,盒却因此在 `N` 的正下方多罩了 0.25 个键长。
+        // 3. **字形盒**:字在哪就让到哪。竖直方向只剩 `N` 自己的半个大写字高。
+        //
+        // 三级都要断言。只留最后一级的话,把 `ray_exit` 写成"返回 half_h"也
+        // 照样绿 —— 那就退回第 2 级了,判据说明不了问题。
         let style = &Style::ACS_1996;
         let m = prep("C=CC(=[NH2+])N");
         let l =
             label_for(&m, 3, style, LabelPlace::Horizontal(HSide::Right)).expect("[NH2+] 该有标签");
 
-        // 竖直方向接近:盒边在 half_h,外接圆在 hypot(half_w, half_h)。
-        // 盒心横向偏开了 `dx`,而竖直方向不受影响 —— 上下边仍在 ±half_h。
         let up = Point2::new(0.0, 1.0);
-        let reach = box_reach(l.offset() * -1.0, up, l.half_w, l.half_h);
+        let circle = l.half_w.hypot(l.half_h);
+        let whole = box_reach(l.offset() * -1.0, up, l.half_w, l.half_h);
+        // 竖直方向,整串盒切到的正是盒的上边(盒心只在横向偏开了 `dx`)
         assert!(
-            (reach - l.half_h).abs() < 1e-9,
-            "竖直方向该切到盒的上边 {},实得 {reach}",
+            (whole - l.half_h).abs() < 1e-9,
+            "整串盒在竖直方向该切到 {},实得 {whole}",
             l.half_h
         );
-        // **前提要自己成立才算数。** 这个标签上两种切法差得不够多的话,下面
-        // 那条断言换回外接圆也照样绿 —— 判据就是空过的。
-        let circle = l.half_w.hypot(l.half_h);
+        let glyph = label_clearance(Some(&l), up, style) - style.margin();
+
+        // **台阶要真的分得开。** 差得不够多的话下面几条断言换回上一级也全绿。
         assert!(
-            circle - reach > 0.1,
-            "这个标签上外接圆与盒边只差 {:.4} 个键长,拿它当判据说明不了问题",
-            circle - reach
+            circle - whole > 0.1 && whole - glyph > 0.1,
+            "三级台阶没拉开:外接圆 {circle:.4} / 整串盒 {whole:.4} / 字形盒 {glyph:.4}"
+        );
+        // 字形盒在竖直方向就是 `N` 自己的墨迹上沿(大写字高的一半)—— 从
+        // `Label` 之外独立算
+        let cap_half = CAP_HEIGHT_TEST / 2.0 * style.label_size();
+        assert!(
+            (glyph - cap_half).abs() < 1e-9,
+            "竖直方向该只让开 N 自己的半个字高 {cap_half:.4},实得 {glyph:.4}"
         );
 
-        // 真正画出来的那一段必须按盒切。`trim` 两端各留一个 margin。
+        // 真正画出来的那一段必须按字形盒切。`trim` 两端各留一个 margin。
         let centre = Point2::new(0.0, 0.0);
         let other = Point2::new(0.0, 1.0);
         let (q, _) = trim(centre, other, &Some(l.clone()), &None, style);
         let cut = centre.dist(q);
         assert!(
-            (cut - (reach + style.margin())).abs() < 1e-9,
+            (cut - (glyph + style.margin())).abs() < 1e-9,
             "竖直接近 [NH2+] 时该切 {},实得 {cut}",
-            reach + style.margin()
-        );
-        assert!(
-            cut < circle + style.margin() - 0.1,
-            "还是按外接圆切的 —— 白空出 {:.4} 个键长",
-            circle - reach
+            glyph + style.margin()
         );
 
-        // 横向接近时两者本来就该一致(盒边正是 half_w),别把这条改坏
+        // **字形盒不是"一律切得更少"。** 横着来的键要越过**整串最后那个字**,
+        // 不是只越过元素符号。`OH` 的 `H`、`NH2+` 的下标 `2` 都在那个方向上,
+        // 躲不掉。收回来的只有右边距那一点点(`H` 的前进宽度 0.722,墨迹到
+        // 0.646)。
         let right = Point2::new(1.0, 0.0);
-        assert!(
-            (box_reach(l.offset() * -1.0, right, l.half_w, l.half_h) - (l.half_w + l.dx)).abs()
-                < 1e-9,
-            "横向该切到盒的右边"
-        );
+        for (smi, atom) in [("CCO", 2u32), ("C=CC(=[NH2+])N", 3)] {
+            let mm = prep(smi);
+            for st in &Style::ALL {
+                let ll = label_for(&mm, atom, st, LabelPlace::Horizontal(HSide::Right))
+                    .expect("该有标签");
+                let got = label_clearance(Some(&ll), right, st);
+                // 最靠右的那个**碰得到的**字的墨迹右沿 —— 不一定是最后一个字:
+                // 上标可能抬得太高,横着来的射线连撑开之后都够不着它
+                let reach = ll
+                    .ink
+                    .iter()
+                    .filter(|r| r.centre.y.abs() <= r.half_h + st.margin())
+                    .fold(f64::MIN, |m, r| m.max(r.centre.x + r.half_w));
+                assert!(
+                    (got - (reach + st.margin())).abs() < 1e-9,
+                    "[{}] {smi} 的 {} 横向该切到 {:.4},实得 {got:.4}",
+                    st.name,
+                    ll.plain(),
+                    reach + st.margin()
+                );
+                // 而且必须真的越过了符号自己 —— 否则这条判据换成"只让开符号"
+                // 也照样绿
+                let sym = ll.ink[0].centre.x + ll.ink[0].half_w;
+                assert!(
+                    reach > sym + 0.2,
+                    "[{}] {smi} 的 {}:整串右沿 {reach:.4} 与符号右沿 {sym:.4} \
+                     差得太少,这条判据说明不了问题",
+                    st.name,
+                    ll.plain()
+                );
+            }
+        }
     }
 
     #[test]
@@ -1730,8 +2273,8 @@ mod tests {
         // **一处例外要说清楚:两端标签加起来比一个键还长时,`trim` 走压缩兜底,
         // 端点确实会落进盒里。** 那不是切算错了,是 ACS 规范下标签本来就占
         // 0.69 个键长,`O⁻—N⁺` 两端要 1.375 个键长的净空,一个键长塞不下。
-        // 换成按盒边切已经把这种键从 2.77% 压到 1.26%(全量 283604 根键),
-        // 剩下的要靠逐字形的盒才能再降,不是这条判据管得了的。
+        // 按整串外接盒切曾把这种键从 2.77% 压到 1.26%(全量 283604 根键),
+        // 改成按字形盒又降了一截 —— 数在 `harness/README.md` 里。
         for smi in [
             "C=CC(=[NH2+])N",
             "OC(=O)c1ccccc1OC(C)=O",
@@ -1787,25 +2330,15 @@ mod tests {
                         continue;
                     }
                     let c = to_canvas(d.coords[a as usize], bnd, scale);
-                    // 盒是画布坐标系里的轴对齐矩形。**留一点余量** —— 线本身有
-                    // 粗细,压边一丝不算划字。
-                    let (hw, hh) = (
-                        l.half_w * scale - style.line_width_pt,
-                        l.half_h * scale - style.line_width_pt,
-                    );
-                    if hw <= 0.0 || hh <= 0.0 {
-                        continue;
-                    }
                     for it in &s.items {
                         let Primitive::Line { from, to, .. } = it else {
                             continue;
                         };
-                        // **盒心不在原子上** —— 整串朝一侧挪了 `dx`
-                        let bc = c + l.offset_canvas() * scale;
-                        let inside =
-                            |p: &Point2| (p.x - bc.x).abs() < hw && (p.y - bc.y).abs() < hh;
+                        // 口径向实现要,见 [`touches_glyphs`]。**留一点余量** ——
+                        // 线本身有粗细,压边一丝不算划字。
+                        let on = |p: &Point2| touches_glyphs(l, c, *p, scale, style.line_width_pt);
                         assert!(
-                            !inside(from) && !inside(to),
+                            !on(from) && !on(to),
                             "[{}] {smi}:原子 {a} 的标签 {} 被一条线的端点压在里面",
                             style.name,
                             l.plain()
@@ -1878,27 +2411,29 @@ mod tests {
             &Some(l.clone()),
             &style,
         );
-        // **不能拿"离原子多远"当判据。** 盒心朝一侧挪了 `dx`(好让元素符号落在
-        // 原子位置上),所以离原子远近说明不了有没有盖住字 —— 要量的是**离盒心
-        // 多远**,而且要沿着键的方向比盒在那个方向上的半径。
-        let centre = d.coords[o as usize] + l.offset();
-        let dir = (d.coords[o as usize] - d.coords[neighbour as usize]).normalized();
-        let from_centre = trimmed - centre;
-        // 端点在盒外:两个轴上至少有一个超出
-        let outside =
-            from_centre.x.abs() >= l.half_w - 1e-9 || from_centre.y.abs() >= l.half_h - 1e-9;
+        // **不能拿"离原子多远"当判据** —— 盒心朝一侧挪了 `dx`,离原子远近说明
+        // 不了有没有盖住字。**也不能拿"离盒心多远"当判据** —— 整串外接盒里有
+        // 大片没字的地方。要量的是**离最近的那个字有多远**。
+        //
+        // 而这个距离该是多少,是一个精确的数:端点落在某个字形盒撑开 margin
+        // 之后的边上,所以它到那个字形盒的 L∞ 距离**正好等于 margin**,到别的
+        // 字形盒只会更远(否则射线会从那个盒里更晚出来)。
+        //
+        // 一个数把两头都钉住了:小于 margin 就是压着字画,大于 margin 就是先前
+        // 那种大片空白。
+        let p = trimmed - d.coords[o as usize];
+        let gap = l
+            .ink
+            .iter()
+            .map(|r| {
+                // 点到轴对齐矩形的 L∞ 距离(在盒里为负)
+                ((p.x - r.centre.x).abs() - r.half_w).max((p.y - r.centre.y).abs() - r.half_h)
+            })
+            .fold(f64::INFINITY, f64::min);
         assert!(
-            outside,
-            "键停得太近,端点落进标签盒里了:端点离盒心 ({:.4}, {:.4}),盒半宽高 ({:.4}, {:.4})",
-            from_centre.x, from_centre.y, l.half_w, l.half_h
-        );
-        // 而且要**恰好**停在盒边外一个 margin —— 停太远就是先前那种大片空白
-        let reach = box_reach(l.offset() * -1.0, dir * -1.0, l.half_w, l.half_h);
-        let gap = trimmed.dist(d.coords[o as usize]);
-        assert!(
-            (gap - (reach + style.margin())).abs() < 1e-9,
-            "该停在盒边外一个 margin({}),实得 {gap}",
-            reach + style.margin()
+            (gap - style.margin()).abs() < 1e-9,
+            "端点离最近的那个字 {gap:.6},该正好是一个 margin {:.6}",
+            style.margin()
         );
     }
 
