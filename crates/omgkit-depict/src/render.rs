@@ -1303,11 +1303,11 @@ mod tests {
             // **这两个分子是桥环的,坐标依赖模板表** —— 换表要重新搜一遍。
             // 实测:改模板表时这条判据当场变红,那正是它该做的事。
             (
-                "[C@]1([C@H](C2CC1CC2)C(=O)OC)(C(=O)OC)C",
-                2u32,
-                LabelDir::East,
+                "[C@]1([C@H]([C@@]2(C)O[C@@H]1CC2)C(=O)OC)(C(=O)OC)C",
+                5u32,
+                LabelDir::West,
             ),
-            ("[C@]12(C3CC([C@@H]1COC2=O)CC3)C", 0u32, LabelDir::North),
+            ("[C@]12([C@@H](C3(CO)OC1CC3)COC2=O)C", 9u32, LabelDir::South),
         ] {
             let m = prep(smi);
             let d = generate(&m, &Style::ACS_1996);

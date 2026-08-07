@@ -86,12 +86,13 @@ pub(crate) fn layout_local(
     mol: &MolBuilder,
     sys: &System<'_>,
     ranks: &[u32],
+    over: crate::templates::Override<'_>,
 ) -> (BTreeMap<u32, Point2>, Option<Degradation>) {
     let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
 
     if sys.rings.is_empty() {
         // 环感知说这里有环、SSSR 却一个都没给出来。不猜,直接走退化。
-        let (pos, st) = relax(mol, &sys.atoms, ranks, &sys.rings);
+        let (pos, st) = relax(mol, &sys.atoms, ranks, &sys.rings, over);
         return (pos, Some(bridged(&sys.atoms, st)));
     }
 
@@ -153,7 +154,7 @@ pub(crate) fn layout_local(
         let Some((i, u, v)) = best else {
             // 剩下的环都不是邻稠 —— 桥环。整个系统交给松弛。
             // 桥环一经识别就**丢掉部分结果**,整个系统重排 —— 见 relax 的注释
-            let (pos, st) = relax(mol, &sys.atoms, ranks, &sys.rings);
+            let (pos, st) = relax(mol, &sys.atoms, ranks, &sys.rings, over);
             degraded = Some(bridged(&sys.atoms, st));
             return (pos, degraded);
         };
@@ -280,6 +281,7 @@ fn relax(
     atoms: &[u32],
     ranks: &[u32],
     rings: &[&Ring],
+    over: crate::templates::Override<'_>,
 ) -> (BTreeMap<u32, Point2>, crate::templates::Status) {
     // **先查表。** 松弛是局部下降,5 个初值本身就常常给出自交的解 —— 实测最常见
     // 的 8 个骨架里 5 个自交,双环[2.2.2]辛烷和金刚烷都在内。表里存的是同一个
@@ -287,7 +289,7 @@ fn relax(
     // **查表的状态一并带出去。** 先前调用方为了知道"命中没有"又调了一次
     // `lookup`,而那里面是建分子 + sanitize + 规范化 —— 每个桥环系统、每种
     // 规范、审计里每种写法都白付一遍。
-    let (hit, status) = crate::templates::lookup(mol, atoms, ranks);
+    let (hit, status) = crate::templates::lookup_with(mol, atoms, ranks, over);
     if let Some(p) = hit {
         return (p, status);
     }
@@ -659,7 +661,7 @@ mod tests {
                 if sys.rings.is_empty() || sys.atoms.len() < 6 {
                     continue;
                 }
-                let (pos, deg) = layout_local(&m, &sys, &ranks);
+                let (pos, deg) = layout_local(&m, &sys, &ranks, None);
                 // **只算真正走了松弛那条路的系统。** 邻稠系统走的是正多边形
                 // 拼接,拿它去和强行松弛比,当然赢 —— 那样这条判据就是空过的。
                 if deg.is_none() {
@@ -711,7 +713,7 @@ mod tests {
         let ranks = omgkit_io::canon::canonical_ranks(&m);
         let rings = ring_set(&m);
         let sys = group(&fused_ring_systems(&m), &rings);
-        layout_local(&m, &sys[0], &ranks)
+        layout_local(&m, &sys[0], &ranks, None)
     }
 
     fn bond_lengths(m: &MolBuilder, pos: &BTreeMap<u32, Point2>) -> Vec<f64> {
@@ -829,7 +831,7 @@ mod tests {
             let rs = omgkit_chem::sssr::ring_set(&m);
             let syss = group(&omgkit_chem::rings::fused_ring_systems(&m), &rs);
             let sys = syss.iter().max_by_key(|s| s.atoms.len()).expect("有环系统");
-            let (_, deg) = layout_local(&m, sys, &ranks);
+            let (_, deg) = layout_local(&m, sys, &ranks, None);
             let Some(Degradation::BridgedRingSystem { atoms, template }) = deg else {
                 panic!("{smi} 该报桥环退化,得到 {deg:?}");
             };
@@ -843,7 +845,7 @@ mod tests {
             // 标志位仍报 Hit),先前这条判据是绿的。所以还要验坐标真的等于
             // 表里那一组。
             if want {
-                let (pos, _) = layout_local(&m, sys, &ranks);
+                let (pos, _) = layout_local(&m, sys, &ranks, None);
                 let (tpl, _) = crate::templates::lookup(&m, &atoms, &ranks);
                 let tpl = tpl.expect("报了 Hit 就该查得到");
                 for (a, p) in &tpl {
@@ -895,7 +897,7 @@ mod tests {
         let rings = ring_set(&m);
         let sys = group(&fused_ring_systems(&m), &rings);
         let s = sys.iter().max_by_key(|s| s.atoms.len()).expect("有环系统");
-        let (pos, _) = layout_local(&m, s, &ranks);
+        let (pos, _) = layout_local(&m, s, &ranks, None);
         let pts: Vec<Point2> = pos.values().copied().collect();
         let mut ds: Vec<i64> = (0..pts.len())
             .flat_map(|i| ((i + 1)..pts.len()).map(move |j| (i, j)))
@@ -921,6 +923,20 @@ mod generator {
     use crate::geom::Point2;
 
     const TOP: usize = 50;
+    /// 短名单:每个骨架留几个候选交给整分子打分。
+    ///
+    /// # 这个数是量出来的
+    ///
+    /// 光骨架的 `Quality` 常常分不出高下 —— 双环[2.2.2]辛烷的 8 个候选**前两档
+    /// 完全相同**(自交 0、偏差 0.203),而它们造成的整分子交叉是 2 到 20。
+    /// 名单太短就把好解筛掉了:取 8 时有 3 条骨架选中最后一名(说明边界还在
+    /// 起约束作用);取 16 之后选中名次一路用到 #8/#9/#11/#13/#14。
+    ///
+    /// **但 16 不是"被证明够用",是碰巧落得好 —— 别随手调大。** 实测调到 48:
+    /// 目标侧继续变好(逐骨架交叉总和 34→30,金刚烷 8→4),而**全量审计的键
+    /// 交叉反而从 40 涨到 44**。要动这个数,先确认打分的口径与审计报的量是
+    /// 同一个 —— 见 `score_on_molecules` 里那段"数有没有,不是数几处"。
+    const SHORTLIST: usize = 16;
     /// 每个骨架的基础搜索预算。
     const TRIES: usize = 20_000;
     /// 基础预算跑完仍自交时,最多再搜到这个数,**一到 0 交叉就停**。
@@ -951,11 +967,160 @@ mod generator {
         z ^ (z >> 31)
     }
 
+    /// 一个候选的整分子分数。**越小越好。**
+    ///
+    /// # 为什么必须按整分子算
+    ///
+    /// `Quality` 全在**光骨架**上算,而骨架好看不代表挂上取代基好看 —— 取代基
+    /// 从环上哪个方向伸出去取决于环的形状,`Quality` 对此一无所知。实测:
+    /// 双环[2.2.2]辛烷的 8 个候选骨架质量**完全等价**(自交 0、偏差 0.203),
+    /// 造成的整分子交叉却是 2 到 20,而表里存的正是最差的那个。
+    ///
+    /// 更根本的是:其中三个候选连**两两距离多重集都相同**(同一个形状,差别只在
+    /// 哪个骨架原子落在哪个位置,也就是自同构的选取)。**任何骨架级的几何量对
+    /// 自同构都是不变的,结构上就看不见这个差别** —— 只能拿真实分子去问。
+    ///
+    /// 试过的骨架级代理指标(第二档换成它们,在 187 个分子上量整分子交叉/未解):
+    /// 键长偏差 92/329、最近原子距离 92/339、靠太近的原子对数 92/337、
+    /// 共线原子数 92/333、回转半径 80/300 —— **整分子打分 60/226**。
+    type MolScore = (usize, usize, usize, usize, usize);
+
+    /// 拿真实分子给一个候选打分:`(交叉, 未解冲突, 原子重合, 标签塞不下, 骨架 180°)`。
+    ///
+    /// 后两档是审核实测补上的:只按前三档挑,**骨架 180° 会从 240 涨到 250、
+    /// 标签塞不下从 49 涨到 61**;补上之后前三档一处不掉,这两档反而好过现状
+    /// (198 / 44)。
+    fn score_on_molecules(mols: &[String], skel: &str, coords: &[(f64, f64)]) -> MolScore {
+        let mut out: MolScore = (0, 0, 0, 0, 0);
+        for smi in mols {
+            let Ok(mut m) = omgkit_io::smiles::parse(smi) else {
+                continue;
+            };
+            if omgkit_chem::pipeline::sanitize(&mut m).is_err() {
+                continue;
+            }
+            omgkit_io::stereo::perceive_bond_stereo(&mut m);
+            for style in &crate::style::Style::ALL {
+                let d = crate::generate_with(&m, style, Some((skel, coords)));
+                let grown = d.drawn(&m);
+                let mol = &*grown;
+                // **数「这张图有没有」,不是「有几处」。** 审计报的是 17662 张
+                // 图里的**发生率**,而打分先前求的是 185 个分子上的**总数** ——
+                // 两者不是一回事:把总数从 8 压到 4,完全可能是把 2 张各 4 处
+                // 交叉的图变成 4 张各 1 处,总数减半而发生率翻倍。
+                //
+                // 实测过:按总数打分时把短名单从 16 放到 48,目标侧交叉总和
+                // 34→30(变好),而全量审计的键交叉 40→**44**(变坏)。
+                // **优化的量必须与报告的量是同一个。**
+                out.0 += usize::from(!d.crossings.is_empty());
+                out.1 += usize::from(!d.unresolved.is_empty());
+                // **阈值与 `audit.rs::no_atom_sits_on_another` 同口径(0.05 个
+                // 键长)。** 先前写的是 1e-6,严了五万倍 —— 实测 864 个候选里
+                // 只有 1 个非零,这一档从没决定过任何一次选择,而审计报的
+                // 79 处「原子不重合」违例(距离在 1e-6 与 0.05 之间)它一个
+                // 都看不见。**优化的量必须与报告的量是同一个。**
+                const OVERLAP: f64 = 0.05;
+                for i in 0..d.coords.len() {
+                    for j in (i + 1)..d.coords.len() {
+                        if d.coords[i].dist(d.coords[j]) < OVERLAP {
+                            out.2 += 1;
+                        }
+                    }
+                }
+                let labels: Vec<Option<crate::label::Label>> = (0..mol.num_atoms())
+                    .map(|a| {
+                        crate::render::label_at(
+                            mol,
+                            u32::try_from(a).expect("原子数超出 u32"),
+                            style,
+                            &d.coords,
+                        )
+                    })
+                    .collect();
+                for b in mol.bonds() {
+                    if crate::render::is_squeezed(
+                        d.coords[b.begin as usize],
+                        d.coords[b.end as usize],
+                        labels[b.begin as usize].as_ref(),
+                        labels[b.end as usize].as_ref(),
+                        style,
+                    ) {
+                        out.3 += 1;
+                    }
+                }
+                // **要过滤掉 sp 原子。** 审计报的「骨架原子被摆成 180°」用的是
+                // `accidental_collinear`,它多一道 sp 过滤(有三键、或两根双键
+                // 的本来就该 180°)。裸 `is_collinear` 实测命中 228 次,其中
+                // **74 次是真正的 sp** —— 三成是在惩罚正确的丙二烯几何。
+                // 这一档实测决定了 54 条骨架里 8 条的选择,不是可有可无的。
+                for a in 0..u32::try_from(mol.num_atoms()).expect("原子数超出 u32") {
+                    if !crate::render::is_collinear(mol, a, &d.coords) {
+                        continue;
+                    }
+                    let mut doubles = 0usize;
+                    let mut triple = false;
+                    for (_, bi) in mol.neighbors(a) {
+                        match mol.bonds()[bi as usize].order {
+                            omgkit_core::BondOrder::Triple => triple = true,
+                            omgkit_core::BondOrder::Double => doubles += 1,
+                            _ => {}
+                        }
+                    }
+                    if !(triple || doubles >= 2) {
+                        out.4 += 1;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// 把一个候选放进短名单:按量化坐标序列去重,按 `Quality` 排序,只留前
+    /// [`SHORTLIST`] 个。
+    fn offer(
+        pool: &mut Vec<(Quality, BTreeMap<u32, Point2>)>,
+        q: Quality,
+        p: BTreeMap<u32, Point2>,
+    ) {
+        if pool.iter().any(|(b, _)| b.2 == q.2) {
+            return; // 同一个解,不重复入选
+        }
+        pool.push((q, p));
+        pool.sort_by(|x, y| x.0.cmp(&y.0));
+        pool.truncate(SHORTLIST);
+    }
+
+    /// 把候选按**规范秩**摊平成表里那种坐标数组。
+    fn flatten(p: &BTreeMap<u32, Point2>, ranks: &[u32]) -> Vec<(f64, f64)> {
+        let mut v: Vec<(u32, Point2)> = p.iter().map(|(a, q)| (ranks[*a as usize], *q)).collect();
+        v.sort_by_key(|x| x.0);
+        v.iter().map(|(_, q)| (q.x, q.y)).collect()
+    }
+
+    /// 从短名单里挑一个:**整分子打分定胜负,骨架 `Quality` 只当平局兜底。**
+    ///
+    /// 抽成函数是为了判据能调它 —— 判据自己再写一遍选择逻辑的话,改坏了选择
+    /// 它照样绿(实测:把整分子分数从排序键里去掉,自己算分数的那版判据不红)。
+    fn pick_best(
+        pool: Vec<(Quality, BTreeMap<u32, Point2>)>,
+        mols: &[String],
+        skel: &str,
+        ranks: &[u32],
+    ) -> Option<(Quality, BTreeMap<u32, Point2>)> {
+        pool.into_iter()
+            .map(|(q, p)| {
+                let flat = flatten(&p, ranks);
+                (score_on_molecules(mols, skel, &flat), q, p)
+            })
+            .min_by(|x, y| (x.0, &x.1).cmp(&(y.0, &y.1)))
+            .map(|(_, q, p)| (q, p))
+    }
+
     /// 搜一条骨架,返回它在表里那一行。搜不出来(解析/sanitize 失败等)返回 `None`。
     ///
     /// 抽成函数是为了能并行 —— 各条骨架彼此独立,`std::thread::scope` 一 spawn
     /// 就行,每条自己一条种子流,确定性不受影响。
-    fn one_skeleton(skel: &str, n: usize) -> Option<String> {
+    fn one_skeleton(skel: &str, n: usize, mols: &[String]) -> Option<String> {
         let mut m = omgkit_io::smiles::parse(skel).ok()?;
         omgkit_chem::pipeline::sanitize(&mut m).ok()?;
         let ranks = omgkit_io::canon::canonical_ranks(&m);
@@ -980,15 +1145,14 @@ mod generator {
         // 实测就是这么栽的:morphine 的偏差卡在 0.620,而跑满能到 0.443。
         //
         // 所以这里把 `relax` 的多起点部分照抄一遍,**只是不查表**。
-        let mut best: Option<(Quality, BTreeMap<u32, Point2>)> = None;
+        // **留一份短名单,不是只留一个。** 光骨架的 `Quality` 常常分不出高下,
+        // 真正的差别要拿真实分子才问得出来 —— 见 `score_on_molecules`。
+        let mut pool: Vec<(Quality, BTreeMap<u32, Point2>)> = Vec::new();
         for seed in 0..SEEDS {
             let out = relax_from(&m, &sorted, seed, &s.rings, &ranks);
             let q = quality(&m, &out, &ranks);
-            if best.as_ref().is_none_or(|(b, _)| q < *b) {
-                best = Some((q, out));
-            }
+            offer(&mut pool, q, out);
         }
-        let mut best = best?;
 
         let mut st = 0x51ED_270B_D5AB_C0DEu64 ^ (cnt as u64);
         let r = BOND_LEN * cnt as f64 / std::f64::consts::TAU;
@@ -1000,7 +1164,7 @@ mod generator {
         // 那个。实测差得很多:morphine 那条偏差 0.620,跑满是 0.443;34 原子
         // 那条 0.384 → 0.293。全量语料的交叉/退化/冲突一处不动,纯赚。
         for k in 0..ESCALATE.max(TRIES) {
-            if k == TRIES && best.0 .0 == 0 {
+            if k == TRIES && pool.first().is_some_and(|(q, _)| q.0 == 0) {
                 break;
             }
             let mut p = vec![Point2::ORIGIN; cnt];
@@ -1012,10 +1176,15 @@ mod generator {
             }
             let out = settle(p, cnt, &bonded, &sorted);
             let q = quality(&m, &out, &ranks);
-            if q < best.0 {
-                best = (q, out);
-            }
+            offer(&mut pool, q, out);
         }
+        // 弧法的解也进名单(它摆不出来时自己报 `None`)
+        if let Some(p) = crate::arcs::place(&s.rings, &ranks) {
+            let q = quality(&m, &p, &ranks);
+            offer(&mut pool, q, p);
+        }
+
+        let best = pick_best(pool, mols, skel, &ranks)?;
 
         // 按**骨架自己的规范秩**存坐标,查表时才对得上
         let mut by_rank: Vec<(u32, Point2)> = best
@@ -1039,6 +1208,113 @@ mod generator {
         Some(line)
     }
 
+    /// 整分子打分**确实在定胜负**,而不是摆设。
+    ///
+    /// # 为什么拿双环[2.2.2]辛烷
+    ///
+    /// 它的候选里有一批**骨架 `Quality` 前两档完全相同**的(自交 0、偏差 0.203),
+    /// 而它们造成的整分子交叉是 2 到 20 —— 骨架级的任何量都分不出高下,只能拿
+    /// 真实分子去问。其中三个候选连**两两距离多重集都相同**(同一个形状,差别
+    /// 只在哪个骨架原子落在哪个位置,也就是自同构的选取),**任何骨架级几何量
+    /// 对自同构都是不变的,结构上就看不见**。
+    ///
+    /// 这条比"去找骨架自交更少但整分子更差的对立"结实得多 —— 那种严格对立
+    /// 全语料只有 1 条骨架撑着,搜索预算一改就可能整条消失。
+    #[test]
+    fn the_whole_molecule_score_is_what_decides() {
+        let skel = "C1CC2CCC1CC2";
+        let mut m = omgkit_io::smiles::parse(skel).expect("该能解析");
+        omgkit_chem::pipeline::sanitize(&mut m).expect("该能 sanitize");
+        let ranks = omgkit_io::canon::canonical_ranks(&m);
+        let rs = omgkit_chem::sssr::ring_set(&m);
+        let sys = group(&omgkit_chem::rings::fused_ring_systems(&m), &rs);
+        let s = sys.iter().max_by_key(|s| s.atoms.len()).expect("有环系");
+
+        // **取自 `harness/corpus/large.smi`,不是编的。** 这一点要紧:头一版
+        // 我自己写了四个简单取代的双环[2.2.2]辛烷,结果按 `Quality` 排第一的
+        // 候选就已经是 0 交叉 —— 判据自己的守卫当场拦下,说"验不出东西"。
+        // 真实分子挂着大取代基,才问得出候选之间的差别。
+        let mols: Vec<String> = [
+            r"C1CC2CCN1C(=C/c1cnccc1)\C2=O",
+            "C1C[S+]2CC[S+]1CC2",
+            "CCCCC12CCC(CC1=O)(CC2)O",
+            "CCOC(C1C(C2CCC1CC2)C(=O)OCC)=O",
+            "COC(C1=C[C@H]2[C@@H](C[C@@H]1OC2=O)C#N)=O",
+            "COc1c(c(ccc1/C=C1/C(C2CCN1CC2)=O)OC)OC",
+            "COc1cc2c(ccnc2cc1)[C@H](C1CC2CCN1CC2CC)O",
+            "COc1ccccc1/C=C1/C(C2CCN1CC2)=O",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+
+        // 攒一批候选:5 个初值 + 一批带扰动的多起点
+        let mut sorted: Vec<u32> = (0..u32::try_from(m.num_atoms()).unwrap()).collect();
+        sorted.sort_by_key(|a| (ranks[*a as usize], *a));
+        let cnt = sorted.len();
+        let idx: BTreeMap<u32, usize> = sorted.iter().enumerate().map(|(i, a)| (*a, i)).collect();
+        let mut bonded: Vec<(usize, usize)> = m
+            .bonds()
+            .iter()
+            .filter_map(|b| Some((*idx.get(&b.begin)?, *idx.get(&b.end)?)))
+            .map(|(u, v)| if u <= v { (u, v) } else { (v, u) })
+            .collect();
+        bonded.sort_unstable();
+
+        let mut pool: Vec<(Quality, BTreeMap<u32, Point2>)> = Vec::new();
+        for seed in 0..SEEDS {
+            let out = relax_from(&m, &sorted, seed, &s.rings, &ranks);
+            let q = quality(&m, &out, &ranks);
+            offer(&mut pool, q, out);
+        }
+        let mut st = 0x51ED_270B_D5AB_C0DEu64 ^ (cnt as u64);
+        let r = BOND_LEN * cnt as f64 / std::f64::consts::TAU;
+        for _ in 0..4000 {
+            let mut p = vec![Point2::ORIGIN; cnt];
+            for (i, q) in p.iter_mut().enumerate() {
+                let j = (splitmix(&mut st) % 1000) as f64 / 1000.0 - 0.5;
+                let t = std::f64::consts::TAU * (i as f64 + j * 3.0) / cnt as f64;
+                let rad = r * (1.0 + ((splitmix(&mut st) % 1000) as f64 / 1000.0 - 0.5) * 0.6);
+                *q = Point2::new(rad, 0.0).rotated(t);
+            }
+            let out = settle(p, cnt, &bonded, &sorted);
+            let q = quality(&m, &out, &ranks);
+            offer(&mut pool, q, out);
+        }
+        assert!(pool.len() >= 4, "只攒到 {} 个候选,验不出东西", pool.len());
+
+        let flat = |p: &BTreeMap<u32, Point2>| flatten(p, &ranks);
+        let scores: Vec<MolScore> = pool
+            .iter()
+            .map(|(_, p)| score_on_molecules(&mols, skel, &flat(p)))
+            .collect();
+
+        // 候选之间的整分子交叉**确实不同** —— 否则这条判据是空过的
+        let (lo, hi) = (
+            scores.iter().map(|s| s.0).min().expect("非空"),
+            scores.iter().map(|s| s.0).max().expect("非空"),
+        );
+        assert!(hi > lo, "候选的整分子交叉全是 {lo},分不出高下,判据空过");
+
+        // 按 `Quality` 排第一的那个,**不是**整分子最好的那个
+        let by_quality = scores[0].0;
+        assert!(
+            by_quality > lo,
+            "`Quality` 排第一的整分子交叉是 {by_quality},已经是最好的 {lo} —— \
+             这条判据在这个骨架上验不出东西了,该换骨架"
+        );
+
+        // **实现真的挑了整分子最好的那个。** 这一句必须调 `pick_best`,不能
+        // 自己再写一遍选择逻辑 —— 自己写的话,把整分子分数从排序键里去掉,
+        // 判据照样是绿的(实测过)。
+        let picked = pick_best(pool, &mols, skel, &ranks).expect("名单非空");
+        let got = score_on_molecules(&mols, skel, &flat(&picked.1)).0;
+        assert_eq!(
+            got, lo,
+            "实现挑出来的整分子交叉是 {got},名单里最好的是 {lo}"
+        );
+    }
+
     #[test]
     #[ignore]
     fn regenerate_templates() {
@@ -1052,6 +1328,8 @@ mod generator {
         let extra = std::fs::read_to_string("../../harness/corpus/bridged.smi").unwrap();
         let mut freq: BTreeMap<String, usize> = BTreeMap::new();
         let mut must: BTreeSet<String> = BTreeSet::new();
+        // 骨架 → 用它的真实分子(规范 SMILES)。打分就拿这些分子跑。
+        let mut by_skel: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (line, is_extra) in text
             .lines()
             .map(|l| (l, false))
@@ -1072,12 +1350,15 @@ mod generator {
             }
             let ranks = omgkit_io::canon::canonical_ranks(&m);
             let rs = omgkit_chem::sssr::ring_set(&m);
+            // 这个分子里退化的环系有几个 —— **打分只收恰好一个的**,见下
+            let mut degraded_here: Vec<String> = Vec::new();
             for sys in group(&omgkit_chem::rings::fused_ring_systems(&m), &rs) {
-                let (_, deg) = layout_local(&m, &sys, &ranks);
+                let (_, deg) = layout_local(&m, &sys, &ranks, None);
                 if deg.is_none() {
                     continue;
                 }
                 if let Some(k) = crate::templates::skeleton_of(&m, &sys.atoms, &ranks) {
+                    degraded_here.push(k.clone());
                     // **频次只由 `large.smi` 定。** 额外语料若也计数,它贡献的
                     // 那一两次会把排名搅动 —— 实测原本第 47~50 名的 4 个骨架
                     // 被挤出了前 `TOP`,凭空丢了模板。额外语料只管覆盖面。
@@ -1087,6 +1368,18 @@ mod generator {
                         *freq.entry(k).or_default() += 1;
                     }
                 }
+            }
+            // **打分分子只收"恰好含一个退化环系"的。**
+            //
+            // 含两个的话,打分时另一个会去查**正在生成的那张表** —— 生成器就
+            // 不再是语料的纯函数,「把 `TABLE` 清空重跑逐字节相同」这条验收
+            // 当场作废。实测目前一个都没有,但那是语料的偶然性质,不是结构
+            // 保证:往 `bridged.smi` 里加一个双桥环分子就破。
+            if degraded_here.len() == 1 {
+                by_skel
+                    .entry(degraded_here.remove(0))
+                    .or_default()
+                    .push(omgkit_io::canon::canonical_smiles(&m).smiles);
             }
         }
         let mut v: Vec<(String, usize)> = freq.into_iter().collect();
@@ -1107,6 +1400,12 @@ mod generator {
         }
         keep.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
+        // **打分分子的清单必须可复现。** 排序 + 去重,与文件行序、与写法都无关。
+        for v in by_skel.values_mut() {
+            v.sort_unstable();
+            v.dedup();
+        }
+
         // 二、对每个骨架跑带扰动的多起点,按现成的 Quality 挑最好的
         //
         // **各条骨架彼此完全独立,所以并行跑。** 每条自己一条 splitmix 种子流、
@@ -1115,7 +1414,10 @@ mod generator {
         let lines: Vec<Option<String>> = std::thread::scope(|sc| {
             let handles: Vec<_> = keep
                 .iter()
-                .map(|(skel, n)| sc.spawn(move || one_skeleton(skel, *n)))
+                .map(|(skel, n)| {
+                    let ms = by_skel.get(skel).cloned().unwrap_or_default();
+                    sc.spawn(move || one_skeleton(skel, *n, &ms))
+                })
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });

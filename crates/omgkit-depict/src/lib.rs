@@ -157,6 +157,19 @@ pub(crate) fn tests_prep(smi: &str) -> MolBuilder {
 /// 但环会被当成链画出来。
 #[must_use]
 pub fn generate(mol: &MolBuilder, style: &Style) -> Depiction {
+    generate_with(mol, style, None)
+}
+
+/// 同 [`generate`],但可以临时顶替模板表里某一条。**只给离线的模板生成器用。**
+///
+/// 生成器要问"把这组坐标装进去之后,真实分子画出来好不好",而 `generate` 会查
+/// 那张表 —— 表正是它在生成的东西。这个参数把那层循环拆开,见
+/// [`templates::Override`]。
+pub(crate) fn generate_with(
+    mol: &MolBuilder,
+    style: &Style,
+    over: templates::Override<'_>,
+) -> Depiction {
     // **先补显式氢,再做别的。** 有些立体中心三根键全在环上,唯一合法的楔形是
     // C–H —— 那个氢不画出来,构型就只能画到环键上(见 [`hydrogens`])。
     //
@@ -177,7 +190,7 @@ pub fn generate(mol: &MolBuilder, style: &Style) -> Depiction {
     let laid = as_plain_bonds(mol);
     let mol = laid.as_ref().unwrap_or(mol);
 
-    let mut pieces = layout::layout_all(mol, &ranks, style);
+    let mut pieces = layout::layout_all(mol, &ranks, style, over);
     // **分量从左到右的次序也要与写法无关。** 分量本身是按连通性收集的,次序跟着
     // 原子的存储下标走 —— 同一个盐换个写法,两个离子就左右对调,于是整张图的
     // 每一个图元都挪了位。实测:语料里 4 个盐/配合物正是这么差出来的。

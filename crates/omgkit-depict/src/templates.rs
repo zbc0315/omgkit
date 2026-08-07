@@ -80,16 +80,44 @@ pub enum Status {
 ///
 /// **状态与坐标一起返回**,别让调用方为了知道"命中没有"再调一次 —— 这里面是
 /// 建分子 + sanitize + 规范化,每个桥环系统、每种规范、审计里每种写法都要付。
-pub fn lookup(
+/// 临时顶替表里某一条的坐标。**只给离线的模板生成器用。**
+///
+/// 生成器要问"把这组坐标装进去之后,真实分子画出来好不好",而 `generate` 会查
+/// 这张表 —— 表正是它在生成的东西。这个参数把那层循环拆开。
+///
+/// **为什么是穿参数,不是全局状态。** 试过 `cfg(test)` + `thread_local`:
+/// 它有隐藏状态、panic 之后覆盖会留在线程里、将来 `generate` 内部要是并行就坏。
+/// 穿参数多改四个 `pub(crate)` 签名,但没有这些问题,而且看得见。
+pub(crate) type Override<'a> = Option<(&'a str, &'a [(f64, f64)])>;
+
+/// 同 [`lookup`],但可以临时顶替表里某一条。见 [`Override`]。
+///
+/// **状态与坐标一起返回**,别让调用方为了知道"命中没有"再调一次 —— 那里面是
+/// 建分子 + sanitize + 规范化,每个桥环系统、每种规范、审计里每种写法都要付。
+pub(crate) fn lookup_with(
     mol: &MolBuilder,
     atoms: &[u32],
     ranks: &[u32],
+    over: Override<'_>,
 ) -> (Option<BTreeMap<u32, Point2>>, Status) {
     let Some(skel) = skeleton_of(mol, atoms, ranks) else {
         return (None, Status::NoFingerprint);
     };
-    let Some(coords) = TABLE.iter().find(|(k, _)| *k == skel).map(|(_, v)| *v) else {
-        return (None, Status::NotInTable);
+    // **给了覆盖时,整张表都被遮住。**
+    //
+    // 生成器要问"把这组坐标装进去之后,真实分子画出来好不好"。若只遮住匹配的
+    // 那一条、其余仍读 `TABLE`,而打分分子里恰好还有**另一个**桥环骨架,那一条
+    // 就会读到**正在生成的那张表** —— 生成器就不再是语料的纯函数,
+    // 「把 `TABLE` 清空重跑逐字节相同」这条验收当场作废。
+    //
+    // 遮住整张表,这件事就成了**结构保证**,不再依赖"语料里碰巧没有这种分子"。
+    let coords = match over {
+        Some((k, v)) if k == skel => v,
+        Some(_) => return (None, Status::NotInTable),
+        None => match TABLE.iter().find(|(k, _)| *k == skel).map(|(_, v)| *v) {
+            Some(v) => v,
+            None => return (None, Status::NotInTable),
+        },
     };
 
     // 重建同一个骨架,拿它自己的规范秩去对坐标 —— 存的时候就是按这个存的。
@@ -137,6 +165,17 @@ pub fn lookup(
     (Some(out), Status::Hit)
 }
 
+/// 查表:这个环系有没有预存的坐标,以及没有的话是哪一种没有。
+///
+/// 返回的坐标按**父分子的原子编号**给出,已经对上号了。
+pub fn lookup(
+    mol: &MolBuilder,
+    atoms: &[u32],
+    ranks: &[u32],
+) -> (Option<BTreeMap<u32, Point2>>, Status) {
+    lookup_with(mol, atoms, ranks, None)
+}
+
 include!("templates_data.rs");
 
 #[cfg(test)]
@@ -158,11 +197,92 @@ mod tests {
         "CN1[C@H]2CC[C@@H]1C[C@@H](C2)OC(=O)C(CO)c1ccccc1", // 阿托品
     ];
 
+    /// 不给覆盖时,`lookup_with` 必须与表里那一行**逐位相同**。
+    ///
+    /// 这条守的是"加了覆盖这条路,没覆盖时的行为一个字节都没变"。
+    /// **不能写成"比较有/无覆盖机制两个版本"** —— 同一个测试二进制里编不出
+    /// "没有覆盖机制"的那一版,那种判据根本落不了地。
+    #[test]
+    fn without_an_override_the_table_is_what_comes_back() {
+        let mut checked = 0usize;
+        for (skel, coords) in TABLE {
+            let mut m = omgkit_io::smiles::parse(skel).expect("表里的骨架该能解析");
+            omgkit_chem::pipeline::sanitize(&mut m).expect("该能 sanitize");
+            let ranks = omgkit_io::canon::canonical_ranks(&m);
+            let atoms: Vec<u32> = (0..u32::try_from(m.num_atoms()).unwrap()).collect();
+            let (got, st) = lookup_with(&m, &atoms, &ranks, None);
+            let Some(got) = got else { continue };
+            assert_eq!(st, Status::Hit);
+            // 坐标按骨架自己的规范秩存,取回来逐位比
+            for (a, p) in &got {
+                let (x, y) = coords[ranks[*a as usize] as usize];
+                assert!(
+                    p.x.to_bits() == x.to_bits() && p.y.to_bits() == y.to_bits(),
+                    "{skel} 的原子 {a}:取回 {p:?},表里是 ({x}, {y})"
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked >= 40, "只验到 {checked} 条,判据太弱");
+    }
+
+    /// 给了覆盖时,拿回来的必须是覆盖的那一份,不是表里的。
+    #[test]
+    fn an_override_really_replaces_that_one_row() {
+        let skel = "C1C2CCC1CC2";
+        let mut m = omgkit_io::smiles::parse(skel).expect("该能解析");
+        omgkit_chem::pipeline::sanitize(&mut m).expect("该能 sanitize");
+        let ranks = omgkit_io::canon::canonical_ranks(&m);
+        let atoms: Vec<u32> = (0..u32::try_from(m.num_atoms()).unwrap()).collect();
+        let n = m.num_atoms();
+
+        // 一组一眼认得出来的坐标:第 i 个原子放在 (i, -i)
+        #[allow(clippy::cast_precision_loss)]
+        let fake: Vec<(f64, f64)> = (0..n).map(|i| (i as f64, -(i as f64))).collect();
+        let (got, st) = lookup_with(&m, &atoms, &ranks, Some((skel, &fake)));
+        assert_eq!(st, Status::Hit);
+        let got = got.expect("装了覆盖就该拿得到");
+        for (a, p) in &got {
+            let (x, y) = fake[ranks[*a as usize] as usize];
+            assert!(
+                (p.x - x).abs() < 1e-12 && (p.y - y).abs() < 1e-12,
+                "{skel} 的原子 {a}:拿回 {p:?},覆盖里是 ({x}, {y})"
+            );
+        }
+
+        // **覆盖的是另一条骨架时,这一条也读不到表。**
+        //
+        // 这是有意的:给了覆盖就遮住整张表。生成器打分时,分子里若还有别的
+        // 桥环骨架,那一条读到的就会是**正在生成的那张表** —— 纯函数性当场破。
+        // 遮住整张表把这件事变成结构保证,不再依赖"语料里碰巧没有这种分子"。
+        let (other, st2) = lookup_with(&m, &atoms, &ranks, Some(("C1CC2CCC1CC2", &fake)));
+        assert!(other.is_none(), "覆盖了别的骨架,这一条不该还能读到表");
+        assert_eq!(st2, Status::NotInTable);
+        // 而不给覆盖时照旧
+        let (plain, st3) = lookup_with(&m, &atoms, &ranks, None);
+        assert!(
+            plain.is_some() && st3 == Status::Hit,
+            "不给覆盖时该读得到表"
+        );
+    }
+
     /// 表里的坐标自己有多少处自交。
     ///
     /// 生成器打出来的 `// 出现 N 次,自交 M` 只是**注释** —— 人改一行坐标它不会
-    /// 变红。而"自交非零的条目从 10 条降到 6 条"这个成果,先前就全挂在那串注释上。
-    /// 这条判据把坐标重新算一遍。
+    /// 变红。这条判据把坐标重新算一遍。
+    ///
+    /// # 这个数**不是**优化目标,只是粗线条的回归闸
+    ///
+    /// 生成器现在按**整分子**打分挑候选(见 `rings.rs` 的 `score_on_molecules`),
+    /// 光骨架的自交数只是平局兜底的一部分。两者会背离,而且这次正是背离的:
+    ///
+    /// | | 骨架自交总数 | 全量语料的整分子键交叉 |
+    /// |---|---:|---:|
+    /// | 按骨架挑 | 8 | 62 |
+    /// | 按整分子挑 | **9** | **40** |
+    ///
+    /// 多一处骨架自交,换掉 22 处整分子交叉 —— **这恰恰证明骨架自交是错的
+    /// 代理指标**。所以这里的上界跟着新口径走,别把它当成"越小越好"。
     #[test]
     fn the_stored_coordinates_do_not_cross_more_than_they_used_to() {
         let mut total = 0usize;
@@ -204,9 +324,9 @@ mod tests {
             total += cross;
         }
         worst.sort_unstable();
-        // 现值:6 条自交,总数 8(2+2+1+1+1+1)。**只许降不许升。**
+        // 现值:7 条自交,总数 9。上界是回归闸,不是优化目标 —— 见本判据的文档。
         assert!(
-            total <= 8,
+            total <= 9,
             "表里的自交总数涨到了 {total},还剩 {} 条自交:{worst:?}",
             worst.len()
         );

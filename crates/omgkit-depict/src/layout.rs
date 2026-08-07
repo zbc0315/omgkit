@@ -43,7 +43,12 @@ pub(crate) struct Piece {
 }
 
 /// 给整个分子布局,返回逐分量的结果(尚未并排摆开)。
-pub(crate) fn layout_all(mol: &MolBuilder, ranks: &[u32], style: &Style) -> Vec<Piece> {
+pub(crate) fn layout_all(
+    mol: &MolBuilder,
+    ranks: &[u32],
+    style: &Style,
+    over: crate::templates::Override<'_>,
+) -> Vec<Piece> {
     let comps = components(mol);
     let rings_all = ring_set(mol);
     let mut systems_all = rings::group(&fused_ring_systems(mol), &rings_all);
@@ -66,7 +71,7 @@ pub(crate) fn layout_all(mol: &MolBuilder, ranks: &[u32], style: &Style) -> Vec<
 
     comps
         .into_iter()
-        .map(|atoms| layout_component(mol, &atoms, &systems_all, ranks, style))
+        .map(|atoms| layout_component(mol, &atoms, &systems_all, ranks, style, over))
         .collect()
 }
 
@@ -131,6 +136,7 @@ fn layout_component(
     systems: &[rings::System<'_>],
     ranks: &[u32],
     style: &Style,
+    over: crate::templates::Override<'_>,
 ) -> Piece {
     let here: BTreeSet<u32> = atoms.iter().copied().collect();
     // 落在本分量里的环系统
@@ -156,7 +162,7 @@ fn layout_component(
             std::cmp::Reverse(sys_key(&systems[i], ranks)),
         )
     }) {
-        let (local, deg) = rings::layout_local(mol, &systems[i], ranks);
+        let (local, deg) = rings::layout_local(mol, &systems[i], ranks, over);
         if let Some(d) = deg {
             degraded.push(d);
         }
@@ -206,7 +212,7 @@ fn layout_component(
             if done_sys.contains(&s) {
                 continue;
             }
-            let (local, deg) = rings::layout_local(mol, &systems[s], ranks);
+            let (local, deg) = rings::layout_local(mol, &systems[s], ranks, over);
             if let Some(d) = deg {
                 degraded.push(d);
             }
@@ -252,7 +258,7 @@ fn layout_component(
                 .filter(|s| !done_sys.contains(s))
                 .collect();
             for s in sys_here {
-                let (local, deg) = rings::layout_local(mol, &systems[s], ranks);
+                let (local, deg) = rings::layout_local(mol, &systems[s], ranks, over);
                 if let Some(d) = deg {
                     degraded.push(d);
                 }
@@ -391,7 +397,7 @@ mod tests {
     fn run(smi: &str) -> (MolBuilder, Vec<Piece>) {
         let m = prep(smi);
         let ranks = omgkit_io::canon::canonical_ranks(&m);
-        let ps = layout_all(&m, &ranks, &Style::ACS_1996);
+        let ps = layout_all(&m, &ranks, &Style::ACS_1996, None);
         (m, ps)
     }
 

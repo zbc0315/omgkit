@@ -693,7 +693,7 @@ mod tests {
         let m = prep(smi);
         let ranks = omgkit_io::canon::canonical_ranks(&m);
         let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
-        for p in layout::layout_all(&m, &ranks, style) {
+        for p in layout::layout_all(&m, &ranks, style, None) {
             pos.extend(p.pos);
         }
         let rep = relieve(&m, &mut pos, &ranks, style);
@@ -723,7 +723,12 @@ mod tests {
         // 它比"翻过一根键"更贴近现在的事实,而且一旦有人把上游那个改动去掉,
         // 这一条会立刻红。
         let mut before: BTreeMap<u32, Point2> = BTreeMap::new();
-        for p in layout::layout_all(&m, &omgkit_io::canon::canonical_ranks(&m), &Style::ACS_1996) {
+        for p in layout::layout_all(
+            &m,
+            &omgkit_io::canon::canonical_ranks(&m),
+            &Style::ACS_1996,
+            None,
+        ) {
             before.extend(p.pos);
         }
         for i in 0..n {
@@ -790,7 +795,7 @@ mod tests {
                 let m = prep(smi);
                 let ranks = omgkit_io::canon::canonical_ranks(&m);
                 let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
-                for p in layout::layout_all(&m, &ranks, style) {
+                for p in layout::layout_all(&m, &ranks, style, None) {
                     pos.extend(p.pos);
                 }
                 let before = lengths(&m, &pos);
@@ -828,7 +833,7 @@ mod tests {
                 let m = prep(smi);
                 let ranks = omgkit_io::canon::canonical_ranks(&m);
                 let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
-                for p in layout::layout_all(&m, &ranks, style) {
+                for p in layout::layout_all(&m, &ranks, style, None) {
                     pos.extend(p.pos);
                 }
                 for sw in pair_swaps(&m, &pos, &ranks) {
@@ -893,7 +898,7 @@ mod tests {
                 let m = prep(smi);
                 let ranks = omgkit_io::canon::canonical_ranks(&m);
                 let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
-                for p in layout::layout_all(&m, &ranks, style) {
+                for p in layout::layout_all(&m, &ranks, style, None) {
                     pos.extend(p.pos);
                 }
                 let before = lengths(&m, &pos);
@@ -1008,7 +1013,7 @@ mod tests {
                 let m = prep(smi);
                 let ranks = omgkit_io::canon::canonical_ranks(&m);
                 let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
-                for p in layout::layout_all(&m, &ranks, style) {
+                for p in layout::layout_all(&m, &ranks, style, None) {
                     pos.extend(p.pos);
                 }
                 // 原子 → 分量号
@@ -1054,7 +1059,7 @@ mod tests {
         let m = prep("c1ccccc1");
         let ranks = omgkit_io::canon::canonical_ranks(&m);
         let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
-        for p in layout::layout_all(&m, &ranks, &Style::ACS_1996) {
+        for p in layout::layout_all(&m, &ranks, &Style::ACS_1996, None) {
             pos.extend(p.pos);
         }
         for b in 0..u32::try_from(m.num_bonds()).unwrap() {
@@ -1088,7 +1093,7 @@ mod tests {
         let m = prep("OC(=O)c1ccccc1OC(C)=O");
         let ranks = omgkit_io::canon::canonical_ranks(&m);
         let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
-        for p in layout::layout_all(&m, &ranks, &Style::ACS_1996) {
+        for p in layout::layout_all(&m, &ranks, &Style::ACS_1996, None) {
             pos.extend(p.pos);
         }
         let acs = remaining(&m, &pos, &radii(&m, &Style::ACS_1996)).0.len();
