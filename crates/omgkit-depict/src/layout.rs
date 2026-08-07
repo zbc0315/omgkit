@@ -46,11 +46,50 @@ pub(crate) struct Piece {
 pub(crate) fn layout_all(mol: &MolBuilder, ranks: &[u32], style: &Style) -> Vec<Piece> {
     let comps = components(mol);
     let rings_all = ring_set(mol);
-    let systems_all = rings::group(&fused_ring_systems(mol), &rings_all);
+    let mut systems_all = rings::group(&fused_ring_systems(mol), &rings_all);
+    // **环系统必须按规范秩定序。** `fused_ring_systems` 的返回顺序来自双连通
+    // 分解的遍历,是**存储序** —— 而下面 `of_atom` 的值就是按这个顺序堆的,
+    // 螺原子上挂着的几个系统于是按写法依赖的顺序摆出去。
+    //
+    // 平时看不出来是因为几个系统通常长得不一样,摆错顺序也还能靠"背离已放部分"
+    // 挑回来;**几个系统一模一样时就露馅**:镍配合物挂着三条完全相同的螯合环
+    // (镍是割点,三个 12 原子系统各含它一个),两种写法下系统顺序是 (5,3,4)
+    // 与 (4,5,3),摆出来差 5.29 个单位。
+    //
+    // 身份取"环系原子的规范秩有序多重集" —— 与原子编号无关,而且系统之间互不
+    // 相同(它们的原子集不同),所以这是全序,不留平局。
+    systems_all.sort_by_key(|s| {
+        let mut k: Vec<u32> = s.atoms.iter().map(|a| ranks[*a as usize]).collect();
+        k.sort_unstable();
+        k
+    });
 
     comps
         .into_iter()
         .map(|atoms| layout_component(mol, &atoms, &systems_all, ranks, style))
+        .collect()
+}
+
+/// 环系统被消费的顺序,每个用「原子规范秩的有序多重集」表示。
+///
+/// 判据要验的正是这个顺序与写法无关,而它是 `layout_all` 内部的中间量 ——
+/// 与其在判据里重算一遍(那就成了抄实现),不如把它开出来。
+#[cfg(test)]
+pub(crate) fn system_order(mol: &MolBuilder, ranks: &[u32]) -> Vec<Vec<u32>> {
+    let rings_all = ring_set(mol);
+    let mut systems_all = rings::group(&fused_ring_systems(mol), &rings_all);
+    systems_all.sort_by_key(|s| {
+        let mut k: Vec<u32> = s.atoms.iter().map(|a| ranks[*a as usize]).collect();
+        k.sort_unstable();
+        k
+    });
+    systems_all
+        .iter()
+        .map(|s| {
+            let mut k: Vec<u32> = s.atoms.iter().map(|a| ranks[*a as usize]).collect();
+            k.sort_unstable();
+            k
+        })
         .collect()
 }
 
@@ -266,6 +305,81 @@ fn away_from(from: Point2, placed: impl Iterator<Item = Point2>) -> Point2 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_ring_systems_are_consumed_in_canonical_order() {
+        // `fused_ring_systems` 的返回顺序来自双连通分解的遍历,是**存储序**;
+        // 而 `of_atom` 的值就是按这个顺序堆的,螺原子上挂着的几个系统于是按
+        // 写法依赖的顺序摆出去。
+        //
+        // 平时看不出来是因为几个系统通常长得不一样;**一模一样时就露馅**:
+        // 镍配合物挂三条完全相同的螯合环(镍是割点,三个 12 原子系统各含它
+        // 一个),两种写法下原始顺序是 (5,3,4) 与 (4,5,3),摆出来差 5.29 个单位。
+        //
+        // 这条判据验的是**顺序本身**,不看画出来的图 —— 所以它与模板表无关,
+        // 换表不会让它空过。
+        for smi in [
+            // 镍配合物,三个一模一样的螯合环
+            "C[N+]12CCCC1C3=CC=C[N+](=C3)[Ni++]245([N+]6=CC(=CC=C6)C7CCC[N+]47C)\
+             [N+]8=CC(=CC=C8)C9CCC[N+]59C.SC#N",
+            "c1ccc2ccccc2c1.c1ccccc1", // 两个分量各带环系
+            "C1CC1c1ccccc1C2CC2",      // 一条链上挂三个环系
+        ] {
+            let smi: String = smi.split_whitespace().collect();
+            let mut m = omgkit_io::smiles::parse(&smi).expect("SMILES 该能解析");
+            omgkit_chem::pipeline::sanitize(&mut m).expect("该能 sanitize");
+            let ranks = omgkit_io::canon::canonical_ranks(&m);
+            let base = system_order(&m, &ranks);
+            assert!(
+                base.len() >= 2,
+                "{smi} 只有 {} 个环系,验不出顺序",
+                base.len()
+            );
+
+            let mut compared = 0usize;
+            for seed in 0..12u64 {
+                let w = omgkit_io::smiles::write_with_priority(&m, &shuffled(m.num_atoms(), seed));
+                let Ok(mut m2) = omgkit_io::smiles::parse(&w.smiles) else {
+                    continue;
+                };
+                if omgkit_chem::pipeline::sanitize(&mut m2).is_err() {
+                    continue;
+                }
+                if omgkit_io::canon::canonical_smiles(&m2).smiles
+                    != omgkit_io::canon::canonical_smiles(&m).smiles
+                {
+                    continue;
+                }
+                let r2 = omgkit_io::canon::canonical_ranks(&m2);
+                compared += 1;
+                assert_eq!(
+                    base,
+                    system_order(&m2, &r2),
+                    "{smi} 写成 {} 之后环系统的顺序变了",
+                    w.smiles
+                );
+            }
+            assert!(compared >= 6, "{smi} 只比上了 {compared} 种写法");
+        }
+    }
+
+    /// splitmix64 + Fisher-Yates。
+    fn shuffled(n: usize, seed: u64) -> Vec<u32> {
+        let mut s = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut next = || {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        let mut v: Vec<u32> = (0..u32::try_from(n).unwrap()).collect();
+        for i in (1..n).rev() {
+            let j = usize::try_from(next() % (i as u64 + 1)).unwrap();
+            v.swap(i, j);
+        }
+        v
+    }
     use super::*;
 
     fn prep(smi: &str) -> MolBuilder {
