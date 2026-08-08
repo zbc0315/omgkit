@@ -105,6 +105,17 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
         depiction.coords.len(),
         mol.num_atoms()
     );
+    // **逐键的向量也要对得上号。** 先前只查了坐标,于是布局一旦跑在改过拓扑的
+    // 副本上(η 配位摘键,见 `crate::hapto_extras`),`wedges` 会静默地短一截
+    // —— 这里 `wedges.get(bi).unwrap_or_default()` 兜住了,而 `dump_molblock`
+    // 那种按下标取的调用方直接越界。实测二茂铁 `wedges.len()` 是 12、键数 20。
+    assert_eq!(
+        depiction.wedges.len(),
+        mol.num_bonds(),
+        "这张图不是这个分子的:楔形 {} 条,键 {} 根",
+        depiction.wedges.len(),
+        mol.num_bonds()
+    );
 
     // 芳香键要按凯库勒式画,否则苯环只剩一圈单线。只取键级,不动调用方的分子。
     let orders = drawn_orders(mol);

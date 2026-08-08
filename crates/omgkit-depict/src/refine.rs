@@ -358,7 +358,18 @@ fn remaining(mol: &MolBuilder, pos: &BTreeMap<u32, Point2>, radii: &[f64]) -> Tr
         }
     }
 
-    // 键交叉:只看两端都已放置的键
+    (pairs, crossings(mol, pos))
+}
+
+/// 交叉的键对。只看两端都已放置的键。
+///
+/// # 为什么要单独拿出来
+///
+/// 布局有时跑在一份**改过拓扑的副本**上(η5 配位的多余键被摘掉了,见
+/// `crate::hapto_extras`)。那时消冲突报的交叉少算了被摘掉的那些键 ——
+/// 而它们照样会画出来。**画不好就要说出来**,所以 `generate` 在最终坐标上
+/// 拿**原分子**再算一遍。
+pub(crate) fn crossings(mol: &MolBuilder, pos: &BTreeMap<u32, Point2>) -> Vec<(u32, u32)> {
     let live: Vec<u32> = (0..mol.num_bonds())
         .map(|i| u32::try_from(i).expect("键数超出 u32"))
         .filter(|b| {
@@ -366,16 +377,16 @@ fn remaining(mol: &MolBuilder, pos: &BTreeMap<u32, Point2>, radii: &[f64]) -> Tr
             pos.contains_key(&bd.begin) && pos.contains_key(&bd.end)
         })
         .collect();
-    let mut crossings = Vec::new();
+    let mut out = Vec::new();
     for (k, &b1) in live.iter().enumerate() {
         for &b2 in &live[k + 1..] {
             let (x, y) = (&mol.bonds()[b1 as usize], &mol.bonds()[b2 as usize]);
             if segments_cross(pos[&x.begin], pos[&x.end], pos[&y.begin], pos[&y.end]) {
-                crossings.push((b1, b2));
+                out.push((b1, b2));
             }
         }
     }
-    (pairs, crossings)
+    out
 }
 
 /// 一次螺环翻转:绕螺原子把某一个环连同挂在它上面的一切镜像过去。

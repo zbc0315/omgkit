@@ -290,6 +290,26 @@ pub(crate) fn generate_with(
     let laid = as_plain_bonds(mol);
     let mol = laid.as_ref().unwrap_or(mol);
 
+    // **η5 配位的那 5 根 σ 键会把环感知搅成一团。** 布局只留一根代表键,
+    // 见 [`hapto_extras`]。渲染仍拿原分子,一根键不少。
+    let hapto = hapto_extras(mol, &ranks);
+    let thinned = hapto.as_ref().and_then(|(extras, _)| {
+        let mut copy = MolBuilder::with_capacity(mol.num_atoms(), mol.num_bonds());
+        for a in mol.atoms() {
+            copy.add_atom_data(*a);
+        }
+        for (bi, b) in mol.bonds().iter().enumerate() {
+            if !extras.contains(&bi) {
+                copy.add_bond_data(*b).ok()?;
+            }
+        }
+        omgkit_chem::pipeline::sanitize(&mut copy).ok()?;
+        Some(copy)
+    });
+    // 摘细之前的那份 —— 交叉要拿它再算一遍,见下面
+    let whole = mol;
+    let mol = thinned.as_ref().unwrap_or(mol);
+
     let mut pieces = layout::layout_all(mol, &ranks, style, over);
     // **分量从左到右的次序也要与写法无关。** 分量本身是按连通性收集的,次序跟着
     // 原子的存储下标走 —— 同一个盐换个写法,两个离子就左右对调,于是整张图的
@@ -301,7 +321,12 @@ pub(crate) fn generate_with(
             .min()
             .unwrap_or(u32::MAX)
     });
-    let degraded: Vec<Degradation> = pieces.iter().flat_map(|p| p.degraded.clone()).collect();
+    let mut degraded: Vec<Degradation> = pieces.iter().flat_map(|p| p.degraded.clone()).collect();
+    // η 配位那几根键在平面上不可能等长,如实记一笔 ——
+    // 见 [`Degradation::HaptoCoordination`](rings::Degradation::HaptoCoordination)。
+    if let Some((_, told)) = &hapto {
+        degraded.extend(told.iter().cloned());
+    }
 
     // 分量并排摆开,再一起消冲突 —— 分量之间也可能撞上。
     //
@@ -309,7 +334,9 @@ pub(crate) fn generate_with(
     // 排会让相邻分量的标签叠在一起,而消冲突动不了分量(它只翻可旋转键,单原子
     // 分量连键都没有)。实测:NaCl 的两个离子中心间距正好 1.0,而两个标签半径
     // 各约 0.5 —— 正好贴上。
-    let radii = refine::radii(mol, style);
+    // **逐原子/逐键的东西一律拿 `whole`。** 摘细是删键,键下标会整体前移
+    // —— 拿摘细副本算出来的逐键向量与被画的分子对不上号。
+    let radii = refine::radii(whole, style);
     let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
     let mut shift = 0.0f64;
     for p in &pieces {
@@ -326,12 +353,21 @@ pub(crate) fn generate_with(
     for (a, q) in &pos {
         flat[*a as usize] = *q;
     }
-    stereo::fix_cis_trans(mol, &mut flat, &ranks);
+    stereo::fix_cis_trans(whole, &mut flat, &ranks);
     for (a, q) in pos.iter_mut() {
         *q = flat[*a as usize];
     }
 
-    let report = refine::relieve(mol, &mut pos, &ranks, style);
+    let mut report = refine::relieve(mol, &mut pos, &ranks, style);
+
+    // **摘细过的话,交叉要拿原分子再算一遍。** 消冲突跑在摘细过的副本上,
+    // 看不见被摘掉的那些 η5 键 —— 而它们照样会画出来。二茂铁实测:不补这一步
+    // 报的是 0 处交叉,而图上明明有。**画不好就要说出来。**
+    //
+    // 只在真摘过的时候算(全量语料 2 个分子),所以不给别人添成本。
+    if thinned.is_some() {
+        report.crossings = refine::crossings(whole, &pos);
+    }
 
     let mut coords = vec![Point2::ORIGIN; mol.num_atoms()];
     for (a, q) in pos {
@@ -343,7 +379,10 @@ pub(crate) fn generate_with(
     // 已经画好的楔形悬空 —— 而且线条本身看不出毛病。
     orient::canonicalise(&mut coords, &ranks);
 
-    let w = stereo::assign_wedges(mol, &coords, &ranks);
+    // 同上:`Depiction::wedges` 的下标必须与**被画的那个分子**一致。
+    // 拿摘细副本的话 `wedges.len()` 会比键数少,`dump_molblock` 那种按下标
+    // 取的调用方直接越界 —— 实测二茂铁 wedges.len()=12 而键数 20。
+    let w = stereo::assign_wedges(whole, &coords, &ranks);
 
     Depiction {
         coords,
@@ -356,6 +395,131 @@ pub(crate) fn generate_with(
         style_fingerprint: style.layout_fingerprint(),
         added,
     }
+}
+
+/// 环上被 `picked` 选中的那些原子,是不是**首尾相接的一段**(整圈也算)。
+///
+/// `ring` 是 [`omgkit_chem::sssr::Ring::atoms`],已经按环序排好。
+///
+/// # 这一条把大环螯合物挡在外面
+///
+/// 只数"金属打进这个环几根键"是不够的:卟啉、酞菁、环多胺那一类,摘掉金属之后
+/// 照样是个环,而金属对它有 4 根键。它们与 η 配位的差别在**位置**——
+/// η5 的 Cp 是 5 个**首尾相接**的碳,而 cyclam 的 4 个 N 之间隔着 2~3 个碳。
+fn contiguous_on_ring(ring: &[u32], picked: &std::collections::BTreeSet<u32>) -> bool {
+    let n = ring.len();
+    let k = ring.iter().filter(|a| picked.contains(a)).count();
+    if k < 2 {
+        return k == 1;
+    }
+    if k == n {
+        return true; // 整圈都选上了
+    }
+    // 选中的原子之间"断开"了几次;连续的一段只断一次
+    let breaks = (0..n)
+        .filter(|i| picked.contains(&ring[*i]) && !picked.contains(&ring[(i + 1) % n]))
+        .count();
+    breaks == 1
+}
+
+/// η<sup>n</sup> 配位里**多余的那些键**,给布局用。
+///
+/// # 二茂铁的 Fe 度数是 10
+///
+/// SMILES 把 η5 配位写成 5 根独立的 σ 键(`[Fe]23456789` 这样),于是环感知
+/// 吐出 9 到 10 个**三元环**(Fe + 环上相邻两个碳),它们全是这个建模方式的
+/// 假象。整个体系被当成一个巨大的桥环系统,画出来两个 Cp 环叠在一起 ——
+/// 实测 ChemDraw 规范下 8 处键交叉。
+///
+/// # 认法:摘掉金属的键再看配体自己的环
+///
+/// 金属 M 的键全摘掉之后做环感知,得到的才是**配体自己的环**。M 与某个这样的
+/// 环之间有 ≥3 根键,就是 η<sup>n</sup> 配位。
+///
+/// 全量语料实测:8831 个分子里**只有 2 个**(都是二茂铁,都是 η5 × 2)。
+/// 范围小,所以这里做的也小。
+///
+/// # 只留一根代表键
+///
+/// 布局要的是"Cp 是个普通五元环、金属挂在它旁边",所以每个 (金属, 环) 只留
+/// **一根**键、其余摘掉。留哪一根按**规范秩**定,不看存储下标 —— 头号契约。
+///
+/// 摘掉之后二茂铁的 Fe 只剩两根键(每个 Cp 一根),自然成了两个五边形中间的
+/// 那个连接原子,也就是夹心式的画法。
+///
+/// **只动布局。** 渲染仍拿原分子,10 根键一根不少地画出来。
+fn hapto_extras(
+    mol: &MolBuilder,
+    ranks: &[u32],
+) -> Option<(std::collections::BTreeSet<usize>, Vec<Degradation>)> {
+    /// 会做 π 配位的元素。从宽收 —— 这里只是找候选,`>=3 根键进同一个环`
+    /// 那一条才是判据。
+    fn is_metal(z: u8) -> bool {
+        matches!(z, 3 | 4 | 11..=13 | 19..=32 | 37..=51 | 55..=84 | 87..=118)
+    }
+    let metals: Vec<u32> = (0..u32::try_from(mol.num_atoms()).ok()?)
+        .filter(|a| is_metal(mol.atoms()[*a as usize].atomic_num) && mol.degree(*a) >= 3)
+        .collect();
+    if metals.is_empty() {
+        return None;
+    }
+
+    // 配体自己的环:把金属的键全摘掉再感知
+    let mut lig = MolBuilder::with_capacity(mol.num_atoms(), mol.num_bonds());
+    for a in mol.atoms() {
+        lig.add_atom_data(*a);
+    }
+    for b in mol.bonds() {
+        if !metals.contains(&b.begin) && !metals.contains(&b.end) {
+            lig.add_bond_data(*b).ok()?;
+        }
+    }
+    omgkit_chem::pipeline::sanitize(&mut lig).ok()?;
+    let rings = omgkit_chem::sssr::ring_set(&lig);
+
+    let mut extras = std::collections::BTreeSet::new();
+    let mut told = Vec::new();
+    for m in &metals {
+        for r in &rings {
+            // 这个金属打进这个环的那些键
+            let mut into: Vec<(u32, usize)> = mol
+                .neighbors(*m)
+                .filter(|(nb, _)| r.atoms.contains(nb))
+                .map(|(nb, bi)| (ranks[nb as usize], bi as usize))
+                .collect();
+            if into.len() < 3 {
+                continue;
+            }
+            // **必须是环上连续的一段。** 只数键数会把**大环螯合物**一起收进来:
+            // 卟啉、酞菁、环多胺那一类,摘掉金属之后照样是个环,而金属对它有
+            // 4 根键 —— 全部满足"≥3 根"。
+            //
+            // 实测 Ni(环四胺) `[Ni]123N4CCN1CCCN2CCN3CCC4`:只数键数的话
+            // 键交叉 **0 → 5**,Ni 到四个 N 的距离从 0.95…1.24 变成
+            // 1.00 / 3.51 / 4.34 / 5.49 —— **一张本来画对的图被改坏了**,而且
+            // 报的退化写着 η 配位,化学上根本不成立(cyclam 是 σ 给体)。
+            //
+            // 语料里一个大环配合物都没有,所以全量指标看不见这一条 ——
+            // 这是**审核拿真实化合物试出来的**,不是量出来的。
+            //
+            // 真正的 η 配位是金属压在**一整段连续的 π 体系**上(Cp 的 5 个碳
+            // 首尾相接),而 cyclam 的 4 个 N 之间隔着 2~3 个碳。
+            let bonded: std::collections::BTreeSet<u32> =
+                mol.neighbors(*m).map(|(nb, _)| nb).collect();
+            if !contiguous_on_ring(&r.atoms, &bonded) {
+                continue;
+            }
+            // 规范秩最小的那个邻居留下,其余摘掉
+            into.sort_unstable();
+            extras.extend(into.into_iter().skip(1).map(|(_, bi)| bi));
+            // **如实报退化。** 那 n 根键在平面上不可能等长,见
+            // [`Degradation::HaptoCoordination`]。次序按规范秩,写法无关。
+            let mut ring: Vec<u32> = r.atoms.clone();
+            ring.sort_by_key(|a| (ranks[*a as usize], *a));
+            told.push(Degradation::HaptoCoordination { metal: *m, ring });
+        }
+    }
+    (!extras.is_empty()).then_some((extras, told))
 }
 
 /// 把配位键换成单键的副本;没有配位键就返回 `None`(不必复制)。
@@ -536,6 +700,241 @@ mod tests {
                         style.name, ws[0]
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn a_sandwich_complex_gets_two_proper_rings_and_says_it_is_degraded() {
+        // **η5 配位在 SMILES 里是 5 根独立的 σ 键**,于是环感知吐出一堆
+        // 三元环(Fe + 环上相邻两个碳),整个体系被当成一个巨大的桥环系统。
+        // 实测二茂铁因此画成两个叠在一起的环、8 处交叉,而且骨架指纹算不出来。
+        //
+        // 布局每个 (金属, 环) 只留一根代表键之后,Cp 成了普通五元环、金属成了
+        // 两个五边形之间的连接原子。这条判据钉住三件事:
+        //
+        // 1. **两个环真的是正五边形** —— 环内每根键都是单位长;
+        // 2. **金属在两个环中间** —— 它到两个环心的方向大致相反;
+        // 3. **如实报退化** —— 那 10 根 Fe–C 键在平面上不可能等长。
+        //
+        // 第 3 条最容易漏:少了它,二茂铁会被算成"干净",于是硬性质
+        // `键长全等` 开始查它并**当场破 4 处**(实测)。
+        for smi in [
+            "C12C3=C4C5=C1[Fe]23456789C%10C6=C7C8=C9%10",
+            "CN(C)C[C-]12C3=C4C5=C1[Fe++]23456789[C-]%10C6=C7C8=C9%10",
+        ] {
+            let m = prep(smi);
+            for style in &Style::ALL {
+                let d = generate(&m, style);
+                let hapto: Vec<&rings::Degradation> = d
+                    .degraded
+                    .iter()
+                    .filter(|x| matches!(x, rings::Degradation::HaptoCoordination { .. }))
+                    .collect();
+                assert_eq!(
+                    hapto.len(),
+                    2,
+                    "[{}] {smi}:该报两处 η 配位退化,实得 {}",
+                    style.name,
+                    hapto.len()
+                );
+                // **交叉也要如实报。** 消冲突跑在摘细过的副本上,看不见被摘掉
+                // 的那些 η5 键 —— 而它们照样会画出来(金属摆在环外,连到远端
+                // 那几个环原子的线必然穿过环)。不补那一步的话报的是 0 处交叉,
+                // 而图上明明有 4 处。变异:去掉 `refine::crossings(whole, …)`
+                // 那一句 → 这条红。
+                assert!(
+                    !d.crossings.is_empty(),
+                    "[{}] {smi}:扇出去的 η5 键必然穿过环,交叉不能报 0",
+                    style.name
+                );
+                let mut mid = Vec::new();
+                for h in &hapto {
+                    let rings::Degradation::HaptoCoordination { metal, ring } = h else {
+                        unreachable!("上面已经筛过")
+                    };
+                    assert_eq!(ring.len(), 5, "[{}] {smi}:Cp 该是五元环", style.name);
+                    // 一、环内每根键都是单位长(是个正五边形)
+                    for w in ring
+                        .windows(2)
+                        .chain(std::iter::once(&[ring[0], ring[ring.len() - 1]][..]))
+                    {
+                        let (p, q) = (d.coords[w[0] as usize], d.coords[w[1] as usize]);
+                        // `ring` 是按规范秩排的,不是绕环的次序,所以只查
+                        // **成键的**那几对
+                        if m.neighbors(w[0]).any(|(x, _)| x == w[1]) {
+                            let len = p.dist(q);
+                            assert!(
+                                (len - 1.0).abs() < 1e-6,
+                                "[{}] {smi}:Cp 环上的键长 {len:.4},该是 1",
+                                style.name
+                            );
+                        }
+                    }
+                    let c = ring
+                        .iter()
+                        .fold(Point2::ORIGIN, |s, a| s + d.coords[*a as usize])
+                        * (1.0 / ring.len() as f64);
+                    mid.push((d.coords[*metal as usize], c));
+                }
+                // 二、金属在两个环中间 —— 它指向两个环心的方向大致相反
+                let (fe, c0) = mid[0];
+                let c1 = mid[1].1;
+                let (u, v) = ((c0 - fe).normalized(), (c1 - fe).normalized());
+                assert!(
+                    u.dot(v) < -0.3,
+                    "[{}] {smi}:两个环该分列金属两侧,实得夹角余弦 {:.3}",
+                    style.name,
+                    u.dot(v)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_macrocyclic_chelate_is_not_mistaken_for_a_sandwich() {
+        // **只数"金属打进这个环几根键"会把大环螯合物一起收进来。** 卟啉、酞菁、
+        // 环多胺那一类,摘掉金属之后照样是个环,而金属对它有 4 根键 —— 全部
+        // 满足 `>= 3`。
+        //
+        // Ni(环四胺)是这一类里最干净的例子(式 C₁₀H₂₀N₄Ni,Ni 四配位全接 N,
+        // 配体自己是一个含 4 个 N 的 14 元环)。**只数键数的话实测**:
+        // 键交叉 0 → 5,Ni 到四个 N 的距离从 0.95…1.24 变成 1.00/3.51/4.34/5.49
+        // —— 一张本来画对的图被改坏了。
+        //
+        // 区别在**位置**:η5 的 Cp 是 5 个首尾相接的碳,而 cyclam 的 4 个 N
+        // 之间隔着 2~3 个碳。判据因此要求"环上连续的一段"。
+        //
+        // **这个反例是代码审核拿真实化合物试出来的,不是从语料量出来的** ——
+        // 语料里一个大环配合物都没有(实测 147 个含金属且度 ≥3 的分子里,
+        // "金属打进配体环的最大键数"只有 0、1、5 三档)。
+        let smi = "[Ni]123N4CCN1CCCN2CCN3CCC4";
+        let m = prep(smi);
+        let ranks = ranks_of(&m);
+        assert!(
+            hapto_extras(&m, &ranks).is_none(),
+            "{smi} 是 σ 给体的大环螯合,不是 η 配位,一根键都不该摘"
+        );
+        // 前提要自己成立:金属确实对这个环有 ≥3 根键,只是**不连续**。
+        // 少了这一句,把判据换成"从来不摘"也照样绿。
+        let ni = (0..u32::try_from(m.num_atoms()).unwrap())
+            .find(|a| m.atoms()[*a as usize].atomic_num == 28)
+            .expect("该有一个镍");
+        assert_eq!(m.degree(ni), 4, "镍该是四配位");
+        for style in &Style::ALL {
+            let d = generate(&m, style);
+            assert!(
+                d.crossings.is_empty(),
+                "[{}] {smi} 该画得出 0 交叉,实得 {} 处",
+                style.name,
+                d.crossings.len()
+            );
+        }
+    }
+
+    #[test]
+    fn contiguity_is_what_separates_a_sandwich_from_a_chelate() {
+        // 纯函数,直接钉住。**这是上一条判据背后的那把尺子。**
+        let s = |v: &[u32]| {
+            v.iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<u32>>()
+        };
+        let ring: Vec<u32> = (0..6).collect();
+        assert!(contiguous_on_ring(&ring, &s(&[0, 1, 2])), "连续的三个");
+        assert!(
+            contiguous_on_ring(&ring, &s(&[4, 5, 0])),
+            "跨过接头也算连续"
+        );
+        assert!(contiguous_on_ring(&ring, &s(&[0, 1, 2, 3, 4, 5])), "整圈");
+        assert!(
+            !contiguous_on_ring(&ring, &s(&[0, 2, 4])),
+            "隔一个的三个不算"
+        );
+        assert!(!contiguous_on_ring(&ring, &s(&[0, 1, 3])), "两段不算");
+        // 五元环整圈 —— 二茂铁就是这一种
+        let cp: Vec<u32> = (0..5).collect();
+        assert!(contiguous_on_ring(&cp, &s(&[0, 1, 2, 3, 4])));
+    }
+
+    #[test]
+    fn a_chelate_ring_is_left_alone_because_it_only_exists_through_the_metal() {
+        // **这一刀不许伤及无辜。** 螯合物(三乙二胺合钴之类)的环是**经过金属**
+        // 才闭合的 —— 把金属的键摘掉之后配体只剩几条链,一个环都没有,于是
+        // `hapto_extras` 自然什么也找不到。
+        //
+        // **这一条守的是"摘键前先摘金属"这个做法本身**,不是那个 `>= 3` 的阈值
+        // —— 阈值降到 2 这条也照样绿(变异验过)。真正的区别在于:η 配位的环
+        // 在**没有金属时就存在**(Cp⁻ 自己就是个五元环),螯合环不然。
+        //
+        // 那个 `>= 3` 的阈值**在本语料上没有能区分它的例子**:实测把口径放到
+        // `>= 2` 重扫 8831 个分子,"金属与配体环有正好 2 根键"的情形是 **0 个**。
+        // 所以它是个设计取舍,不是被数据逼出来的 —— 如实说,不编一个例子来
+        // 假装它有判据。
+        for smi in [
+            "C1CN[Co]23(N1)(NCCN2)NCCN3",
+            "[O-]S([O-])(=O)=O.C1CN[Cr+3]23(N1)(NCCN2)NCCN3",
+            "CC1=[O+][Co]23([O+]=C(C)C1)([O+]=C(C)CC(=[O+]2)C)[O+]=C(C)CC(=[O+]3)C",
+        ] {
+            let m = prep(smi);
+            let ranks = ranks_of(&m);
+            assert!(
+                hapto_extras(&m, &ranks).is_none(),
+                "{smi} 里没有 η 配位,不该摘任何键"
+            );
+            // 而且这些分子确实**有**金属、金属确实**有**多根键 —— 否则上面那句
+            // 是空过的
+            assert!(
+                (0..u32::try_from(m.num_atoms()).unwrap())
+                    .any(|a| m.atoms()[a as usize].atomic_num > 20 && m.degree(a) >= 4),
+                "{smi} 里该有一个多配位的金属,不然这条判据说明不了问题"
+            );
+        }
+    }
+
+    #[test]
+    fn which_hapto_bond_survives_does_not_depend_on_how_it_was_written() {
+        // 每个 (金属, 环) 只留一根代表键,**留哪一根按规范秩定**。改用存储下标
+        // 的话,同一个二茂铁换种写法就会留下另一根 —— 金属挂到环上另一个位置,
+        // 整张图跟着转。变异验过:这条当场红,而别的判据全绿。
+        // **第二种写法由规范式回写产生,不是手写的。** 自己编 SMILES 会把编错
+        // 的风险带进结论 —— 本轮已经踩过一次(为查顺反造的"最小复现"
+        // `C/C=C/C` vs `C(/C)=C/C` 其实是 E 与 Z 两个不同分子)。
+        //
+        // # 这条判据抓不到"代表键改用存储序"
+        //
+        // 实测:把 `into.sort_unstable()`(按规范秩)换成按存储下标,这条**照样
+        // 绿**,全量语料也一处不变。原因是 Cp 环五重对称 —— 金属挂在哪个碳上
+        // 画出来都全等,`orient` 再把姿态归一,于是观测不到差别。
+        //
+        // 那句排序因此是**预防性的**:语料里没有能区分它的例子(带取代基的那个
+        // 二茂铁也不行,取代基在另一个环上)。**如实说,不编一个分子来假装它有
+        // 判据。** 这条判据守的是别的东西 —— 摘键这件事本身不引入写法依赖。
+        for base in [
+            "C12C3=C4C5=C1[Fe]23456789C%10C6=C7C8=C9%10",
+            "CN(C)C[C-]12C3=C4C5=C1[Fe++]23456789[C-]%10C6=C7C8=C9%10",
+        ] {
+            let m = prep(base);
+            let other = omgkit_io::canon::canonical_smiles(&m).smiles;
+            // 先证明它真的换了存储序,否则这条判据是空过的。
+            //
+            // **要比键表,不能只比元素序** —— 二茂铁除了 Fe 全是碳,两种写法的
+            // 元素序碰巧一模一样,拿它当判据是空过的(踩过)。
+            let seq = |s: &str| -> Vec<(u32, u32)> {
+                prep(s).bonds().iter().map(|b| (b.begin, b.end)).collect()
+            };
+            assert_ne!(
+                seq(base),
+                seq(&other),
+                "{base} 与它的规范式存储序一样,这条判据验不了东西"
+            );
+            for style in &Style::ALL {
+                assert_eq!(
+                    scene_key(base, style),
+                    scene_key(&other, style),
+                    "[{}] {base}\n  写成 {other} 之后画出来的图元不同",
+                    style.name
+                );
             }
         }
     }
