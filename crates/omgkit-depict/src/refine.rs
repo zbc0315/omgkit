@@ -105,7 +105,7 @@ pub(crate) fn relieve(
     for _ in 0..max_rounds {
         let mut improved = false;
         for &b in &cands {
-            let Some(side) = far_side(mol, pos, b) else {
+            let Some(side) = far_side(mol, pos, b, ranks) else {
                 continue;
             };
             let bd = &mol.bonds()[b as usize];
@@ -642,12 +642,12 @@ fn rotatable(mol: &MolBuilder, pos: &BTreeMap<u32, Point2>) -> Vec<u32> {
         .collect()
 }
 
-/// 断开键 `b` 之后,**原子更少**的那一侧。
+/// 断开键 `b` 之后该翻的那一侧:**原子更少**的那一边,一样多时按**最小规范秩**。
 ///
 /// 返回 `None` 表示这根键其实在环上(断开后两端仍连通),翻不得。环感知标记
 /// 之外再判一次是**故意的**:标记来自净化,而调用方未必净化过。
 ///
-/// # 为什么必须取更少的那一侧,而不是 `end` 那一侧
+/// # 为什么必须取更少的那一侧(以及平局时为什么不能看 `end`)
 ///
 /// 哪一端是 `end` 依**写法**而定。取 `end` 那一侧的话,同一根化学键在一种写法
 /// 里镜像的是一个甲基、在另一种写法里镜像的是整个苯环 —— 两者相差一次全局
@@ -657,7 +657,12 @@ fn rotatable(mol: &MolBuilder, pos: &BTreeMap<u32, Point2>) -> Vec<u32> {
 /// 一种翻两次、另一种翻一次。
 ///
 /// 取更少的那一侧也更自然:不该为了挪一个甲基把整个分子翻过来。
-fn far_side(mol: &MolBuilder, pos: &BTreeMap<u32, Point2>, b: u32) -> Option<Vec<u32>> {
+fn far_side(
+    mol: &MolBuilder,
+    pos: &BTreeMap<u32, Point2>,
+    b: u32,
+    ranks: &[u32],
+) -> Option<Vec<u32>> {
     let bd = &mol.bonds()[b as usize];
     let (start, blocked) = (bd.end, bd.begin);
     let mut seen: BTreeSet<u32> = BTreeSet::from([start]);
@@ -700,12 +705,54 @@ fn far_side(mol: &MolBuilder, pos: &BTreeMap<u32, Point2>, b: u32) -> Option<Vec
     let mut other: Vec<u32> = other_seen.into_iter().collect();
     other.sort_unstable();
 
-    // 取更少的那一侧。平局(两侧一样多)时按**这一侧最小的规范秩**定 ——
-    // 拿存储下标定就又把写法依赖引回来了。
-    if out.len() > other.len() && !other.is_empty() {
-        return Some(other);
-    }
-    Some(out)
+    // 取更少的那一侧。**平局时按这一侧最小的规范秩定。**
+    //
+    // 先前这里只有"更少的那一侧"这一条,平局就直接返回 `out` —— 而 `out` 是从
+    // `bd.end` 走出来的,`begin`/`end` 谁在前正是书写痕迹。注释当时已经写着
+    // "平局按最小规范秩定",**可代码里没有那一步**。
+    //
+    // # 一次翻错侧就够了,`orient` 兜不住
+    //
+    // 绕同一根轴翻这侧还是那侧,两套坐标差**一次整体反射**。直觉上
+    // [`crate::orient::canonicalise`] 该能归一它 —— 它的 24 个候选姿态里有镜像。
+    // **但那是 D₁₂,镜面只落在 15° 的整数倍上**:绕角度 φ 的轴做整体反射,归一
+    // 之后的残差是 `2φ mod 30°`。轴不在 15° 网格上,残差就消不掉。
+    //
+    // 实测(临时判据,拿阿司匹林量):
+    //
+    // | 轴 | 0° | 15° | 30° | 45° | 7° | 22.5° | 84° | 96° |
+    // |---|---|---|---|---|---|---|---|---|
+    // | 残差 | 0 | 0 | 0 | 0 | **16°** | **15°** | **12°** | **18°** |
+    //
+    // 语料第 6457 行正是这一支:两种写法**各只翻了 1 根键**,布局阶段完全一致
+    // (都是 −14.6099°),消冲突后一个 −91.5135°、一个 −76.4865° —— 关于
+    // **−84.0° 对称**,是镜像不是旋转;2×(−84) ≡ 12 (mod 30),最终图上差的
+    // 正是 12°。而稠环的布局姿态本来就不在 30° 网格上,所以这不是罕见情形。
+    //
+    // # 前提:`ranks` 是单射
+    //
+    // 两侧不相交,所以秩单射时两边的最小值必不相等,`<` 一定分得出胜负。
+    // 秩若有重复,`<` 为假会**静默退回 `out`** —— 又回到写法依赖,且不报信号。
+    // 生产上的 [`crate::ranks_of`] 造的是 `0..n` 的双射;实测全量语料
+    // 136439 次调用里重复 0 次、两侧最小秩相等 0 次。
+    debug_assert!(
+        {
+            let mut seen: BTreeSet<u32> = BTreeSet::new();
+            out.iter()
+                .chain(other.iter())
+                .all(|a| seen.insert(ranks[*a as usize]))
+        },
+        "规范秩有重复,平局会静默退回存储序"
+    );
+    let smallest = |v: &[u32]| v.iter().map(|a| ranks[*a as usize]).min();
+    // `other` 恒非空(它从 `blocked` 起头),`Ordering::Equal` 那一支因此总取得到
+    // 两个最小值。实测 136439 次调用里 `other` 为空 0 次。
+    let take_other = match out.len().cmp(&other.len()) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Equal => smallest(&other) < smallest(&out),
+        std::cmp::Ordering::Less => false,
+    };
+    Some(if take_other { other } else { out })
 }
 
 #[cfg(test)]
@@ -1022,6 +1069,68 @@ mod tests {
     }
 
     #[test]
+    fn which_side_gets_flipped_does_not_depend_on_how_it_was_written() {
+        // **`far_side` 平局那一档的直接判据。** 两侧一样多时翻哪一侧,先前由
+        // `begin`/`end` 说了算 —— 而谁在前正是书写痕迹。函数注释当时已经写着
+        // "平局按最小规范秩定",**可代码里没有那一步**。
+        //
+        // 把每根键映成「两端的规范秩 → 返回那一侧的秩集合」。这张表与原子编号
+        // 无关,所以同一个分子的不同写法必须给出同一张表。
+        //
+        // **秩要用生产上那个 `ranks_of`**,不是 `canonical_ranks` —— 后者的深层
+        // 平局是任取的(见 `crate::ranks_of`),拿它当判据会把两种毛病混在一起。
+        //
+        // 分子从两处来:正丁烷(最小的两侧等大的例子)与**语料里现成的四个**。
+        // 变异(平局退回 `out`)在每一个上都红。
+        type Table = std::collections::BTreeMap<(u32, u32), BTreeSet<u32>>;
+        let table = |smi: &str| -> Table {
+            let m = prep(smi);
+            let ranks = crate::ranks_of(&m);
+            let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
+            for p in layout::layout_all(&m, &ranks, &Style::ACS_1996, None) {
+                pos.extend(p.pos);
+            }
+            let mut t = Table::new();
+            for b in 0..u32::try_from(m.num_bonds()).unwrap() {
+                let Some(side) = far_side(&m, &pos, b, &ranks) else {
+                    continue;
+                };
+                let bd = &m.bonds()[b as usize];
+                let (x, y) = (ranks[bd.begin as usize], ranks[bd.end as usize]);
+                t.insert(
+                    (x.min(y), x.max(y)),
+                    side.iter().map(|a| ranks[*a as usize]).collect(),
+                );
+            }
+            t
+        };
+        for ws in [
+            // 正丁烷:中间那根键两边各两个碳
+            vec!["CCCC", "C(CC)C"],
+            // 语料里现成的(4881 / 4824 / 2631 / 4719 行)
+            vec!["CCCOS(O)(=O)=O", "OS(=O)(=O)OCCC"],
+            vec!["CCCCS(O)(=O)=O", "OS(=O)(=O)CCCC"],
+            vec!["CC(=C)CS(O)(=O)=O", "OS(=O)(=O)CC(=C)C"],
+            vec!["CCCCCOS(O)(=O)=O", "OS(=O)(=O)OCCCCC"],
+        ] {
+            // 前提要自己成立:两种写法真的换了存储序
+            let seq = |s: &str| -> Vec<(u32, u32)> {
+                prep(s).bonds().iter().map(|b| (b.begin, b.end)).collect()
+            };
+            assert_ne!(seq(ws[0]), seq(ws[1]), "{} 与 {} 存储序一样", ws[0], ws[1]);
+            let t0 = table(ws[0]);
+            assert!(!t0.is_empty(), "{} 一根可翻的键都没有,验不了东西", ws[0]);
+            assert_eq!(
+                t0,
+                table(ws[1]),
+                "{} 与 {}:同一根键翻的不是同一侧",
+                ws[0],
+                ws[1]
+            );
+        }
+    }
+
+    #[test]
     fn a_flip_never_reaches_into_another_fragment() {
         // `relieve` 跑在**所有分量合并之后**的 `pos` 上(分量之间也可能撞上),
         // 而 `far_side` 取的是"原子更少的那一侧" —— 更少的那一侧算不出来时它
@@ -1067,7 +1176,7 @@ mod tests {
                     c += 1;
                 }
                 for b in 0..u32::try_from(m.num_bonds()).unwrap() {
-                    let Some(side) = far_side(&m, &pos, b) else {
+                    let Some(side) = far_side(&m, &pos, b, &ranks) else {
                         continue;
                     };
                     let want = comp[m.bonds()[b as usize].begin as usize];
@@ -1094,7 +1203,7 @@ mod tests {
         }
         for b in 0..u32::try_from(m.num_bonds()).unwrap() {
             assert!(
-                far_side(&m, &pos, b).is_none(),
+                far_side(&m, &pos, b, &ranks).is_none(),
                 "环上的键 {b} 不该给出可翻的一侧"
             );
         }
