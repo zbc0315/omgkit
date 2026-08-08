@@ -6,7 +6,7 @@
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --release
-cargo doc --workspace --no-deps
+cargo doc --workspace --no-deps --document-private-items
 ```
 
 These are exactly what

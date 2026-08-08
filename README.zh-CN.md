@@ -86,7 +86,7 @@ Rust 侧对应的入口在 `omgkit_io::smiles`、`omgkit_chem::sanitize` 与
 $ cargo fmt --all --check
 $ cargo clippy --workspace --all-targets -- -D warnings
 $ cargo test
-$ cargo doc --workspace --no-deps
+$ cargo doc --workspace --no-deps --document-private-items
 ```
 
 新克隆下来 `cargo test` 即为绿:冒烟基准随仓库入库。大语料那一档标了 `#[ignore]`,

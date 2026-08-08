@@ -9,7 +9,7 @@ API still moves, so bug reports are especially useful.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --release
-cargo doc --workspace --no-deps
+cargo doc --workspace --no-deps --document-private-items
 ```
 
 All four must pass. They are what CI runs.

@@ -48,6 +48,9 @@ jobs:
       - name: 测试
         run: cargo test --release
 
-      # rustdoc 的断链等三项在 Cargo.toml 里已是 deny,这一步让它真的跑到
+      # rustdoc 的断链等三项在 Cargo.toml 里已是 deny,这一步让它真的跑到。
+      # **要带 `--document-private-items`**:不带的话 rustdoc 根本不给私有条目
+      # 建档,指向它们的断链一条都报不出来 —— 实测漏过三条(两条指向私有 fn
+      # 的新注释、一条函数改名遗留)。
       - name: 文档
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --no-deps --document-private-items

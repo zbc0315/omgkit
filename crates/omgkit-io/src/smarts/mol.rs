@@ -530,7 +530,10 @@ impl<'a> Parser<'a> {
 /// `[H]` 特例表:可选同位素 + `H` + 可选电荷 + 可选映射号,整个括号到此为止。
 ///
 /// 匹配上的才是**氢元素**;其余一律走一般规则,那里 `H` 是氢计数。
-/// 详见 [`super::parse`] 的模块文档。
+/// 详见 [`mod@super::parse`] 的模块文档。
+///
+/// 链接要写 `mod@`:`smarts` 底下 `parse` 既是一个私有模块、又是 `mol::parse`
+/// 这个函数的再导出名,不消歧的话 rustdoc 报"既是函数又是模块"。
 fn hydrogen_special_case(inner: &[u8]) -> Option<AtomExpr> {
     let mut i = 0;
     let mut parts: Vec<AtomExpr> = Vec::new();

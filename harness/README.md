@@ -632,8 +632,14 @@ Rust 侧的 `roundtrip_smarts` 测试守的是**写出幂等**,只能保证"解�
 都设成 `deny`,所以 `cargo doc` 会**失败**而不是警告。
 
 ```bash
-cargo doc --workspace --no-deps
+cargo doc --workspace --no-deps --document-private-items
 ```
+
+**`--document-private-items` 不是可选的。** 不带它,rustdoc 压根不给私有条目
+建档,于是指向私有条目的断链**一条都报不出来** —— 闸门看着是绿的。实测一次
+审核就在里面捞出三条:两条是新注释里指向私有 `fn` 的链接,一条是函数改名之后
+没跟上的旧名。补上这个参数之后全工作区还剩一条歧义(`smarts` 底下 `parse`
+既是私有模块、又是 `mol::parse` 的再导出名),写成 `mod@super::parse` 消掉。
 
 文档与实现对不上,和代码有 bug 一样是缺陷,只是没人报错就一直堆着 ——
 设成 `deny` 之前积压了 16 条这样的警告。

@@ -94,7 +94,7 @@ same four that CI runs:
 $ cargo fmt --all --check
 $ cargo clippy --workspace --all-targets -- -D warnings
 $ cargo test
-$ cargo doc --workspace --no-deps
+$ cargo doc --workspace --no-deps --document-private-items
 ```
 
 `cargo test` is green on a fresh clone: the smoke oracles are committed. The
