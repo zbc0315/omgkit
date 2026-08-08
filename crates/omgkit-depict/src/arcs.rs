@@ -95,6 +95,21 @@ pub(crate) fn place(rings: &[&Ring], ranks: &[u32]) -> Option<BTreeMap<u32, Poin
         done.insert(i);
         place_ring(order[i], ranks, &mut pos)?;
     }
+    // **盖不全就当没摆出来。** `place_ring` 逐段摆时,一个环上若有两段以上
+    // 不连续的新原子、而规范环序的 0 号位正好落在绕回去的那一段里,收尾的
+    // `j = n` 会把后面的段静默跳过 —— 于是返回一个**缺坐标的 `Some`**,而
+    // `layout::place_at` 拿不到锚点是直接 panic。
+    //
+    // 松弛那一支没有这个面(它按系统的原子建图,结构上一定盖全)。实测全量
+    // 11252 个环系统:绕回去的段 1265 次(很常见),但"一次摆环出现 ≥2 段"
+    // **0 次**,132 个成功体系的坐标一个原子不缺 —— 所以这是**潜在**的,
+    // 不是现行缺陷。一行换掉一个 panic 面,值。
+    if rings
+        .iter()
+        .any(|r| r.atoms.iter().any(|a| !pos.contains_key(a)))
+    {
+        return None;
+    }
     Some(pos)
 }
 
@@ -305,6 +320,292 @@ mod tests {
     use super::*;
     use omgkit_core::MolBuilder;
 
+    /// 【测量,不是判据】弧法在全量语料的桥环体系上能摆多少、摆得怎么样。
+    ///
+    /// ```shell
+    /// cargo test -p omgkit-depict --release --lib -- --ignored arc_coverage --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn arc_coverage() {
+        use std::collections::BTreeMap as Map;
+        let text = std::fs::read_to_string("../../harness/corpus/large.smi").expect("读语料");
+        let (mut sys_n, mut ok, mut span, mut clash, mut noanchor) = (0, 0, 0, 0, 0);
+        let (mut in_table, mut miss, mut miss_but_arc, mut miss_and_no_arc) = (0, 0, 0, 0);
+        let mut miss_arc_skel: BTreeSet<String> = BTreeSet::new();
+        let mut miss_noarc_skel: BTreeSet<String> = BTreeSet::new();
+        let (mut arc_x, mut rlx_x, mut arc_win, mut rlx_win, mut tie) = (0, 0, 0, 0, 0);
+        let (mut arc_dev, mut rlx_dev) = (0.0f64, 0.0f64);
+        // 成功时的几何质量
+        let (mut self_x, mut worst_dev) = (0usize, 0.0f64);
+        // 按骨架统计
+        let mut by_skel: Map<String, (usize, usize)> = Map::new();
+        for line in text.lines() {
+            let smi = line.split_whitespace().next().unwrap_or("");
+            if smi.is_empty() || smi.starts_with('#') {
+                continue;
+            }
+            let Ok(mut m) = omgkit_io::smiles::parse(smi) else {
+                continue;
+            };
+            if omgkit_chem::pipeline::sanitize(&mut m).is_err() {
+                continue;
+            }
+            let ranks = crate::ranks_of(&m);
+            let rings_all = omgkit_chem::sssr::ring_set(&m);
+            for sys in crate::rings::group(&omgkit_chem::rings::fused_ring_systems(&m), &rings_all)
+            {
+                // 只看桥环:邻稠的那一支 `layout_local` 自己就摆得了
+                if !is_bridged(&m, &sys, &ranks) {
+                    continue;
+                }
+                sys_n += 1;
+                let skel = crate::templates::skeleton_of(&m, &sys.atoms, &ranks)
+                    .unwrap_or_else(|| "?".into());
+                let e = by_skel.entry(skel.clone()).or_default();
+                e.0 += 1;
+                // 现状:查表命中了吗
+                let hit = matches!(
+                    crate::templates::lookup_with(&m, &sys.atoms, &ranks, None).1,
+                    crate::templates::Status::Hit
+                );
+                if hit {
+                    in_table += 1;
+                } else {
+                    miss += 1;
+                    if place(&sys.rings, &ranks).is_some() {
+                        miss_but_arc += 1;
+                        miss_arc_skel.insert(skel.clone());
+                    } else {
+                        miss_and_no_arc += 1;
+                        miss_noarc_skel.insert(skel.clone());
+                    }
+                }
+                match place(&sys.rings, &ranks) {
+                    Some(pos) => {
+                        ok += 1;
+                        e.1 += 1;
+                        // 键长偏差
+                        let mut dev = 0.0f64;
+                        for bd in m.bonds() {
+                            if let (Some(p), Some(q)) = (pos.get(&bd.begin), pos.get(&bd.end)) {
+                                dev = dev.max((p.dist(*q) - 1.0).abs());
+                            }
+                        }
+                        if dev > worst_dev {
+                            worst_dev = dev;
+                        }
+                        // 系统内部自交
+                        let inside: Vec<(u32, u32)> = m
+                            .bonds()
+                            .iter()
+                            .filter(|bd| pos.contains_key(&bd.begin) && pos.contains_key(&bd.end))
+                            .map(|bd| (bd.begin, bd.end))
+                            .collect();
+                        let mut x = 0usize;
+                        for (i, (a1, b1)) in inside.iter().enumerate() {
+                            for (a2, b2) in &inside[i + 1..] {
+                                if a1 == a2 || a1 == b2 || b1 == a2 || b1 == b2 {
+                                    continue;
+                                }
+                                if crate::geom::segments_cross(pos[a1], pos[b1], pos[a2], pos[b2]) {
+                                    x += 1;
+                                }
+                            }
+                        }
+                        if x > 0 {
+                            self_x += 1;
+                            arc_x += 1;
+                        }
+                        arc_dev = arc_dev.max(dev);
+                        // 遮住整张表跑 relax —— 那正是语料外新骨架的待遇
+                        let (rp, _) = crate::rings::relax(
+                            &m,
+                            &sys.atoms,
+                            &ranks,
+                            &sys.rings,
+                            Some(("", &[])),
+                        );
+                        let mut rdev = 0.0f64;
+                        for bd in m.bonds() {
+                            if let (Some(p), Some(q)) = (rp.get(&bd.begin), rp.get(&bd.end)) {
+                                rdev = rdev.max((p.dist(*q) - 1.0).abs());
+                            }
+                        }
+                        rlx_dev = rlx_dev.max(rdev);
+                        let rin: Vec<(u32, u32)> = m
+                            .bonds()
+                            .iter()
+                            .filter(|bd| rp.contains_key(&bd.begin) && rp.contains_key(&bd.end))
+                            .map(|bd| (bd.begin, bd.end))
+                            .collect();
+                        let mut rx = 0usize;
+                        for (i, (a1, b1)) in rin.iter().enumerate() {
+                            for (a2, b2) in &rin[i + 1..] {
+                                if a1 == a2 || a1 == b2 || b1 == a2 || b1 == b2 {
+                                    continue;
+                                }
+                                if crate::geom::segments_cross(rp[a1], rp[b1], rp[a2], rp[b2]) {
+                                    rx += 1;
+                                }
+                            }
+                        }
+                        if rx > 0 {
+                            rlx_x += 1;
+                        }
+                        match x.cmp(&rx) {
+                            std::cmp::Ordering::Less => arc_win += 1,
+                            std::cmp::Ordering::Greater => rlx_win += 1,
+                            std::cmp::Ordering::Equal => tie += 1,
+                        }
+                    }
+                    None => {
+                        // 分因:重跑一遍,看是哪一支
+                        match why(&sys.rings, &ranks) {
+                            1 => span += 1,
+                            2 => clash += 1,
+                            _ => noanchor += 1,
+                        }
+                    }
+                }
+            }
+        }
+        println!(
+            "桥环体系 {sys_n} 个;弧法摆得出来 {ok}({:.1}%)",
+            100.0 * ok as f64 / sys_n as f64
+        );
+        println!("  摆不出来的分因:弦跨不过去 {span}  原子叠一起(鸽笼){clash}  没锚点 {noanchor}");
+        println!("成功的那些:内部有自交的 {self_x} 个;最大键长偏差 {worst_dev:.2e}");
+        let mut v: Vec<_> = by_skel.iter().collect();
+        v.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
+        println!("按骨架(出现次数最多的 15 条):");
+        for (skel, (n, k)) in v.iter().take(15) {
+            println!("   {n:4} 次  摆出 {k:4}  {skel}");
+        }
+        let total_skel = by_skel.len();
+        let full = by_skel.values().filter(|(n, k)| n == k).count();
+        let none = by_skel.values().filter(|(_, k)| *k == 0).count();
+        println!("骨架 {total_skel} 条:全摆得出 {full} 条,一条都摆不出 {none} 条");
+        println!();
+        println!("=== 与现状比:接进运行时能买到什么 ===");
+        println!("  查表命中(现状已经是最优候选,弧法买不到东西) {in_table}");
+        println!("  没命中                                       {miss}");
+        println!(
+            "     其中弧法能摆的                            {miss_but_arc}  骨架 {:?}",
+            miss_arc_skel
+        );
+        println!(
+            "     其中弧法也摆不了                          {miss_and_no_arc}  骨架 {:?}",
+            miss_noarc_skel
+        );
+        println!();
+        println!("=== 语料外的新骨架会怎样:把表遮住,弧法 vs relax ===");
+        println!("  (只看弧法摆得出来的那 {ok} 个体系)");
+        println!("  弧法:自交 {arc_x} 个体系,最大键长偏差 {arc_dev:.4}");
+        println!("  relax:自交 {rlx_x} 个体系,最大键长偏差 {rlx_dev:.4}");
+        println!("  逐体系比:弧法交叉更少 {arc_win} 个,relax 更少 {rlx_win} 个,打平 {tie} 个");
+    }
+
+    /// 摆不出来是哪一支:1 弦跨不过去,2 原子叠一起,3 没锚点。
+    fn why(rings: &[&Ring], ranks: &[u32]) -> u8 {
+        // 复刻 `place` 的流程,只是把失败点分开报
+        let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
+        let mut order: Vec<&Ring> = rings.to_vec();
+        order.sort_by_key(|r| (std::cmp::Reverse(r.atoms.len()), ring_key(r, ranks)));
+        let cyc = canonical_cycle(&order[0].atoms, ranks);
+        let n = cyc.len();
+        let rad = 1.0 / (2.0 * (std::f64::consts::PI / n as f64).sin());
+        for (i, a) in cyc.iter().enumerate() {
+            let t = std::f64::consts::TAU * i as f64 / n as f64;
+            pos.insert(*a, Point2::new(rad * t.cos(), rad * t.sin()));
+        }
+        let mut done: BTreeSet<usize> = BTreeSet::from([0]);
+        while done.len() < order.len() {
+            let Some((i, shared)) = (0..order.len())
+                .filter(|i| !done.contains(i))
+                .map(|i| {
+                    let sh = order[i]
+                        .atoms
+                        .iter()
+                        .filter(|a| pos.contains_key(a))
+                        .count();
+                    (i, sh)
+                })
+                .max_by_key(|(i, sh)| {
+                    (
+                        *sh,
+                        order[*i].atoms.len(),
+                        std::cmp::Reverse(ring_key(order[*i], ranks)),
+                    )
+                })
+            else {
+                return 3;
+            };
+            if shared == 0 {
+                return 3;
+            }
+            done.insert(i);
+            // 逐段试,分开报
+            let seq = canonical_cycle(&order[i].atoms, ranks);
+            let m = seq.len();
+            let mut j = 0usize;
+            while j < m {
+                if pos.contains_key(&seq[j]) {
+                    j += 1;
+                    continue;
+                }
+                let mut s = j;
+                while !pos.contains_key(&seq[(s + m - 1) % m]) {
+                    s = (s + m - 1) % m;
+                    if s == j {
+                        break;
+                    }
+                }
+                let mut e = s;
+                let mut run = vec![seq[s]];
+                while !pos.contains_key(&seq[(e + 1) % m]) {
+                    e = (e + 1) % m;
+                    run.push(seq[e]);
+                    if e == s {
+                        break;
+                    }
+                }
+                let (a, b) = (seq[(s + m - 1) % m], seq[(e + 1) % m]);
+                let (Some(pa), Some(pb)) = (pos.get(&a).copied(), pos.get(&b).copied()) else {
+                    return 3;
+                };
+                let k = run.len();
+                let d = pa.dist(pb);
+                let theta = if d < 1e-9 {
+                    std::f64::consts::TAU / (k + 1) as f64
+                } else {
+                    match solve_theta(k, d) {
+                        Some(t) => t,
+                        None => return 1,
+                    }
+                };
+                let cands = arc_points(pa, pb, k, theta);
+                match pick(&cands, &pos, a, b) {
+                    Some(chosen) => {
+                        for (at, p) in run.iter().zip(chosen.iter()) {
+                            pos.insert(*at, *p);
+                        }
+                    }
+                    None => return 2,
+                }
+                j = if e >= s { e + 1 } else { m };
+            }
+        }
+        0
+    }
+
+    /// 这个环系统是不是桥环(邻稠的那一支 `layout_local` 自己摆得了)。
+    fn is_bridged(mol: &MolBuilder, sys: &crate::rings::System<'_>, ranks: &[u32]) -> bool {
+        crate::rings::layout_local(mol, sys, ranks, None)
+            .1
+            .is_some()
+    }
+
     fn prep(smi: &str) -> MolBuilder {
         let mut m = omgkit_io::smiles::parse(smi).expect("SMILES 该能解析");
         omgkit_chem::pipeline::sanitize(&mut m).expect("该能 sanitize");
@@ -432,6 +733,204 @@ mod tests {
             }
             assert_eq!(compared, 12, "{smi} 只比上了 {compared} 种写法");
         }
+    }
+
+    #[test]
+    fn the_runtime_reaches_for_the_arc_before_it_falls_back_to_relaxing() {
+        // **接线本身要有判据。** 三条路的次序是:查表 → 弧法 → 松弛。
+        //
+        // 这条把中间那一档钉住:拿一个语料里**没有**的桥环骨架(所以表必然
+        // 不命中),断言 `layout_local` 给出的坐标就是弧法给的那一套 ——
+        // 而不是松弛的。
+        //
+        // 语料内的桥环骨架 173/177 命中查表那一档,所以**表必须遮住**,否则
+        // 这条守的是查表不是弧法。遮法用 `Override`:给一个对不上的键,整张表
+        // 就被屏蔽 —— 那正是"语料里没有的新骨架"的待遇。
+        use crate::rings::{group, layout_local};
+        let mask: crate::templates::Override<'_> = Some(("表外的骨架", &[]));
+        for smi in [
+            "C1C2CCC1CC2",  // 降冰片烷,语料里最常见的桥环骨架(37 次)
+            "C1C2CCC1CCC2", // 双环[3.2.1]辛烷(13 次)
+            "C1C2CC1CCC2",  // 双环[3.2.0](7 次)
+        ] {
+            let m = prep(smi);
+            let ranks = crate::ranks_of(&m);
+            let rings_all = omgkit_chem::sssr::ring_set(&m);
+            let systems = group(&omgkit_chem::rings::fused_ring_systems(&m), &rings_all);
+            let sys = systems
+                .iter()
+                .max_by_key(|s| s.rings.len())
+                .expect("该有一个环系统");
+            // 前提一:遮住之后确实不命中
+            let st = crate::templates::lookup_with(&m, &sys.atoms, &ranks, mask).1;
+            assert!(
+                !matches!(st, crate::templates::Status::Hit),
+                "{smi} 遮了表还命中,遮法失效了"
+            );
+            // 前提二:不遮的话它**本来是命中的** —— 这句证明遮法确实在起作用
+            assert!(
+                matches!(
+                    crate::templates::lookup_with(&m, &sys.atoms, &ranks, None).1,
+                    crate::templates::Status::Hit
+                ),
+                "{smi} 本来就不在表里,那这条判据里的遮表是空动作"
+            );
+            // 前提三:弧法确实摆得出来
+            let arc = place(&sys.rings, &ranks).expect("弧法该摆得出这个骨架");
+            // 结论:运行时给的就是弧法那一套
+            let (got, deg) = layout_local(&m, sys, &ranks, mask);
+            assert!(deg.is_some(), "{smi} 是桥环,该如实报退化");
+            for (a, p) in &arc {
+                let q = got.get(a).expect("原子都该有坐标");
+                assert!(
+                    (p.x - q.x).abs() < 1e-9 && (p.y - q.y).abs() < 1e-9,
+                    "{smi}:运行时没走弧法 —— 原子 {a} 弧法给 ({:.4},{:.4}),\
+                     实得 ({:.4},{:.4})",
+                    p.x,
+                    p.y,
+                    q.x,
+                    q.y
+                );
+            }
+            // 而弧法的键长是精确 1 —— 松弛给不出这个
+            for bd in m.bonds() {
+                if let (Some(p), Some(q)) = (got.get(&bd.begin), got.get(&bd.end)) {
+                    assert!(
+                        (p.dist(*q) - 1.0).abs() < 1e-9,
+                        "{smi}:桥环系统里的键长该精确是 1,实得 {:.6}",
+                        p.dist(*q)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_table_wins_over_the_arc_when_it_has_an_answer() {
+        // **次序是查表 → 弧法 → 松弛,不能颠倒。**
+        //
+        // 弧法只保证**几何**(键长精确 1、桥不自交),而表里那一条是按**整分子**
+        // 打分挑出来的 —— 它见过取代基往哪伸、标签占多大。两者不是一回事。
+        //
+        // 实测把弧法提到查表之前,全量语料:
+        //
+        // | | 表优先 | 弧法优先 |
+        // |---|---:|---:|
+        // | 其中有键交叉 | **48** | 70 |
+        // | 有取代基挤到另一根键上 | **28** | 80 |
+        // | 布局已退化的(交叉) | **30** | 52 |
+        //
+        // 三倍的取代基挤压 —— 弧法的桥摆得漂亮,可它不知道取代基要从哪出来。
+        use crate::rings::{group, layout_local};
+        let mut checked = 0usize;
+        for smi in [
+            "C1C2CCC1CC2",  // 降冰片烷,表里有(语料 37 次)
+            "C1C2CCC1CCC2", // 双环[3.2.1]辛烷,表里有(13 次)
+        ] {
+            let m = prep(smi);
+            let ranks = crate::ranks_of(&m);
+            let rings_all = omgkit_chem::sssr::ring_set(&m);
+            let systems = group(&omgkit_chem::rings::fused_ring_systems(&m), &rings_all);
+            let sys = systems
+                .iter()
+                .max_by_key(|s| s.rings.len())
+                .expect("该有一个环系统");
+            // 前提:表命中,而且弧法也摆得出来 —— 两者都有话说,次序才有意义
+            assert!(
+                matches!(
+                    crate::templates::lookup_with(&m, &sys.atoms, &ranks, None).1,
+                    crate::templates::Status::Hit
+                ),
+                "{smi} 不在表里,这条判据说明不了次序"
+            );
+            let arc = place(&sys.rings, &ranks).expect("弧法该摆得出这个骨架");
+            let (got, _) = layout_local(&m, sys, &ranks, None);
+            let (tbl, _) = crate::templates::lookup_with(&m, &sys.atoms, &ranks, None);
+            let tbl = tbl.expect("命中就该有坐标");
+
+            // **结论:运行时给的是表那一套。** 无条件断言 —— 弧法一旦抢在
+            // 查表前面,这里直接红。
+            for (a, p) in &tbl {
+                let q = got.get(a).expect("原子都该有坐标");
+                assert!(
+                    (p.x - q.x).abs() < 1e-9 && (p.y - q.y).abs() < 1e-9,
+                    "{smi}:运行时没走查表 —— 原子 {a} 表里是 ({:.4},{:.4}),\
+                     实得 ({:.4},{:.4})",
+                    p.x,
+                    p.y,
+                    q.x,
+                    q.y
+                );
+            }
+            // **非空性单独验**:表与弧法给的得**不是**同一套,上面那条才有内容。
+            // 表里存的若正好就是弧法赢来的那一套,这个骨架分不出次序。
+            if tbl.iter().any(|(a, p)| {
+                arc.get(a)
+                    .is_some_and(|q| (p.x - q.x).abs() > 1e-6 || (p.y - q.y).abs() > 1e-6)
+            }) {
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 0,
+            "没有一个骨架能分出「表」与「弧法」,这条判据是空过的"
+        );
+    }
+
+    #[test]
+    fn when_the_arc_cannot_do_it_the_runtime_falls_back_instead_of_giving_up() {
+        // **退回那条边界也要守。** 弧法摆不了(鸽笼/弦跨不过去)时报 `None`,
+        // 运行时必须退到松弛并照样给出坐标 —— 不能因为多接了一档就少画。
+        //
+        // 金刚烷正是鸽笼那一支:两个锚点之间三条等长桥,等张角弧对给定锚距
+        // 只有两个镜像解,三条挤两个必然重合。
+        // **表要遮住。** 金刚烷与双环[2.2.2]辛烷都在表里,不遮的话
+        // `layout_local` 走的是查表那一档,根本到不了弧法/松弛 —— 这条判据
+        // 就空过了。审核实测:不遮时把"弧法失败后退回松弛"整个换成"交空坐标",
+        // 六条判据**全绿**。
+        use crate::rings::{group, layout_local};
+        let mask: crate::templates::Override<'_> = Some(("表外的骨架", &[]));
+        let mut checked = 0usize;
+        for smi in [
+            "C1C2CC3CC1CC(C2)C3", // 金刚烷 —— 鸽笼那一支(语料里 18 次,弧法一次都摆不了)
+            "C1CC2CCC1CC2",       // 双环[2.2.2]辛烷 —— 同一支(8 次)
+        ] {
+            let Ok(mut m) = omgkit_io::smiles::parse(smi) else {
+                continue;
+            };
+            if omgkit_chem::pipeline::sanitize(&mut m).is_err() {
+                continue;
+            }
+            let ranks = crate::ranks_of(&m);
+            let rings_all = omgkit_chem::sssr::ring_set(&m);
+            let systems = group(&omgkit_chem::rings::fused_ring_systems(&m), &rings_all);
+            let Some(sys) = systems.iter().max_by_key(|s| s.rings.len()) else {
+                continue;
+            };
+            // 前提一:遮了表确实不命中,否则守的是查表
+            assert!(
+                !matches!(
+                    crate::templates::lookup_with(&m, &sys.atoms, &ranks, mask).1,
+                    crate::templates::Status::Hit
+                ),
+                "{smi} 遮了表还命中,遮法失效了"
+            );
+            // 前提二:弧法确实摆不了 —— 这才是要验的那一支
+            assert!(
+                place(&sys.rings, &ranks).is_none(),
+                "{smi} 弧法摆得出来,这条判据验不了退回那一支"
+            );
+            checked += 1;
+            let (got, deg) = layout_local(&m, sys, &ranks, mask);
+            assert!(deg.is_some(), "{smi} 是桥环,该如实报退化");
+            for a in &sys.atoms {
+                assert!(
+                    got.contains_key(a),
+                    "{smi}:弧法摆不了就该退回松弛,不能让原子 {a} 没坐标"
+                );
+            }
+        }
+        assert!(checked >= 2, "只验到 {checked} 个鸽笼骨架,这条判据太弱");
     }
 
     /// 按规范秩排好的量化坐标序列 —— 与原子编号无关的指纹。
