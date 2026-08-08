@@ -264,11 +264,88 @@ fn layout_component(
         todo.sort_by_key(|b| (ranks[*b as usize], *b));
         todo.dedup();
 
-        for p in place_neighbours(mol, a, &pos, &todo, ranks, style, z) {
+        // **挑方向之前先把待摆的那几块算出来。**
+        //
+        // `place_neighbours` 从前只看"这一个原子落在这儿撞不撞",而这些邻居
+        // 里有的是一整块环系统的接口。要让它把整块算进去,就得先有那一块的
+        // 局部坐标 —— 而 `layout_local` 很贵,所以算一次、既给前瞻用、也给
+        // 真正摆放用(见 `Placed::block`),**不是多算一遍**。
+        //
+        // 一个原子理论上可以同时是几个未摆系统的接口(螺原子挂在链上)。这里
+        // 只规划**规范序里的第一个**,其余仍走下面的老路 —— 那种情形语料里
+        // 没出现过,不为它加复杂度。
+        /// 一个待摆的环系统:`(系统下标, 局部坐标, 要记的退化)`。
+        type Plan = (usize, crate::chains::Block, Option<Degradation>);
+        let mut plans: BTreeMap<u32, Plan> = BTreeMap::new();
+        // **同一个系统只规划一次。** 两个待放邻居可能落在**同一个**未摆系统里
+        // —— 配位键被环感知排除在外(`omgkit_chem::rings`),而它算进连通性,
+        // 所以一个金属可以用两根配位键咬住同一个稠环系的两个给体原子。
+        //
+        // 不去重的话,第二个给体也会拿到一份"块",而那一块**根本不会被画**
+        // (第一个已经把整个系统摆上了)。它却会被 `place_neighbours` 累积进
+        // "已占",后面的兄弟就是对着一个不存在的环挑方向;退化也会被记两遍。
+        //
+        // 语料里没出现(全量 8831 个分子只有 1 条配位键),但构造得出来,所以
+        // 这里挡住。
+        let mut planned: BTreeSet<usize> = BTreeSet::new();
+        for &b in &todo {
+            let Some(&s) = of_atom
+                .get(&b)
+                .into_iter()
+                .flatten()
+                .find(|s| !done_sys.contains(s) && !planned.contains(s))
+            else {
+                continue;
+            };
+            let (local, deg) = rings::layout_local(mol, &systems[s], ranks, over);
+            planned.insert(s);
+            plans.insert(b, (s, local, deg));
+        }
+        let blocks: BTreeMap<u32, crate::chains::Block> = plans
+            .iter()
+            .map(|(b, (_, local, _))| (*b, local.clone()))
+            .collect();
+        let env = crate::chains::Env {
+            mol,
+            ranks,
+            style,
+            radii: &radii,
+            bonded: &bonded,
+            blocks: &blocks,
+        };
+
+        for p in place_neighbours(&env, a, &pos, &todo, z) {
+            // **兄弟那一块可能已经把它摆上了。** 上面去重之后,落在同一个系统里
+            // 的第二个邻居没有自己的块,但第一个邻居的块会把整个系统(含它)摆
+            // 好。这时它的坐标由环几何定,链上分给它的那个方向作废 —— 直接盖
+            // 上去会把它从环里拽出来。它也已经被那一块的 `fresh` 进过队了。
+            if pos.contains_key(&p.atom) {
+                continue;
+            }
             pos.insert(p.atom, p.at);
             zig.insert(p.atom, p.zig);
 
-            // 这个邻居若落在还没摆过的环系统里,以**它**为锚把整块摆上
+            // 前瞻已经把这一块摆好了 —— **原样用**。重算会重新挑镜像,而那时
+            // `pos` 已经变了,挑出来的可能是另一块,与前瞻累积进去的对不上。
+            if let (Some(put), Some((s, _, deg))) = (p.block, plans.remove(&p.atom)) {
+                // 退化只在**真正摆下去**这一刻记一笔 —— 规划阶段不记,否则同一
+                // 个系统会被记两遍
+                if let Some(d) = deg {
+                    degraded.push(d);
+                }
+                for (k, q) in put {
+                    pos.entry(k).or_insert(q);
+                }
+                done_sys.insert(s);
+                let mut fresh: Vec<u32> = systems[s].atoms.clone();
+                fresh.sort_by_key(|x| (ranks[*x as usize], *x));
+                for f in fresh {
+                    zig.entry(f).or_insert(p.zig);
+                    queue.push_back(f);
+                }
+            }
+
+            // 同一个原子上还挂着别的未摆系统时走老路(规划阶段只规划了第一个)
             let sys_here: Vec<usize> = of_atom
                 .get(&p.atom)
                 .into_iter()

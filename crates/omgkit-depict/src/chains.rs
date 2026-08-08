@@ -38,6 +38,9 @@ use crate::style::Style;
 /// 锯齿。取 0° 会让直链变成一条水平线加上下交替的折点,观感上偏斜。
 const SEED_ANGLE: f64 = std::f64::consts::FRAC_PI_6;
 
+/// 一整块环系统的坐标:原子编号 → 位置。
+pub(crate) type Block = BTreeMap<u32, Point2>;
+
 /// 一次放置的结果。
 pub(crate) struct Placed {
     /// 原子
@@ -46,6 +49,35 @@ pub(crate) struct Placed {
     pub at: Point2,
     /// 它自己的锯齿符号,传给它的子代取反
     pub zig: i8,
+    /// 这个邻居身后那**一整块环系统**的坐标 —— 挑方向时就已经算好的那一份。
+    ///
+    /// **调用方必须原样用,不许重算。** 重算会重新在两个镜像里挑,而挑的时候
+    /// `pos` 已经变了(兄弟摆上去了),挑出来的可能是另一个镜像 —— 那么前瞻
+    /// 累积进"已占"的就是一块**根本没被画出来的**坐标,后面每一步都建在假的
+    /// 占位上。
+    pub block: Option<Block>,
+}
+
+/// 布局那边传进来的上下文。打包成一个结构,是为了让 [`place_neighbours`] 的
+/// 参数不超过 clippy 的上限。
+///
+/// 前四项是**整个分量共用**的;`blocks` 不是 —— 它每摆一个枢纽就重建一次,
+/// 内容取决于那一刻还有哪些系统没摆。
+pub(crate) struct Env<'a> {
+    pub mol: &'a MolBuilder,
+    pub ranks: &'a [u32],
+    pub style: &'a Style,
+    /// 碰撞半径,与 [`crate::refine::radii`] 同一套口径
+    pub radii: &'a [f64],
+    /// 成键的原子对 —— 它们本来就靠在一起,不算撞。与 `layout` 那边 `Around`
+    /// 用的是**同一个集合**,免得"口径与 `refine` 一致"这句话变成两套实现。
+    pub bonded: &'a std::collections::BTreeSet<(u32, u32)>,
+    /// 邻居 → 它身后那个**还没摆过的环系统**的局部坐标。
+    ///
+    /// 由调用方**预先算好**([`crate::rings::layout_local`] 很贵:要查模板表、
+    /// 走弧法、必要时跑松弛),这里只做刚体变换。算好的那一份最后也要被真正
+    /// 用上,见 [`Placed::block`]。
+    pub blocks: &'a BTreeMap<u32, Block>,
 }
 
 /// 给 `a` 周围还没放置的邻居 `todo` 分配坐标。
@@ -53,14 +85,13 @@ pub(crate) struct Placed {
 /// `todo` 必须**已按规范秩排好**;顺序决定谁分到哪个方向,拿存储下标排就会
 /// 引入写法依赖。
 pub(crate) fn place_neighbours(
-    mol: &MolBuilder,
+    env: &Env<'_>,
     a: u32,
     pos: &BTreeMap<u32, Point2>,
     todo: &[u32],
-    ranks: &[u32],
-    style: &Style,
     zig: i8,
 ) -> Vec<Placed> {
+    let (mol, ranks, style) = (env.mol, env.ranks, env.style);
     if todo.is_empty() {
         return Vec::new();
     }
@@ -131,7 +162,8 @@ pub(crate) fn place_neighbours(
     // 保持锯齿的选择 —— 锯齿因此不受影响。
     // 已经占住的位置,以及已经画出来的键。新原子不许落在前者上、新键不许与
     // 后者交叉 —— 见 [`free_direction`]。
-    let mut taken: Vec<Point2> = pos.values().copied().collect();
+    // **带上原子编号**:整块前瞻要按编号去查碰撞半径,也要跳过成键的那些对。
+    let mut taken: Vec<(u32, Point2)> = pos.iter().map(|(k, v)| (*k, *v)).collect();
     let mut drawn: Vec<(Point2, Point2)> = mol
         .bonds()
         .iter()
@@ -171,18 +203,120 @@ pub(crate) fn place_neighbours(
 
     let mut out = Vec::with_capacity(todo.len());
     for (&atom, theta) in todo.iter().zip(dirs) {
-        let theta = free_direction(center, theta, &occupied, &taken, &drawn);
+        let look = Lookahead {
+            env,
+            atom,
+            local: env.blocks.get(&atom),
+        };
+        let (theta, block) = free_direction(center, theta, &occupied, &taken, &drawn, &look);
         let at = center + Point2::new(BOND_LEN, 0.0).rotated(theta);
-        taken.push(at);
+        taken.push((atom, at));
         drawn.push((center, at));
+        // **兄弟摆过的那一整块也要记进"已占"。**
+        //
+        // `place_neighbours` 是一次算完全部方向才返回的 —— 调用方要等它返回
+        // 之后才往 `pos` 里插。所以不在这儿累积的话,同一个枢纽上"这个环撞
+        // 那个环"从头到尾**看不见**。实测代价是键交叉 72 → 110(+53%)。
+        if let Some(b) = &block {
+            for (k, p) in b {
+                if *k != atom {
+                    taken.push((*k, *p));
+                }
+            }
+            for bd in mol.bonds() {
+                if let (Some(u), Some(v)) = (b.get(&bd.begin), b.get(&bd.end)) {
+                    drawn.push((*u, *v));
+                }
+            }
+        }
         out.push(Placed {
             atom,
             at,
             // 子代取反,直链就走出锯齿
             zig: -zig,
+            block,
         });
     }
     out
+}
+
+/// 挑方向时要用的「这个邻居身后是不是挂着一整块」。
+struct Lookahead<'a> {
+    env: &'a Env<'a>,
+    /// 正在挑方向的那个邻居 —— 它同时是那一块的锚点
+    atom: u32,
+    /// 那一块的局部坐标;没有块就是 `None`,一切退化成从前的行为
+    local: Option<&'a Block>,
+}
+
+impl Lookahead<'_> {
+    /// 这个邻居落在 `at` 时,它身后那一块会摆成什么样、有多坏。
+    ///
+    /// 返回 `(代价, 那一块的坐标)`。代价是 `(逐位重合的对数, 量化的碰撞深度)`,
+    /// **重合对数排在深度前面** —— 理由见 [`free_direction`]。
+    ///
+    /// 没有块时恒为 `((0, 0), None)`,于是下面的"挑最小"退化成"取第一个",
+    /// 与从前逐字节相同。
+    fn cost(
+        &self,
+        center: Point2,
+        at: Point2,
+        taken: &[(u32, Point2)],
+    ) -> ((usize, i64), Option<Block>) {
+        let Some(local) = self.local else {
+            return ((0, 0), None);
+        };
+        let dir = (at - center).normalized();
+        let mut best: Option<((usize, i64), Block)> = None;
+        for cand in crate::rings::place_candidates(self.env.mol, local, self.atom, at, dir) {
+            let c = block_cost(self.env, &cand, taken);
+            // **不许裸比浮点。** 深度已经量化成 i64,平局留前一个;而
+            // `place_candidates` 的返回序是定死的,所以这是个规范的选择。
+            // 单环的两个镜像本来就是同一个点集,深度只差最后一位。
+            let better = match &best {
+                None => true,
+                Some((old, _)) => c < *old,
+            };
+            if better {
+                best = Some((c, cand));
+            }
+        }
+        let (c, cand) = best.expect("`place_candidates` 恒返回两个候选");
+        (c, Some(cand))
+    }
+}
+
+/// 一块待放置的坐标压在已占部分上有多重:`(逐位重合的对数, 量化的碰撞深度)`。
+///
+/// 口径与 [`crate::refine`] 一致:半径来自标签,**成键的一对不算**(相邻原子
+/// 本来就靠在一起,锚点与枢纽正是这样一对)。
+fn block_cost(env: &Env<'_>, cand: &Block, taken: &[(u32, Point2)]) -> (usize, i64) {
+    /// 多近算"画在同一点上" —— 与硬判据 `原子不重合` 同一个阈值。
+    const SAME: f64 = 0.05;
+    let mut same = 0usize;
+    let mut parts: Vec<f64> = Vec::new();
+    for (i, p) in cand {
+        for (j, q) in taken {
+            if i == j || env.bonded.contains(&((*i).min(*j), (*i).max(*j))) {
+                continue;
+            }
+            let d = p.dist(*q);
+            if d < SAME {
+                same += 1;
+            }
+            let want = env.radii[*i as usize] + env.radii[*j as usize];
+            if d < want {
+                parts.push((want - d).powi(2));
+            }
+        }
+    }
+    // **先排序再求和。** 两种写法给的是同一个几何、同一个多重集,但迭代序是
+    // 存储序 —— 不排的话和会差最后一位,而下面的平局判定就靠这一位。
+    parts.sort_by(f64::total_cmp);
+    let depth: f64 = parts.iter().sum();
+    #[allow(clippy::cast_possible_truncation)]
+    let q = (depth * 1e9).round() as i64;
+    (same, q)
 }
 
 /// 从 `ideal` 出发,找一个不会与已放好的原子重合的方向。
@@ -199,20 +333,46 @@ pub(crate) fn place_neighbours(
 ///
 /// 按 30° 一档往两边试,与整张图的栅格一致;五档之内都腾不开就退回 `ideal`,
 /// 交给消冲突,消不掉再如实报进 `unresolved`。
+/// # 只看一个原子是不够的:它身后可能挂着一整个环系统
+///
+/// `clear` 问的是"**这个原子**落在这儿撞不撞",可这个邻居往往是一整块环系统的
+/// 接口 —— 环摆下去占的是十来个格点,而这一步对此一无所知。后果是硬判据
+/// `原子不重合` 上 57 处里的一大族:六配位金属挂吡啶,配体按 60° 分开,配体氮
+/// 到金属一个键长、环心到氮又一个键长,于是**两个相邻环心相距正好 2、外接圆
+/// 半径各 1 —— 精确相切**,而切点正落在栅格上,两个环各有一个邻位碳逐位重合。
+///
+/// 所以候选要连**整块**一起打分,见 [`Lookahead::cost`]。块的坐标是真算出来的
+/// (`layout_local` 的结果做刚体变换),不是估计。
+///
+/// # 打分不能写成布尔的「整块不撞」
+///
+/// 试过。一票否决会拿"蹭一下"去换"精确重合":某个取代基为了躲开一处深度
+/// 0.0538 的轻微重叠跳到别的档,**给后面的兄弟挖了坑**;轮到兄弟时一个候选都
+/// 满足不了,于是掉进兜底那一档退回 `ideal`,而 `ideal` 恰恰是唯一逐位重合的
+/// 那个。全量语料实测:重合 57 → 20 的同时**新坏 12 张**,签名全是"度 4 枢纽、
+/// 60°、环心距 2.000",与被修好的那族是同一个几何。
+///
+/// 改成"在每一轮里挑**最不坏**的"就没有这条兜底路了:重合 57 → 8,新坏 0。
+///
+/// 排序键里**重合对数必须排在深度前面**,而且这一位是吃劲的:只按深度跑一遍
+/// 全量语料,`原子不重合` **8 → 10**(坏的是语料第 3469、3472 行,两个吡啶
+/// 配合物)。道理是一次精确相切的深度只有 0.25 —— 比"挤到三个原子上"那种和
+/// 还小,光看深度会**主动选中相切**。
 fn free_direction(
     center: Point2,
     ideal: f64,
     occupied: &[f64],
-    taken: &[Point2],
+    taken: &[(u32, Point2)],
     drawn: &[(Point2, Point2)],
-) -> f64 {
+    look: &Lookahead<'_>,
+) -> (f64, Option<Block>) {
     const STEP: f64 = std::f64::consts::FRAC_PI_6;
     /// 多近算重合。取键长的十分之一 —— 真正分得开的两个位置至少差半个键长。
     const TOL: f64 = 0.1;
     let at = |t: f64| center + Point2::new(BOND_LEN, 0.0).rotated(t);
     let clear = |t: f64| {
         let p = at(t);
-        !taken.iter().any(|q| p.dist(*q) < TOL)
+        !taken.iter().any(|(_, q)| p.dist(*q) < TOL)
     };
     // 挪出来的方向落在哪一侧,决定键角是变宽还是变窄。**60° 不只是难看** ——
     // 链上出现一个 60° 的拐角,看着像旁边有个三元环,那是让人读错结构。
@@ -282,10 +442,36 @@ fn free_direction(
 
     // 两轮:先要"既不重合也不交叉",都腾不开就退而只求"不重合"。
     // **重合排在交叉前面** —— 重合会凭空造出一个假环,交叉只是难读。
-    if let Some(t) = cands.iter().find(|t| clear(**t) && uncrossed(**t)) {
-        return *t;
+    //
+    // 每一轮里不是"取第一个",是**取整块最不坏的那个**;没有块时代价恒为
+    // `(0, 0)`,取最小就退化成取第一个,与从前逐字节相同。
+    let pick = |pred: &dyn Fn(f64) -> bool| -> Option<(f64, Option<Block>)> {
+        let mut best: Option<((usize, i64), f64, Option<Block>)> = None;
+        for &t in cands.iter().filter(|t| pred(**t)) {
+            let (c, block) = look.cost(center, at(t), taken);
+            let better = match &best {
+                None => true,
+                Some((old, _, _)) => c < *old,
+            };
+            if better {
+                let done = c == (0, 0);
+                best = Some((c, t, block));
+                if done {
+                    break; // 一点不坏,后面不可能更好
+                }
+            }
+        }
+        best.map(|(_, t, block)| (t, block))
+    };
+    if let Some(hit) = pick(&|t| clear(t) && uncrossed(t)) {
+        return hit;
     }
-    cands.iter().copied().find(|t| clear(*t)).unwrap_or(ideal)
+    if let Some(hit) = pick(&|t| clear(t)) {
+        return hit;
+    }
+    // 全都腾不开:退回理想方向,块也照这个方向摆
+    let (_, block) = look.cost(center, at(ideal), taken);
+    (ideal, block)
 }
 
 /// 一个原子周围相邻两根键的理想夹角(弧度)。
@@ -397,6 +583,110 @@ fn largest_gap(sorted: &[f64]) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::largest_gap;
+
+    /// 这个分子里,有没有一个原子从**外面**接着好几个独立的环系统。
+    ///
+    /// 判据的前提要自己成立:接不着好几个环系统的分子,根本走不到"挑方向时
+    /// 要不要把整块算进去"那一步,判据就空过了。
+    fn rings_hanging_off_one_atom(m: &omgkit_core::MolBuilder) -> usize {
+        let systems = omgkit_chem::rings::fused_ring_systems(m);
+        (0..u32::try_from(m.num_atoms()).expect("原子数超出 u32"))
+            .filter(|a| !systems.iter().any(|s| s.contains(a)))
+            .map(|a| {
+                systems
+                    .iter()
+                    .filter(|s| m.neighbors(a).any(|(n, _)| s.contains(&n)))
+                    .count()
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn drawn_without_overlap(smi: &str, want_rings: usize) {
+        let mut m = omgkit_io::smiles::parse(smi).expect("SMILES 该能解析");
+        omgkit_chem::pipeline::sanitize(&mut m).expect("该能 sanitize");
+        let n = rings_hanging_off_one_atom(&m);
+        assert!(
+            n >= want_rings,
+            "{smi} 只有一个原子外接 {n} 个环系,少于 {want_rings} —— 这条判据空过了"
+        );
+        for style in &crate::style::Style::ALL {
+            let d = crate::generate(&m, style);
+            for i in 0..d.coords.len() {
+                for j in (i + 1)..d.coords.len() {
+                    let dist = d.coords[i].dist(d.coords[j]);
+                    assert!(
+                        dist >= 0.05,
+                        "{}:原子 {i} 与 {j} 相距 {dist:.4} 个键长",
+                        style.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// 从一根键挂出去的环,不许摞在兄弟环身上。
+    ///
+    /// 分子取自真语料(第 6398 行):六配位钴挂四个吡啶 + 两个硫氰酸根。
+    /// 配体按 60° 分开、配体氮到金属一个键长、环心到氮又一个键长,于是**两个
+    /// 相邻环心相距正好 2、外接圆半径各 1 —— 精确相切**,切点又正落在 30° 栅格
+    /// 上,两个环各有一个邻位碳**逐位重合**。
+    ///
+    /// 挑方向那一步先前只看"配体氮这一个原子撞不撞",看不见它身后那一整个环。
+    /// 全量语料上这一族占 `原子不重合` 57 处里的一大半;补上整块前瞻之后 57 → 8。
+    ///
+    /// 变异:把 `layout_component` 里建 `blocks` 的那一段换成空表(前瞻拿不到
+    /// 块,`Lookahead::cost` 恒返回 `((0,0), None)`)。实测这条当场红:
+    /// `原子 8 与 20 相距 0.0000`,而下面那条仍是绿的。
+    #[test]
+    fn a_ring_hanging_off_a_bond_is_not_dropped_onto_its_neighbour() {
+        drawn_without_overlap(
+            "N#CS[Co](SC#N)([N+]1=CC=CC=C1)([N+]2=CC=CC=C2)([N+]3=CC=CC=C3)[N+]4=CC=CC=C4",
+            4,
+        );
+    }
+
+    /// 「逐位重合的对数」必须排在「碰撞深度」前面。
+    ///
+    /// 分子取自真语料(第 3469 行):钴上挂四个甲基吡啶 + 两个硫氰酸根。
+    ///
+    /// 这条守的是 [`super::block_cost`] 返回值里的**第一位**。光比深度是不够的
+    /// —— 一次**精确相切**只有一对原子重合,深度 `(0.5 − 0)² = 0.25`;而"整块
+    /// 蹭到三四个原子上"虽然一处都没重合,深度和却更大。于是纯按深度会**主动
+    /// 选中相切**,也就是主动选中"两个原子画在同一点上"。
+    ///
+    /// 变异:把 `block_cost` 的返回值从 `(same, q)` 改成 `(0, q)`(只按深度)。
+    /// 实测这条当场红(`原子 12 与 20 相距 0.0000`),另外两条仍绿;全量语料上
+    /// 那个变异让 `原子不重合` 8 → 10,坏的正是这个分子与第 3472 行的锌盐。
+    #[test]
+    fn how_many_atoms_land_on_top_of_each_other_outranks_how_deep_they_press() {
+        drawn_without_overlap(
+            "CC1=[N+](C=CC=C1)[Co](SC#N)(SC#N)([N+]2=C(C)C=CC=C2)([N+]3=C(C)C=CC=C3)\
+             [N+]4=C(C)C=CC=C4",
+            4,
+        );
+    }
+
+    /// 一个候选都不干净时,要挑**最不坏**的,不许退回理想方向。
+    ///
+    /// 分子取自真语料(第 7794 行):三苯基甲基苯基酮,枢纽是个度 4 的季碳,
+    /// 四个方向上挂着四个苯环。
+    ///
+    /// 这条守的是 [`super::free_direction`] 里那个**不能写成布尔**的判断。写成
+    /// 布尔("整块撞了就否决")的话:前一个取代基为了躲开一处深度 0.0538 的
+    /// 轻微重叠跳到别的档,**给后面的兄弟挖了坑**;轮到兄弟时一个候选都满足
+    /// 不了,于是掉进兜底那一档退回 `ideal` —— 而 `ideal` 恰恰是唯一逐位重合的
+    /// 那个。全量语料实测那一版**新坏 12 张**,签名全是"度 4 枢纽、60°、环心距
+    /// 2.000"。
+    ///
+    /// 变异:把 `free_direction` 里的 `pick` 换成布尔式 —— 只收 `c == (0, 0)` 的
+    /// 候选,一个都没有就让这一轮空手而归(于是掉进最后的 `ideal`)。实测
+    /// 这条当场红:`原子 14 与 26 相距 0.0000`,而上面那条仍是绿的 ——
+    /// 两条判据守的**不是**同一件事。
+    #[test]
+    fn when_nothing_is_clean_the_least_bad_direction_wins_instead_of_the_ideal_one() {
+        drawn_without_overlap("O=C(C1=CC=CC=C1)C(C2=CC=CC=C2)(C3=CC=CC=C3)C4=CC=CC=C4", 3);
+    }
 
     /// splitmix64 + Fisher–Yates。仿射式的"置换"搅不动东西 —— 审计里记过那个坑。
     fn shuffled(n: usize, seed: u64) -> Vec<u32> {
@@ -702,17 +992,50 @@ mod tests {
         c.acos()
     }
 
+    /// 老判据里没有任何环系统要摆,`blocks` 给空表 —— [`super::Lookahead::cost`]
+    /// 于是恒返回 `((0, 0), None)`,挑方向退化成从前的"取第一个"。
+    fn env<'a>(
+        m: &'a omgkit_core::MolBuilder,
+        ranks: &'a [u32],
+        style: &'a Style,
+        radii: &'a [f64],
+        bonded: &'a std::collections::BTreeSet<(u32, u32)>,
+        blocks: &'a BTreeMap<u32, super::Block>,
+    ) -> super::Env<'a> {
+        super::Env {
+            mol: m,
+            ranks,
+            style,
+            radii,
+            bonded,
+            blocks,
+        }
+    }
+
     #[test]
     fn a_chain_zigzags_instead_of_running_straight() {
         // 度数 2 的原子若取 180°,链就成了一条直线 —— 既不是化学惯例,
         // 也让后面的可旋转键无处可翻。这条守的正是那个 180°。
         let m = prep("CCCCC");
         let style = Style::ACS_1996;
+        let radii = crate::refine::radii(&m, &style);
+        let bonded: std::collections::BTreeSet<(u32, u32)> = m
+            .bonds()
+            .iter()
+            .map(|b| (b.begin.min(b.end), b.begin.max(b.end)))
+            .collect();
+        let blocks: BTreeMap<u32, super::Block> = BTreeMap::new();
         let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
         pos.insert(0, Point2::ORIGIN);
         let mut zig = 1i8;
         for a in 0..4u32 {
-            let out = place_neighbours(&m, a, &pos, &[a + 1], &canonical(&m), &style, zig);
+            let out = place_neighbours(
+                &env(&m, &canonical(&m), &style, &radii, &bonded, &blocks),
+                a,
+                &pos,
+                &[a + 1],
+                zig,
+            );
             pos.insert(out[0].atom, out[0].at);
             zig = out[0].zig;
         }
@@ -735,11 +1058,24 @@ mod tests {
     fn every_bond_is_one_unit_long() {
         let m = prep("CC(C)(C)C");
         let style = Style::ACS_1996;
+        let radii = crate::refine::radii(&m, &style);
+        let bonded: std::collections::BTreeSet<(u32, u32)> = m
+            .bonds()
+            .iter()
+            .map(|b| (b.begin.min(b.end), b.begin.max(b.end)))
+            .collect();
+        let blocks: BTreeMap<u32, super::Block> = BTreeMap::new();
         let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
         pos.insert(1, Point2::ORIGIN);
         let mut todo: Vec<u32> = m.neighbors(1).map(|(n, _)| n).collect();
         todo.sort_unstable();
-        for p in place_neighbours(&m, 1, &pos, &todo, &canonical(&m), &style, 1) {
+        for p in place_neighbours(
+            &env(&m, &canonical(&m), &style, &radii, &bonded, &blocks),
+            1,
+            &pos,
+            &todo,
+            1,
+        ) {
             pos.insert(p.atom, p.at);
         }
         for n in todo {
@@ -754,12 +1090,25 @@ mod tests {
         // 四个方向只能铺满 360° 中的 360°—— 会有两个重叠。
         let m = prep("CC(C)(C)C");
         let style = Style::ACS_1996;
+        let radii = crate::refine::radii(&m, &style);
+        let bonded: std::collections::BTreeSet<(u32, u32)> = m
+            .bonds()
+            .iter()
+            .map(|b| (b.begin.min(b.end), b.begin.max(b.end)))
+            .collect();
+        let blocks: BTreeMap<u32, super::Block> = BTreeMap::new();
         let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
         pos.insert(1, Point2::ORIGIN);
         let mut todo: Vec<u32> = m.neighbors(1).map(|(n, _)| n).collect();
         todo.sort_unstable();
         assert_eq!(todo.len(), 4, "季碳应当有四个邻居");
-        let out = place_neighbours(&m, 1, &pos, &todo, &canonical(&m), &style, 1);
+        let out = place_neighbours(
+            &env(&m, &canonical(&m), &style, &radii, &bonded, &blocks),
+            1,
+            &pos,
+            &todo,
+            1,
+        );
         for i in 0..out.len() {
             for j in (i + 1)..out.len() {
                 let ang = between(out[i].at, out[j].at);
@@ -778,12 +1127,25 @@ mod tests {
         // 只会让图上一边挤一边空。
         let m = prep("CC(C)C");
         let style = Style::ACS_1996;
+        let radii = crate::refine::radii(&m, &style);
+        let bonded: std::collections::BTreeSet<(u32, u32)> = m
+            .bonds()
+            .iter()
+            .map(|b| (b.begin.min(b.end), b.begin.max(b.end)))
+            .collect();
+        let blocks: BTreeMap<u32, super::Block> = BTreeMap::new();
         let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
         pos.insert(1, Point2::ORIGIN);
         // 手工把两个邻居摆在 0° 和 60°,留下一个 300° 的大空隙
         pos.insert(0, Point2::new(1.0, 0.0));
         pos.insert(2, Point2::new(0.5, 3f64.sqrt() / 2.0));
-        let out = place_neighbours(&m, 1, &pos, &[3], &canonical(&m), &style, 1);
+        let out = place_neighbours(
+            &env(&m, &canonical(&m), &style, &radii, &bonded, &blocks),
+            1,
+            &pos,
+            &[3],
+            1,
+        );
         let ang = out[0].at.angle().rem_euclid(std::f64::consts::TAU);
         // 大空隙是 60° → 360°,中点在 210°
         assert!(
