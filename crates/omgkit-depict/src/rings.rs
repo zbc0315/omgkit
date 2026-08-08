@@ -149,7 +149,25 @@ pub(crate) fn layout_local(
             if shared.len() != 2 {
                 continue; // 共用 1 个是螺(不会同系统)、>2 个是桥
             }
-            let (u, v) = (shared[0], shared[1]);
+            // **共用的那两个原子要按规范秩定序。** `shared` 保留的是
+            // `r.atoms` 的顺序 —— 那是 SSSR 的输出序,依赖存储序。
+            //
+            // 交换 `u`、`v` 在**非平局**时不改结果(两个候选环心跟着互换,
+            // "取远离质心的那个"仍然选中同一个点,转向也自适应)。可一旦
+            // **平局** —— 已放置的质心落在这根键的中垂线上 —— `fuse_on_bond`
+            // 走 `else` 取 `c2`,而 `c1`/`c2` 正是被 `u`/`v` 交换换掉的那一对,
+            // 于是两种写法把新环拼到了相反的一侧。
+            //
+            // 实测语料第 7879 行(一个 Ni 的四齿配合物,五个环共用同一个金属,
+            // 对称度高、质心常落在中垂线上):四次拼环的 `(u,v)` **每一次都
+            // 正好反过来**,最后 40/40 个图元全不同。
+            let (u, v) = if (ranks[shared[0] as usize], shared[0])
+                <= (ranks[shared[1] as usize], shared[1])
+            {
+                (shared[0], shared[1])
+            } else {
+                (shared[1], shared[0])
+            };
             if !adjacent_in_ring(r, u, v) {
                 continue; // 共用两个原子却不相邻 —— 那也是桥
             }
@@ -177,7 +195,7 @@ pub(crate) fn layout_local(
             return (pos, degraded);
         };
 
-        fuse_on_bond(order[i], u, v, &mut pos);
+        fuse_on_bond(order[i], u, v, ranks, &mut pos);
         placed.insert(i);
     }
 
@@ -227,7 +245,7 @@ fn adjacent_in_ring(r: &Ring, u: u32, v: u32) -> bool {
 }
 
 /// 沿已放置的键 `u–v` 把环 `r` 拼到外侧。
-fn fuse_on_bond(r: &Ring, u: u32, v: u32, pos: &mut BTreeMap<u32, Point2>) {
+fn fuse_on_bond(r: &Ring, u: u32, v: u32, ranks: &[u32], pos: &mut BTreeMap<u32, Point2>) {
     let n = r.atoms.len();
     // 把环的原子序列转到以 u 开头、v 紧随其后
     let start = r.atoms.iter().position(|a| *a == u).expect("u 在环上");
@@ -248,14 +266,48 @@ fn fuse_on_bond(r: &Ring, u: u32, v: u32, pos: &mut BTreeMap<u32, Point2>) {
     // 边心距:边长 s 的正 n 边形,中心到边的距离是 s / (2 tan(π/n))
     let apothem = BOND_LEN / (2.0 * (std::f64::consts::PI / n as f64).tan());
 
-    // 两个候选中心,取**远离已放置质心**的那个 —— 新环要长在外侧
-    let anchor = centroid(pos.values().copied());
+    // 两个候选中心,取**远离已放置质心**的那个 —— 新环要长在外侧。
+    //
+    // # 平局要显式判,不能交给浮点比较
+    //
+    // `c1`/`c2` 沿**法线**对称,所以到两者等距的点集是**过 `mid` 沿键方向的那条
+    // 直线**(键所在的直线及其延长线),不是键的中垂线。质心落在它上面时,
+    // `c1.dist(anchor)` 与 `c2.dist(anchor)` 数学上相等,**胜负全由舍入决定**。
+    //
+    // 而 `anchor` 是一串浮点累加,累加次序一变末位就变 —— 那正是写法依赖。
+    // 所以两件事都做:
+    //
+    // 1. 质心**按规范秩累加**(与 `relax` 里那条同一个道理);
+    // 2. 用**有符号投影**显式判平局,平局时由规范量选边,不进浮点比较。
+    //
+    // **第 2 条有判据**(`a_tie_between_the_two_ring_centres_is_decided_by_a_rule_not_by_rounding`,
+    // 变异回浮点比较当场红)。**第 1 条没有** —— 全量语料上把它换回按存储序
+    // 累加,147 条判据全绿、审计一处不动。它是构造性的防御,不是量到的收益:
+    // 语料里没有"累加次序真的翻了符号"的例子。如实记着,不编一个来凑。
+    //
+    // 实测语料第 7879 行(Ni 四齿配合物,五个环共用同一个金属):四次拼环的
+    // 投影绝对值依次是 1.3764 / **0** / 0.9346 / 0.3753 —— **只有第二次是
+    // 平局**,另外两次拼歪是因为拼在一个已经分岔了的局部布局上。拿 400 种
+    // 真置换改写量:那一次里 **109 种(27%)** 的 gap 已经不是精确 0 了,
+    // 只是符号碰巧没翻 —— 语料过得去靠的是运气,不是构造。
+    //
+    // 非平局那一侧不在刀锋上:全量 5398 次拼环里最小的非零间隔是
+    // **0.167**,比浮点噪声高十五个量级,中间一次都没落进 1e-6 以内。
+    let mut order: Vec<u32> = pos.keys().copied().collect();
+    order.sort_by_key(|a| (ranks[*a as usize], *a));
+    let anchor = centroid(order.iter().map(|a| pos[a]));
     let c1 = mid + normal * apothem;
     let c2 = mid - normal * apothem;
-    let center = if c1.dist(anchor) > c2.dist(anchor) {
+    // `normal` 由 `(u, v)` 定,而调用处已按规范秩把它们定序 —— 所以 `c1`
+    // 与写法无关,平局时无条件取它就是个规范的选择。
+    const TIE: f64 = 1e-9;
+    let s = (anchor - mid).dot(normal);
+    let center = if s < -TIE {
         c1
-    } else {
+    } else if s > TIE {
         c2
+    } else {
+        c1
     };
 
     // 转向的正负:取能把 pu 转到 pv 的那一个。这一步顺带验证了几何 ——
@@ -655,6 +707,125 @@ pub(crate) fn place_at(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_tie_between_the_two_ring_centres_is_decided_by_a_rule_not_by_rounding() {
+        // **两个候选环心到已放置质心等距时,不能交给浮点比较拍板。**
+        //
+        // `c1`/`c2` 沿法线对称,所以等距点集是**过 `mid` 沿键方向的那条直线**
+        // (不是键的中垂线 —— 中垂线上只有 `mid` 那一个点等距)。质心落在它上面
+        // 时 `c1.dist(anchor) > c2.dist(anchor)` 两边数学上相等,谁赢全看舍入,
+        // 而质心是一串随写法变次序的浮点累加。
+        //
+        // 这里把平局摆得干干净净:已放置的只有键的两端,质心**精确等于** `mid`。
+        // 断言取 `c1`(= `mid + normal × 边心距`)—— `normal` 由已按规范秩定序的
+        // `(u, v)` 决定,所以这是个规范的选择。
+        //
+        // 变异:把那三支换回 `if c1.dist(anchor) > c2.dist(anchor) { c1 } else
+        // { c2 }` → 精确平局走 `else` 取 `c2`,这条当场红。
+        use super::*;
+        let r = Ring {
+            atoms: vec![0, 1, 2, 3],
+            bonds: vec![0, 1, 2, 3],
+        };
+        let mut pos: BTreeMap<u32, Point2> = BTreeMap::new();
+        pos.insert(0, Point2::new(0.0, 0.0));
+        pos.insert(1, Point2::new(1.0, 0.0));
+        let ranks = [0u32, 1, 2, 3];
+        // 前提要自己成立:质心必须**精确**落在 mid 上,否则这不是平局
+        let anchor = centroid(pos.values().copied());
+        assert!(
+            anchor.x == 0.5 && anchor.y == 0.0,
+            "这个摆法下质心该精确等于 mid,实得 ({}, {})",
+            anchor.x,
+            anchor.y
+        );
+        fuse_on_bond(&r, 0, 1, &ranks, &mut pos);
+        // normal = (-along.y, along.x) = (0, 1),所以 c1 在上方
+        let c2 = pos[&2];
+        assert!(
+            c2.y > 0.0,
+            "平局时该取 `c1`(法线正向那个),实得原子 2 落在 y={:.4}",
+            c2.y
+        );
+    }
+
+    #[test]
+    fn the_ring_layout_does_not_care_how_sssr_wrote_the_cycles() {
+        // **SSSR 给出的环原子序列只有两个自由度随写法变**:从哪个原子起、
+        // 朝哪边绕。这条判据把它们**穷举**掉 —— 每个环转 k 步、按需反向,
+        // 断言 `layout_local` 的输出逐点相同。
+        //
+        // 拿语料第 7879 行(Ni 四齿配合物,五个环共用同一个金属)。它是这条
+        // 判据唯一在全量语料上暴露过的分子:拼环时"共用的那两个原子"取自
+        // SSSR 输出序,而选环心的那个浮点比较在**平局**时由舍入拍板 ——
+        // 两种写法把新环拼到了相反的一侧,40/40 个图元全不同。
+        //
+        // **不经过 refine/orient/render**,所以断言直接指着根因。
+        use super::*;
+        let smi = "O=C1C[N+]23CC[N+]45CC(=O)O[Ni]24(O1)(OC(=O)C3)OC(=O)C5";
+        let mut m = omgkit_io::smiles::parse(smi).unwrap();
+        omgkit_chem::pipeline::sanitize(&mut m).unwrap();
+        let ranks = crate::ranks_of(&m);
+        let rings_all = omgkit_chem::sssr::ring_set(&m);
+        let systems = group(&omgkit_chem::rings::fused_ring_systems(&m), &rings_all);
+        let sys = systems
+            .iter()
+            .max_by_key(|s| s.rings.len())
+            .expect("该有一个环系统");
+        assert!(sys.rings.len() >= 5, "这个分子该有五个环共用一个金属");
+
+        let base = layout_local(&m, sys, &ranks, None).0;
+        assert!(!base.is_empty(), "布局该给出坐标");
+
+        // 把每个环的序列转 k 步、按需反向,重跑
+        for k in 0..6usize {
+            for rev in [false, true] {
+                let rotated: Vec<Ring> = sys
+                    .rings
+                    .iter()
+                    .map(|r| {
+                        let n = r.atoms.len();
+                        let idx: Vec<usize> = (0..n)
+                            .map(|i| if rev { (k + n - i) % n } else { (k + i) % n })
+                            .collect();
+                        Ring {
+                            atoms: idx.iter().map(|i| r.atoms[*i]).collect(),
+                            // 键跟着走:`bonds[i]` 连 `atoms[i]` 与 `atoms[i+1]`
+                            bonds: (0..n)
+                                .map(|i| {
+                                    let (x, y) = (idx[i], idx[(i + 1) % n]);
+                                    r.bonds[if rev { y } else { x }]
+                                })
+                                .collect(),
+                        }
+                    })
+                    .collect();
+                let shuffled = System {
+                    atoms: sys.atoms.clone(),
+                    rings: rotated.iter().collect(),
+                };
+                let got = layout_local(&m, &shuffled, &ranks, None).0;
+                assert_eq!(
+                    base.len(),
+                    got.len(),
+                    "环的序列转 {k} 步 rev={rev} 之后原子数变了"
+                );
+                for (a, p) in &base {
+                    let q = got[a];
+                    assert!(
+                        (p.x - q.x).abs() < 1e-9 && (p.y - q.y).abs() < 1e-9,
+                        "环的原子序列转 {k} 步 rev={rev} 之后布局就变了:\
+                         原子 {a} 从 ({:.4},{:.4}) 挪到 ({:.4},{:.4})",
+                        p.x,
+                        p.y,
+                        q.x,
+                        q.y
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_bridged_system_is_relaxed_from_several_starts() {
         // 松弛是局部下降,落到哪个局部极小全看初值。单一初值下实测 177 个桥环
