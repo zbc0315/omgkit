@@ -121,7 +121,11 @@ fn main() {
     let mut checked: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut quality: BTreeMap<&'static str, usize> = BTreeMap::new();
 
-    for (lineno, line) in text.lines().enumerate() {
+    // **行号从 1 数起。** 先前直接报 `enumerate()` 的 0 基下标,而报出来的东西
+    // 是给人拿编辑器去翻的 —— 差一行翻出来就是**另一个分子**。实测代码注释里
+    // 那七处"语料第 N 行"全部指错:第 7879 行是个内酯,真正的 Ni 四齿配合物在
+    // 7880;第 573 行是个肟,内消旋环己醇在 574。已逐条改正。
+    for (lineno, line) in text.lines().enumerate().map(|(i, l)| (i + 1, l)) {
         let smi = line.split_whitespace().next().unwrap_or("");
         // `#` 开头是注释。先前没跳,靠"解析失败"混过去 —— 于是 `跳过 N` 这个数
         // 把注释行和真正解析不了的分子混在了一起,后者就藏进去了。
@@ -595,6 +599,19 @@ fn checks(
 /// 就成了 60°,所以这条必须守着。
 ///
 /// 只对没退化的布局下判断:桥环松弛出来的坐标本来就不成形状。
+///
+/// # 三元环的内角不算,而且不是"网开一面"
+///
+/// 这一条**曾经**把三元环也算进去,于是全量语料 181 处违例里有 **156 处正好是
+/// 60.0°**,全是环丙烷/环氧/氮丙啶的内角。那不是画错了,是**这条判据与
+/// [`bond_lengths_equal`] 自相矛盾**:
+///
+/// 三元环只有三根键,键长全等就是等边三角形,内角**必然恰好 60°**。也就是说
+/// 含三元环的分子无论怎么摆都过不了这一条 —— 除非先违反键长全等。两条判据
+/// 不能同时满足,而键长全等是画图规范定死的,所以让路的是这一条。
+///
+/// 判别方法:`a` 的两个邻居**彼此成键**,等价于 `a-i-j` 是个三元环。四元环
+/// 不受影响 —— 正方形内角 90°,在 `FLOOR = 89°` 之上。
 fn no_angle_is_pinched(m: &MolBuilder, d: &omgkit_depict::Depiction, clean: bool) -> Check {
     if !clean {
         return ("键角不过窄", false, None);
@@ -609,6 +626,10 @@ fn no_angle_is_pinched(m: &MolBuilder, d: &omgkit_depict::Depiction, clean: bool
         let c = d.coords[a as usize];
         for i in 0..nbrs.len() {
             for j in (i + 1)..nbrs.len() {
+                // 三元环的内角,见上面的论证
+                if m.neighbors(nbrs[i]).any(|(n, _)| n == nbrs[j]) {
+                    continue;
+                }
                 let u = (d.coords[nbrs[i] as usize] - c).normalized();
                 let v = (d.coords[nbrs[j] as usize] - c).normalized();
                 let deg = u.dot(v).clamp(-1.0, 1.0).acos().to_degrees();

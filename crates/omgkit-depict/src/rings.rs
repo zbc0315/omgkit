@@ -112,7 +112,7 @@ pub(crate) fn group<'a>(systems: &[Vec<u32>], rings: &'a [Ring]) -> Vec<System<'
 
 /// 在**局部坐标系**里给一个环系统布局。返回逐原子坐标与(可能的)退化记录。
 ///
-/// 调用方拿到之后再整体平移旋转到该去的位置,见 [`place_at`]。
+/// 调用方拿到之后再整体平移旋转到该去的位置,见 [`place_candidates`]。
 pub(crate) fn layout_local(
     mol: &MolBuilder,
     sys: &System<'_>,
@@ -171,7 +171,7 @@ pub(crate) fn layout_local(
             // 走 `else` 取 `c2`,而 `c1`/`c2` 正是被 `u`/`v` 交换换掉的那一对,
             // 于是两种写法把新环拼到了相反的一侧。
             //
-            // 实测语料第 7879 行(一个 Ni 的四齿配合物,五个环共用同一个金属,
+            // 实测语料第 7880 行(一个 Ni 的四齿配合物,五个环共用同一个金属,
             // 对称度高、质心常落在中垂线上):四次拼环的 `(u,v)` **每一次都
             // 正好反过来**,最后 40/40 个图元全不同。
             let (u, v) = if (ranks[shared[0] as usize], shared[0])
@@ -317,7 +317,7 @@ fn fuse_on_bond(r: &Ring, u: u32, v: u32, ranks: &[u32], pos: &mut BTreeMap<u32,
     // 累加,147 条判据全绿、审计一处不动。它是构造性的防御,不是量到的收益:
     // 语料里没有"累加次序真的翻了符号"的例子。如实记着,不编一个来凑。
     //
-    // 实测语料第 7879 行(Ni 四齿配合物,五个环共用同一个金属):四次拼环的
+    // 实测语料第 7880 行(Ni 四齿配合物,五个环共用同一个金属):四次拼环的
     // 投影绝对值依次是 1.3764 / **0** / 0.9346 / 0.3753 —— **只有第二次是
     // 平局**,另外两次拼歪是因为拼在一个已经分岔了的局部布局上。拿 400 种
     // 真置换改写量:那一次里 **109 种(27%)** 的 gap 已经不是精确 0 了,
@@ -530,7 +530,7 @@ fn relax_from(
     // `idx` 是按规范秩排好的原子在 `atoms` 里的下标,所以按 `(小, 大)` 排序
     // 就与写法无关了。
     //
-    // **这一处也没有判据守着。** 与 `place_at` 同理:`settle` 跑 400 步,末位
+    // **这一处也没有判据守着。** 与 `place_candidates` 同理:`settle` 跑 400 步,末位
     // 差别在迭代里既可能放大也可能被吃掉,造不出稳定会红的样本。留着是因为
     // "顺序必须与写法无关"这条本身成立,不是因为量到了收益。
     let mut bonded: Vec<(usize, usize)> = mol
@@ -708,19 +708,63 @@ fn bfs_order(n: usize, bonded: &[(usize, usize)]) -> Vec<usize> {
     out
 }
 
-/// 把一个局部布局整体搬到位:让 `anchor` 落在 `at`,并让整体质心朝 `dir`。
+/// 把一个局部布局整体搬到位:让 `anchor` 落在 `at`,并让**锚点的外角平分线**
+/// 朝 `dir`。返回两个候选,互为关于「过 `at`、方向 `dir`」那条轴的镜像。
 ///
-/// 两个自由度(平移 + 旋转)刚好被这两个条件定死,不留任意性。
-pub(crate) fn place_at(
+/// # 参照物为什么是外角平分线,不是整块的质心
+///
+/// 先前拿的是质心:让 `质心 − anchor` 朝 `dir`。**单环时两者是同一个方向**
+/// (质心就是环心,而环心正落在外角平分线上),所以单环的图一点不变;
+/// **稠环上就分家了**,而且错得能精确算出来。
+///
+/// 喹啉的环氮挂一根环外键(金属配体、苄基都算):两个六元环合起来的质心偏向
+/// 第二个环,把它摆到键的延长线上,整个环系就被拧了一个角,环外键与两根环键
+/// 不再对称 —— 一边 160.9°,另一边 **79.1°**。
+///
+/// ```text
+/// 正六边形边长 1,环 A 心在原点,N 在 (0, 1),两个稠合原子在 (±√3/2, ±1/2)
+/// 十个原子的质心 = (√3/2, 0)
+/// 质心 − N = (√3/2, −1)        辐角 −49.106°
+/// 环外键方向 = −49.106° + 180° = 130.894°
+/// N 的另一根环键方向          = −150°
+/// 夹角 = 360° − (130.894° + 150°) = 79.106°
+/// ```
+///
+/// 全量语料里「键角不过窄」剩下的 16 处违例**全是这一族,而且值一模一样**
+/// (79.1°)—— 值一样正是几何被定死的证据,不是巧合。
+///
+/// 外角平分线才是画图规范要的参照:环外键落在两根环键的对称轴上,单环稠环
+/// 一视同仁。
+///
+/// # 只管"恰好两根环键"那一档,别的仍走质心
+///
+/// "对称轴"这个说法要有两根环键才成立。锚点在系统内有三个以上邻居(稠合桥头)
+/// 时,方向之和不是任何东西的平分线 —— 恰好 120° 分开就归零,不恰好时是个模长
+/// 很小、方向近乎任意的向量。所以那一档退回质心,见函数体里的注释。
+///
+/// # 剩下那个自由度**交给调用方**,不在这里拍板
+///
+/// 平分线定死了旋转,还剩一个反射(绕 `dir` 那条轴)。稠环上两个镜像不同 ——
+/// 它决定第二个环往哪一侧长。
+///
+/// **单环上这个自由度是空的**:正多边形关于"顶点—圆心"那条轴对称,而平分线
+/// 正是这条轴,于是 `flipped` 与 `straight` 是**同一个点集**(只是原子编号互换)。
+/// 所以指望它给单环挑位置是指望不上的 —— 单环要挪只能靠调用方换 `dir`。
+///
+/// 那要看**已经画了什么**,`rings` 这一层看不到,所以两个都返回,由
+/// [`crate::layout`] 按碰撞挑。先前的质心参照等于把这个选择偷偷做掉了:让大块
+/// 朝外是个不错的默认,但它是拿**局部键角**换来的,亏。
+pub(crate) fn place_candidates(
+    mol: &MolBuilder,
     local: &BTreeMap<u32, Point2>,
     anchor: u32,
     at: Point2,
     dir: Point2,
-) -> BTreeMap<u32, Point2> {
+) -> [BTreeMap<u32, Point2>; 2] {
     let a = local[&anchor];
-    // **求和的次序必须与写法无关。** `local` 是按原子下标建的 `BTreeMap`,
-    // 迭代序就是存储序;浮点加法不满足结合律,同一分子的两种写法算出的质心
-    // 会差最后一位(~1e-16),`theta` 跟着差那么一点,**整个环系被转了 1e-16**。
+    // **求和的次序必须与写法无关。** 邻接表与 `local` 都是按原子下标来的,也就是
+    // 存储序;浮点加法不满足结合律,同一分子的两种写法算出的方向会差最后一位
+    // (~1e-16),`theta` 跟着差那么一点,**整个环系被转了 1e-16**。
     //
     // 平时看不出来,但下游会把它放大:`orient` 在 24 个候选姿态里挑最小的键,
     // 1e-16 的差别足以让另一个姿态胜出,最终差出 10 个单位。实测就是这么炸的
@@ -728,32 +772,131 @@ pub(crate) fn place_at(
     //
     // 点集本身与写法无关(几何一样,只是标号不同),所以**按坐标排序再求和**
     // 就定死了 —— 不需要把 `ranks` 传进来。
+    let by_xy = |u: &Point2, v: &Point2| u.x.total_cmp(&v.x).then(u.y.total_cmp(&v.y));
+    let mut us: Vec<Point2> = mol
+        .neighbors(anchor)
+        .filter_map(|(n, _)| local.get(&n))
+        .map(|p| (*p - a).normalized())
+        .collect();
+    us.sort_by(by_xy);
+
+    // **只有恰好两根环键时才谈得上"对称轴"**,别的情形一律退回质心。
     //
-    // **这一处没有判据守着,如实说。** 试过写一条"同一组点换个键序,`place_at`
-    // 输出逐位相同"的判据:造了几组点,质心末位确实差,但那点差被后面
-    // `(c - a).normalized()` 的归一化吸收了,输出逐位相同 —— 判据在打不打这个
-    // 补丁下都是绿的,**空过的判据不留**。`orient::canonicalise` 那处同类修复
-    // 有判据(`shuffling_the_storage_order_does_not_move_the_picture`),因为它
-    // 的质心直接进坐标,没有归一化这一步。
-    let mut pts: Vec<Point2> = local.values().copied().collect();
-    pts.sort_by(|u, v| u.x.total_cmp(&v.x).then(u.y.total_cmp(&v.y)));
-    let c = centroid(pts.into_iter());
-    let from = (c - a).normalized();
+    // 三根以上(稠合桥头)时"方向之和"这个式子照样算得出来,但它已经不是任何
+    // 东西的平分线了:三个方向恰好 120° 分开就归零,不恰好时给出一个模长很小、
+    // 方向近乎任意的向量,整块环系跟着按它摆出去。
+    //
+    // **这个闸在全量语料上一个数都没动** —— 加与不加,连「原子不重合」那份逐条
+    // 清单都逐行相同。留着不是因为量到了收益,是因为**上面那整段推导的前提就是
+    // 两根环键**:不加闸的话,代码算的东西与文档说的东西在这一档上对不上,而
+    // 那一档还恰好是数值最不稳的。
+    //
+    // 质心不是"更好",只是**在这一档上没有更有道理的东西**:它至少指着大块在
+    // 哪边,而且是先前的行为,不引入新的未知。
+    let from = if us.len() == 2 {
+        // **指向环内那一侧**,与 `质心 − anchor` 同向。环外键落在它的反方向上,
+        // 也就是两根环键夹角的外角平分线 —— 这正是要的。取反了的话整个环会被
+        // 摆到已经画好的那一边去,实测干净率 91.7% → 63.2%,踩过。
+        let mut bisect = Point2::ORIGIN;
+        for u in &us {
+            bisect = bisect + *u;
+        }
+        bisect
+    } else {
+        let mut pts: Vec<Point2> = local.values().copied().collect();
+        pts.sort_by(by_xy);
+        centroid(pts.into_iter()) - a
+    };
     let to = dir.normalized();
-    // from 是零向量只可能出现在"质心恰好落在锚点上"的对称情形,那时转多少都一样
+    // from 是零向量只可能出现在"质心也恰好落在锚点上"的对称情形,那时转多少都一样
     let theta = if from.norm() < 1e-9 {
         0.0
     } else {
         to.angle() - from.angle()
     };
-    local
+    let straight: BTreeMap<u32, Point2> = local
         .iter()
         .map(|(k, p)| (*k, (*p - a).rotated(theta) + at))
-        .collect()
+        .collect();
+    let flipped = straight
+        .iter()
+        .map(|(k, p)| (*k, p.mirrored(at, to)))
+        .collect();
+    [straight, flipped]
 }
 
 #[cfg(test)]
 mod tests {
+    /// 挂着环系统的那根键,落在它两根环键的对称轴上。
+    ///
+    /// 分子取自真语料(`harness/corpus/large.smi` 第 5354 行):喹啉的环氮配位
+    /// 到铜。先前拿**整块的质心**当参照,两个六元环的合并质心偏向第二个环,
+    /// 环系被拧了一个角 —— Cu–N 与两根环键一边 160.9°、一边 **79.1°**。
+    ///
+    /// 全量语料上「键角不过窄」剩下的 16 处违例**全是这一族,值一模一样**。
+    ///
+    /// 变异:把 `place_candidates` 里的 `bisect + *u` 换回"整块质心 − 锚点"
+    /// (即先前那版)→ 两个角变成 160.894° / 79.106°,这条当场红。
+    #[test]
+    fn the_bond_that_carries_a_ring_system_lands_on_the_symmetry_axis_of_its_two_ring_bonds() {
+        use super::*;
+        use omgkit_chem::{rings::fused_ring_systems, sssr::ring_set};
+
+        let smi = "Cl[Cu](Cl)([N+]1=C2C=CC=CC2=CC=C1)[N+]3=C4C=CC=CC4=CC=C3";
+        let mut m = omgkit_io::smiles::parse(smi).expect("SMILES 该能解析");
+        omgkit_chem::pipeline::sanitize(&mut m).expect("该能 sanitize");
+        let ranks = crate::ranks_of(&m);
+        let rings_all = ring_set(&m);
+        let systems = group(&fused_ring_systems(&m), &rings_all);
+
+        // `at` 与 `dir` 随便给 —— 结论与摆哪儿、朝哪儿无关。`dir` **故意不取
+        // 30° 的倍数**,免得碰巧落在栅格上把错的也蒙对。
+        let at = Point2::new(3.0, -1.0);
+        let dir = Point2::new(0.6, 0.8);
+
+        let mut checked = 0usize;
+        for s in &systems {
+            let (local, _) = layout_local(&m, s, &ranks, None);
+            for &anchor in &s.atoms {
+                // 系统内恰好两个邻居、系统外还挂着东西 —— 那正是环系统挂上去的接口
+                let inside: Vec<u32> = m
+                    .neighbors(anchor)
+                    .map(|(n, _)| n)
+                    .filter(|n| local.contains_key(n))
+                    .collect();
+                if inside.len() != 2 || m.neighbors(anchor).all(|(n, _)| local.contains_key(&n)) {
+                    continue;
+                }
+                for cand in place_candidates(&m, &local, anchor, at, dir) {
+                    // 锚点是被 `dir` 带出去的那一端,所以环外键从锚点指向 `−dir`
+                    let exo = (dir * -1.0).normalized();
+                    let angs: Vec<f64> = inside
+                        .iter()
+                        .map(|n| {
+                            let v = (cand[n] - cand[&anchor]).normalized();
+                            v.dot(exo).clamp(-1.0, 1.0).acos().to_degrees()
+                        })
+                        .collect();
+                    assert!(
+                        (angs[0] - angs[1]).abs() < 1e-9,
+                        "环外键没落在对称轴上:原子 {anchor} 处 {:.4}° / {:.4}°",
+                        angs[0],
+                        angs[1]
+                    );
+                    // 六元环上两边都该正好 120°。质心参照给的是 160.894°/79.106°。
+                    assert!(
+                        (angs[0] - 120.0).abs() < 1e-9,
+                        "六元环上该是 120°,实得 {:.4}°",
+                        angs[0]
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        // 前提要自己成立:这个分子必须真有这样的接口,否则上面一次都没跑
+        assert!(checked >= 2, "一个接口都没查到,这条判据空过了");
+    }
+
     #[test]
     fn a_tie_between_the_two_ring_centres_is_decided_by_a_rule_not_by_rounding() {
         // **两个候选环心到已放置质心等距时,不能交给浮点比较拍板。**
@@ -802,7 +945,7 @@ mod tests {
         // 朝哪边绕。这条判据把它们**穷举**掉 —— 每个环转 k 步、按需反向,
         // 断言 `layout_local` 的输出逐点相同。
         //
-        // 拿语料第 7879 行(Ni 四齿配合物,五个环共用同一个金属)。它是这条
+        // 拿语料第 7880 行(Ni 四齿配合物,五个环共用同一个金属)。它是这条
         // 判据唯一在全量语料上暴露过的分子:拼环时"共用的那两个原子"取自
         // SSSR 输出序,而选环心的那个浮点比较在**平局**时由舍入拍板 ——
         // 两种写法把新环拼到了相反的一侧,40/40 个图元全不同。

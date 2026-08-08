@@ -310,7 +310,7 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
 /// [`crate::ranks_of`]。**两套规范标号并存,头号契约就只能靠"它们碰巧不打架"
 /// 兜着** —— 一旦某个分子的两套标号差一个非平凡自同构,双键相对坐标就会整体
 /// 挪一圈,而线条本身看不出毛病。`canonical_ranks` 的深层平局是任取的,这一点
-/// 语料第 573 行已经证过。
+/// 语料第 574 行已经证过。
 ///
 /// 换过来的代价是零:实测全量语料输出**逐字节相同**。
 ///
@@ -3092,7 +3092,7 @@ mod tests {
         //
         // 通例是画进"更芳香"的那个环。这条查的是**两条线都落在同一个环里**。
         for smi in [
-            "CC(=O)C1=CC2=C(C=C1C(C)=O)[C]3(C)CCC[C](C)(C#N)[CH]3CC2=O", // 语料第 2719 行
+            "CC(=O)C1=CC2=C(C=C1C(C)=O)[C]3(C)CCC[C](C)(C#N)[CH]3CC2=O", // 语料第 2720 行
             "c1ccc2ccccc2c1",                                            // 萘
             "C1=CC2=CC=CC3=CC=CC(=C1)C23",                               // 苊
         ] {
