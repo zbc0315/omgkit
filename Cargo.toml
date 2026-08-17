@@ -6,10 +6,11 @@ members = [
     "crates/omgkit-chem",
     "crates/omgkit-match",
     "crates/omgkit-depict",
+    "crates/omgkit-conf",
     "crates/omgkit-py",
 ]
 
-# `cargo test` / `cargo clippy` 不带 `-p` 时只跑这**五个**纯 Rust crate。
+# `cargo test` / `cargo clippy` 不带 `-p` 时只跑这**六个**纯 Rust crate。
 #
 # (这行原本写着"四个",而下面早已列到五个、现在六个 —— 加 crate 时改了列表
 #  没改数字。数字写在注释里就会这样掉队,所以它现在与列表一起改。)
@@ -23,6 +24,7 @@ default-members = [
     "crates/omgkit-chem",
     "crates/omgkit-match",
     "crates/omgkit-depict",
+    "crates/omgkit-conf",
 ]
 
 [workspace.package]
