@@ -1,0 +1,35 @@
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# 差分测试的基准:体积大且可复现,默认不入库。
+#
+# **例外的判据是"没标 #[ignore] 的测试要用到它"**,不是"文件名叫什么"。
+# 默认 `cargo test` 会跑到的基准必须入库,否则新克隆下来测试直接红。
+# 按文件名猜过两次都猜漏了:先漏了 `smoke.matches.tsv`(放行规则写成了
+# `smoke.*.jsonl`,按后缀挡掉了 `.tsv`),又漏了 `smarts.jsonl`(它压根不叫
+# smoke,却被一条非 ignore 的测试硬编码引用)。
+#
+# 改动这一段之后要验的不是"规则看着对",而是**把仓库克隆到别处跑一遍
+# `cargo test`** —— 那才是"开箱即跑"的判据。当前入库合计约 680K。
+/harness/baseline/*
+!/harness/baseline/smoke.*
+!/harness/baseline/smarts.jsonl
+/harness/corpus/chembl*.smi
+/harness/corpus/*.sdf
+/harness/report/
+
+# maturin build 的产物,复现命令写在 README
+/dist/
+
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store
+docs/dev/design-full.md
+docs/dev/correctness-full.md
+site/
+.venv-docs/
+
+# 送审 subagent 的临时 worktree(isolation: worktree),不该进版本库
+.claude/

@@ -1,0 +1,171 @@
+# omgkit 冒烟语料。每行 `SMILES<TAB>名字`,# 开头为注释、空行忽略。
+# 非法 SMILES 也刻意保留 —— 差分测试要求 omgkit 与 RDKit 在"拒绝"上也一致。
+
+# ---- 基础 ----
+CCO	ethanol
+CC(=O)O	acetic-acid
+C	implicit-methane
+[CH4]	bracket-methane
+[H][H]	dihydrogen
+CCO.CCN	disconnected
+C1CCCCC1	cyclohexane
+C1CC1	cyclopropane
+
+# ---- 芳香 ----
+c1ccccc1	benzene-aromatic
+C1=CC=CC=C1	benzene-kekulized
+c1ccncc1	pyridine
+c1cc[nH]c1	pyrrole-explicit-H
+[nH]1cccc1	pyrrole-leading-bracket
+c1cc[n+](C)cc1	N-methylpyridinium
+c1ccc2ccccc2c1	naphthalene
+[se]1cccc1	aromatic-selenium
+
+# ---- 电荷 / 同位素 / 映射号 ----
+[NH4+]	ammonium
+CC(=O)[O-]	acetate
+[Fe+2]	iron-cation-digit
+[Fe++]	iron-cation-repeated
+[O-2]	oxide-dianion
+[13CH4]	carbon-13-methane
+[2H]O[2H]	heavy-water
+[CH3:1][OH:2]	atom-mapped
+[*:1]CC	mapped-wildcard
+*CC	wildcard-atom
+
+# ---- 环闭合:标号排序规则的判别用例(见 smiles.rs 模块文档约定 1)----
+C2CC2C1CC1	ring-number-ordering
+C1CC1C1CC1	ring-number-reuse
+C%10CC1CCC%10CC1	ring-mixed-numbering
+C9CC1CCC9CC1	ring-single-digit-ordering
+C1CC2CCC1CC2	bicyclo-bridged
+C%10CCCCC%10	two-digit-ring-closure
+C%(123)CCCCC%(123)	paren-ring-closure
+C=1CCCCC=1	ring-bond-order-both-ends
+C1CCCCC=1	ring-bond-order-close-only
+C=1CCCCC1	ring-bond-order-open-only
+
+# ---- 立体:手性宇称修正的判别用例(成键邻居=2 才能分辨隐式氢位置)----
+N[C@@H](C)C(=O)O	L-alanine
+N[C@H](C)C(=O)O	D-alanine
+[C@@H]1CCCCC1O	chiral-ring-open-cw
+[C@H]1CCCCC1O	chiral-ring-open-ccw
+[C@@H]1CCCC1	chiral-cyclopentane
+[N@@H]1CCCC1	chiral-nitrogen-ring
+[C@](N)(O)(F)Cl	chiral-four-explicit
+[C@H](N)(O)F	chiral-no-preceding-atom
+N[C@H](O)F	chiral-with-preceding-atom
+[13C@H](C)(N)O	isotope-plus-chirality
+[C@TH1](N)(O)(F)Cl	extended-chirality-TH1
+[C@TH2](N)(O)(F)Cl	extended-chirality-TH2
+F/C=C/F	trans-difluoroethene
+F/C=C\F	cis-difluoroethene
+C/C=C/C=C/C	conjugated-diene-stereo
+
+# ---- 杂项 ----
+O=S(=O)(O)O	sulfuric-acid-hypervalent
+[Na+].[Cl-]	salt
+C[Si](C)(C)C	TMS-silicon
+[Se]	selenium-bracket
+FC(F)(F)C(=O)O	TFA
+CN1C=NC2=C1C(=O)N(C)C(=O)N2C	caffeine
+CC(C)Cc1ccc(cc1)C(C)C(=O)O	ibuprofen
+CC(=O)Oc1ccccc1C(=O)O	aspirin
+O=C(N)c1ccccc1	benzamide
+[O-][N+](=O)c1ccccc1	nitrobenzene
+CC(C)(C)OC(=O)N1CCC(CC1)N	boc-piperidine
+
+# ---- 非法输入:omgkit 必须与 RDKit 一样拒绝 ----
+C1CC	err-unclosed-ring
+CC(	err-unbalanced-open
+CC)	err-unbalanced-close
+[Xx]	err-unknown-element
+C=	err-dangling-bond
+CC()C	err-empty-branch
+C11	err-ring-to-self
+[C	err-unclosed-bracket
+
+# ---- 环闭合键端点朝向:键级符号 vs 方向符号(见 smiles.rs 模块文档)----
+C/1=CCCCC1	ring-dir-open-only
+C1=CCCCC/1	ring-dir-close-only
+C/1=CCCCC\1	ring-dir-both-ends
+C/1CCCCC1	ring-dir-no-order
+C:1CCCCC1	ring-explicit-aromatic
+c=1ccccc1	ring-order-on-aromatic
+
+# ---- 净化第 1 步 CLEANUP:非标准画法(RDKit 实测会改写)----
+CN(=O)=O	nitro-nonstandard
+CCCCOC(=O)c1c(cccc1N(=O)=O)C(=O)O	nitro-in-aromatic
+CN=N#N	azide-nonstandard
+CC=P(=O)CC	phosphorus-zwitterion
+C=P(=O)CC	phosphorus-degree-too-low
+OP(=O)(O)O	phosphoric-acid-untouched
+OCl(=O)(=O)=O	perchloric-acid
+OBr(=O)(=O)=O	perbromic-acid
+OI(=O)O	iodous-acid
+OF(=O)(=O)=O	fluorine-not-cleaned
+CCl(=O)=O	halogen-with-carbon-neighbor
+O=[n+]1occcc1	charged-aromatic-nitrogen-untouched
+
+# ---- 芳香原子的氢数靠推断,SMILES 通常不写 ----
+c1cncc1	invalid-pyrrole-no-H
+c1ccoc1	furan-no-H-needed
+c1ccsc1	thiophene-no-H-needed
+c1cc[cH-]c1	cyclopentadienyl-anion
+c1cnc[nH]1	imidazole
+c1ccc2ccccc2c1	naphthalene-fusion-carbons
+c1cc2ccc3cccc4ccc(c1)c2c34	pyrene-fused
+n1ccccc1	pyridine-lowercase-n-first
+[CH3]
+[CH2]
+[O]
+[NH3+]
+[N]1C=CC=C1
+[Cu]
+[Cu]Cl
+[Fe]
+C[CH2]
+[SiH3]
+[PH2]
+[S]
+O=C1C2=CC=CC=C2C3=CC=C4C5=CC=C6C7=C(C=CC=C7)C(=O)C8=C6C5=C(C=C8)C9=C4C3=C1C=C9
+S1C2=C(C3=CC=CC4=C3C2=CC=C4)C5=C1C6=C7C(=CC=C6)C=CC=C57
+CC1=C2NC(=C1CCC(O)=O)C=C3N=C(C=C4NC(=CC5=NC(=C2)C(=C5C)C=C)C(=C4C)C=C)C(=C3CCC(O)=O)C
+[cH+]1cc1
+[cH+]1cccccc1
+O=C1C=CC(=O)C=C1
+C1=CC=C1
+c1ccc2[nH]ccc2c1
+CC1=[O+][Th]234([O+]=C(C)C1)([O+]=C(C)CC(=[O+]2)C)([O+]=C(C)CC(=[O+]3)C)[O+]=C(C)CC(=[O+]4)C
+Pc1ccccc1
+CP1(C)=CC=CN=C1C
+C#CC#C
+C=CC#N
+C=CCC=C
+C12C3C4C1C3C24
+C1C23CC14CC(C2)(C3)C4
+C1C2CC3CC4CC1C1CC2CC3CC4C1
+c12c3c4c1c3c24
+[Pt@SP1](Cl)(Cl)(N)N
+[Pt@SP3](Cl)(Cl)(N)N
+F[P@TB15](Cl)(Br)(I)S
+C[Co@OH25](N)(O)(S)(P)Cl
+[C@SP1](F)(Cl)(Br)I
+N[C@AL1]=C=C(O)F
+N->[Cu]
+[Cu]<-N
+[Cu]1<-NCCN->1
+N->1CCCCC1
+[NH3]->[B](F)(F)F
+O->[Fe](<-O)(<-O)<-O
+[Cu]<-1CCCC1
+N/1CCCCC<-1
+N<-1CCCCC/1
+[S@](C)(C)(C)C
+[Xe@](F)(F)(F)F
+[Co@OH5]1(N)(O)(S)(P)CCC1
+[Pt@SP1](Cl)(Cl)(N)(N)Cl
+[Pt@SP1]Cl
+[Fe@TB1]Cl
+[Fe@OH1]Cl
+[Fe@TB1](Cl)(Cl)(Cl)(Cl)(Cl)Cl

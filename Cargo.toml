@@ -1,0 +1,91 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/omgkit-core",
+    "crates/omgkit-io",
+    "crates/omgkit-chem",
+    "crates/omgkit-match",
+    "crates/omgkit-depict",
+    "crates/omgkit-py",
+]
+
+# `cargo test` / `cargo clippy` 不带 `-p` 时只跑这**五个**纯 Rust crate。
+#
+# (这行原本写着"四个",而下面早已列到五个、现在六个 —— 加 crate 时改了列表
+#  没改数字。数字写在注释里就会这样掉队,所以它现在与列表一起改。)
+#
+# omgkit-py 要留在 members 里(共用 lockfile 与 target 目录,`-p` 也点得到),
+# 但不能进默认集合:它是 cdylib,链接时把 Python 符号欠着,`cargo test` 给它
+# 建测试可执行文件必然失败。把它放进默认集合等于让全项目的验证命令一起红。
+default-members = [
+    "crates/omgkit-core",
+    "crates/omgkit-io",
+    "crates/omgkit-chem",
+    "crates/omgkit-match",
+    "crates/omgkit-depict",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.75"
+license = "BSD-3-Clause"
+repository = "https://github.com/zbc0315/omgkit"
+homepage = "https://zbc0315.github.io/omgkit/"
+# 继承时 readme 的路径相对**工作区根**;不给的话 crates.io 上是一张空白页
+readme = "README.md"
+authors = ["zbc0315 <62389427+zbc0315@users.noreply.github.com>"]
+# 索引页只认英文与固定词表:keywords 限 ASCII、每个 ≤20 字符、至多 5 个;
+# categories 必须取自 crates.io 的既定列表,拼错会在 publish 时被拒。
+keywords = ["chemistry", "cheminformatics", "smiles", "smarts", "molecule"]
+categories = ["science", "data-structures", "parser-implementations"]
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+# 文档里的链接必须指得到东西。断链是"文档与实现对不上"最容易积累的一种 ——
+# 没有闸门时它会悄悄堆起来(一次巡查发现 16 条,全是历史遗留)。
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+redundant_explicit_links = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# 核心数据结构里索引运算很多,这些 lint 噪声大于价值
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+
+# **调试信息只留行号表。** 四道闸里只有 clippy 走 debug 构建,而它**从不运行**
+# 编出来的东西 —— 完整的 DWARF 对它一点用没有,却是产物体积的大头:实测
+# `libomgkit_depict` 的 debug rlib 15M,`strip -S` 之后 1.5M,**九成是调试信息**。
+#
+# 加上 `--all-targets` 会给每个测试二进制、每个 example 各编一份,而 cargo
+# 不回收旧产物(实测同一个 crate 在 `deps` 里堆了 5 份),`target/debug` 因此
+# 涨到 **8.1G**,占整个项目 9.4G 的 86%。
+#
+# `line-tables-only` 保住行号,回溯照样能看到「哪个文件第几行」,只是没有变量
+# 与类型信息。真要单步调试时临时改回 `true` 即可。
+[profile.dev]
+debug = "line-tables-only"
+
+# `[profile.test]` 继承 `dev`,同理。
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# **不要把 `panic = "abort"` 加回来。**
+#
+# Python 扩展模块靠展开把 Rust panic 接住,转成 Python 异常。设成 abort 之后
+# 实测:任何一处 panic 都让解释器直接收到 SIGABRT(退出码 134)—— 没有异常、
+# 没有回溯、`try/except` 拦不住,用户整个进程连同未保存的工作一起没。
+#
+# cargo 不允许按 package 覆盖 `panic`,所以这是全工作区的取舍。代价是展开表
+# 带来的一点体积与常数开销,实测在管线基准上看不出差别。
+
+
+# 差分测试要跑 ChEMBL 全量,debug 构建太慢
+[profile.test]
+opt-level = 2

@@ -1,0 +1,156 @@
+# 文档站配置。构建:`.venv-docs/bin/mkdocs serve`(本地)/ `.github/workflows/docs.yml`(CI)
+#
+# 四部分,与 README 的结构对齐:
+#   1. 简介            → index.md
+#   2. 功能与使用方法    → getting-started/ + guide/
+#   3. 每个可调用函数    → api/(Python 由 mkdocstrings 从 docstring 自动生成)
+#   4. 开发者帮助        → dev/
+#
+# 英文为主、中文并行,靠文件名后缀区分:`page.md` 是英文,`page.zh.md` 是中文。
+# **中文页缺失时 i18n 插件会回落到英文页**,所以翻译可以逐页推进,不会出现死链。
+
+# `docs/design.md` 是仓库里的工程记录原文,由 `docs/sync_sources.py` 在构建前
+# 复制成 `dev/design-full.md`。这里排除原文,免得同一份内容被收录两次。
+#
+# **构建前必须先跑 `python docs/sync_sources.py`**,否则那两页不存在。
+exclude_docs: |
+  /design.md
+  /requirements.txt
+  /sync_sources.py
+
+site_name: omgkit
+site_description: Cheminformatics toolkit in Rust with Python bindings
+site_url: https://zbc0315.github.io/omgkit/
+repo_url: https://github.com/zbc0315/omgkit
+repo_name: zbc0315/omgkit
+edit_uri: edit/main/docs/
+copyright: BSD-3-Clause · zbc0315
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - navigation.indexes
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  # 搜索必须能切中文,否则中文页的搜索框等于摆设
+  - search:
+      lang:
+        - en
+      separator: '[\s​\-,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: zh
+          name: 中文
+          build: true
+          nav_translations:
+            Introduction: 简介
+            Getting started: 上手
+            Guides: 功能与用法
+            API reference: 函数文档
+            Developing: 开发者帮助
+            Installation: 安装
+            Quickstart: 五分钟上手
+            Python API: Python API
+            Rust API: Rust API
+            Building and testing: 构建与测试
+            Design: 设计
+            Correctness: 正确性
+            Contributing: 参与贡献
+  # harness/README.md 与 docs/design.md 之外的文件不在 docs_dir 里,
+  # 由这个脚本在构建期取进来 —— 源文件留在原处,GitHub 上直接浏览的链接不会断
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            # omgkit 是 PyO3 编译扩展:`__init__.py` 里只有 `from .omgkit import *`,
+            # 静态解析什么也拿不到。必须让 griffe 真的 import 进来内省。
+            force_inspection: true
+            show_source: false
+            show_root_heading: true
+            show_signature_annotations: true
+            separate_signature: true
+            members_order: source
+            docstring_style: null
+            heading_level: 3
+
+nav:
+  - Introduction: index.md
+  - Getting started:
+      - Installation: getting-started/install.md
+      - Quickstart: getting-started/quickstart.md
+  - Guides:
+      - guide/index.md
+      - Reading and writing SMILES: guide/smiles.md
+      - The sanitization pipeline: guide/sanitize.md
+      - Substructure matching: guide/matching.md
+      - Reaction templates: guide/reactions.md
+      - Byproduct reconstruction: guide/byproducts.md
+      - Batches: guide/batches.md
+      - Drawing structures: guide/depict.md
+  - API reference:
+      - Python API: api/python.md
+      - Rust API: api/rust.md
+  - Developing:
+      - dev/index.md
+      - Building and testing: dev/building.md
+      - Design: dev/design.md
+      - Correctness: dev/correctness.md
+      - Design (full text, Chinese): dev/design-full.md
+      - Correctness (full text, Chinese): dev/correctness-full.md
+      - Contributing: dev/contributing.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/zbc0315/omgkit

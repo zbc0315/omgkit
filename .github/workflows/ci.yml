@@ -1,0 +1,75 @@
+# 四道闸门,与本地 `harness/README.md` 里写的是同一套。
+#
+# 只跑纯 Rust 那四个 crate(工作区的 `default-members`)。omgkit-py 是 cdylib,
+# 链接时把 Python 符号欠着,给它建测试可执行文件必然失败 —— 理由写在
+# 根 Cargo.toml 里。
+#
+# 差分测试的**冒烟**基准随仓库入库(合计 588K),所以 CI 不需要外部实现就能跑;
+# 大语料那一档标了 `#[ignore]`,本地用 `cargo test -- --ignored` 跑。
+#
+# Cargo.lock 不入库(库类项目的惯例),所以 CI 每次解析当时最新的兼容版本。
+# 代价是上游发新版可能让 CI 单独变红 —— 那时红的是依赖不是本仓库,按需锁版本。
+
+# 本地跑同一套:`bash harness/gates.sh`(那个脚本带 `set -eo pipefail`,
+# 而且判据后面不许接管道 —— 先前现敲的临时脚本用 `... | tail -3`,
+# `set -e` 只看管道最后一个命令,判据红了脚本照样退出 0。这个坑在开发笔记里记过)。
+# **两边不一致时以本文件为准。**
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # 报错要能定位,但别把日志刷爆
+  RUST_BACKTRACE: 1
+
+jobs:
+  gates:
+    name: fmt / clippy / test / doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml 钉的是 stable + rustfmt + clippy,这一步照它装
+      - name: 装工具链
+        run: |
+          rustup show active-toolchain || rustup toolchain install stable
+          rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 格式
+        run: cargo fmt --all --check
+
+      # 工作区的 lint 配置把 clippy::all 设成 warn,这里升成错 —— 否则警告会积压
+      - name: clippy(警告即失败)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 测试
+        run: cargo test --release
+
+      # **`debug_assert!` 在 release 下整段编译掉。** 上面那一步跑的是 release,
+      # 于是全工作区 37 处 `debug_assert!`(顺反没感知、规范秩重复、翻转跨分量……)
+      # **一次都没有被闸门执行过** —— 守卫写了等于没写。debug 再跑一遍补上这一档,
+      # 全工作区约 6 秒。
+      #
+      # 只跑这一档、不用它替掉 release 那一档:大语料判据在 debug 下慢一个数量级。
+      - name: 测试(debug —— 让 debug_assert 真的跑到)
+        run: cargo test --workspace
+
+      # **五条语料判据。** 它们先前一条都不在闸门里 —— 方案里写着"补上的判据要么
+      # 进 CI,要么至少进闸门表",两处都没做,于是"违例不许涨"只是文档里的一句话。
+      #
+      # 合起来约 47 秒(audit3d 1.9s / angle_audit 1.4s / **c1_audit 42s** /
+      # pucker_audit 1.5s / closure_audit 0.6s),输入(语料与三张参考表)都已入库,
+      # rustdoc 的断链等三项在 Cargo.toml 里已是 deny,这一步让它真的跑到。
+      # **要带 `--document-private-items`**:不带的话 rustdoc 根本不给私有条目
+      # 建档,指向它们的断链一条都报不出来 —— 实测漏过三条(两条指向私有 fn
+      # 的新注释、一条函数改名遗留)。
+      - name: 文档
+        run: cargo doc --workspace --no-deps --document-private-items
