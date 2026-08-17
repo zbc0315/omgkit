@@ -40,6 +40,7 @@
 //!
 //! 一期(当前):无环 + 单个苯/吡啶环。二期:环系 DG + 模板。三期:消撞。四期:性能。
 
+pub mod build;
 pub mod geom;
 pub mod params;
 pub mod vsepr;
