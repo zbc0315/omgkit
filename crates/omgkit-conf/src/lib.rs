@@ -42,3 +42,4 @@
 
 pub mod geom;
 pub mod params;
+pub mod vsepr;
