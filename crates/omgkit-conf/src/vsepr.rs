@@ -42,7 +42,7 @@ pub fn arrangement(hyb: Hybridization, degree: usize) -> Arrangement {
         Hybridization::Sp3 | Hybridization::Sp2d => Arrangement::Tetrahedral,
         // 感知没给的:按配位数猜,2 当直线、3 当平面、其余当四面体
         _ => match degree {
-            0 | 1 | 2 => Arrangement::Linear,
+            0..=2 => Arrangement::Linear,
             3 => Arrangement::Planar,
             _ => Arrangement::Tetrahedral,
         },
