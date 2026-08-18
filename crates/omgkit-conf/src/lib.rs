@@ -46,4 +46,6 @@
 //! 不是代码分支。嵌入器里不允许出现 `is_macrocycle` / `is_metal` 这类分子类别谓词 ——
 //! 这条可以直接 grep 进闸门。
 
+pub mod bounds;
+pub mod params;
 pub mod smooth;
