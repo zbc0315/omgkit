@@ -39,7 +39,12 @@ pub fn arrangement(hyb: Hybridization, degree: usize) -> Arrangement {
     match hyb {
         Hybridization::Sp => Arrangement::Linear,
         Hybridization::Sp2 => Arrangement::Planar,
-        Hybridization::Sp3 | Hybridization::Sp2d => Arrangement::Tetrahedral,
+        Hybridization::Sp3 => Arrangement::Tetrahedral,
+        // **sp²d 是平面四方形(90°/180°),这个构造法给不出来。**
+        // 头一版把它映到四面体 —— 方向是错的:四面体给 109.47°,
+        // 平面四方形一个 109.47° 都没有。语料里现在没有 sp²d 的中心,
+        // 但映错了迟早咬人,所以走 `Spread`("均分了事",而且一期明确不保证它)。
+        Hybridization::Sp2d => Arrangement::Spread,
         // 感知没给的:按配位数猜,2 当直线、3 当平面、其余当四面体
         _ => match degree {
             0..=2 => Arrangement::Linear,

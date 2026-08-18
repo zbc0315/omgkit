@@ -316,7 +316,18 @@ pub fn place(mol: &MolBuilder, ranks: &[u32]) -> Placed {
             .filter(|x| !on_ring[*x as usize])
             .collect();
         let mut queue: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
-        if let Some(&n1) = nbrs.first() {
+        // **超配位中心当根时也一个取代基都不摆。**
+        //
+        // 头一版把 `deg >= 5` 的判断放在摆 `n1` **之后**,于是同一件事有两个答案:
+        // 那个中心当根时第一个邻居照摆(`FS(F)(F)(F)(F)F` 实测 `placed = 2`),
+        // 经 BFS 到达时一个都不摆。走哪条路取决于规范秩,与化学无关。
+        let root_deg = mol.neighbors(root).count();
+        if root_deg >= 5 {
+            stats.skipped_hypervalent += nbrs.len();
+            for &x in &nbrs {
+                refused_direct[x as usize] = true;
+            }
+        } else if let Some(&n1) = nbrs.first() {
             let ord = bond_between(mol, root, n1).unwrap_or(omgkit_core::BondOrder::Single);
             let b = params::bond_length(
                 mol.atoms()[root as usize].atomic_num,
@@ -333,26 +344,17 @@ pub fn place(mol: &MolBuilder, ranks: &[u32]) -> Placed {
             // 根上剩下的邻居:以 n1 为角的另一条边,绕 root–n1 轴按扭转角铺开。
             // 参考点 `v` 只用来定扭转角的零点(整体转动本来就是自由的)。
             let v = Point3::new(0.0, 1.0, 0.0);
-            let deg = mol.neighbors(root).count();
+            let deg = root_deg;
             let arr = arrangement(mol.atoms()[root as usize].hybridization, deg);
-            let want = nbrs.len().saturating_sub(1);
-            let ts = if deg >= 5 {
-                Vec::new() // 见 BFS 里那段:配位 ≥5 不摆
-            } else {
-                child_torsions(arr, want)
-            };
+            let ts = child_torsions(arr, nbrs.len().saturating_sub(1));
             note_strain(&mut stats, mol, root, deg, arr, ts.len());
             for (k, &x) in nbrs.iter().skip(1).enumerate() {
                 let Some(&t) = ts.get(k) else {
-                    // **原因要分清楚。** 配位 ≥5 是范围外;排布放不下是另一回事
-                    // (`Planar` 除父键外只放得下 2 个)—— 头一版把后者记成"退化",
-                    // 名字是错的,而且它头一版根本不存在:是硬凑一个重复的扭转角,
+                    // **原因要分清楚。** 排布放不下(`Planar` 除父键外只放得下 2 个)
+                    // 与"退化"是两回事 —— 头一版把它记成退化,名字是错的,
+                    // 而且它头一版根本不存在:是硬凑一个**重复**的扭转角,
                     // 把两个原子摆到同一个坐标上。
-                    if deg >= 5 {
-                        stats.skipped_hypervalent += 1;
-                    } else {
-                        stats.skipped_arrangement += 1;
-                    }
+                    stats.skipped_arrangement += 1;
                     refused_direct[x as usize] = true;
                     continue;
                 };
@@ -660,6 +662,57 @@ mod tests {
             }
         }
         assert!(checked > 100, "只验了 {checked} 根键");
+    }
+
+    /// **超配位中心一个取代基都不摆 —— 不管它是不是根。**
+    ///
+    /// 头一版把 `deg >= 5` 的判断放在摆第一个邻居**之后**,于是同一件事有两个答案:
+    /// 那个中心当根时第一个邻居照摆,经 BFS 到达时一个都不摆。
+    /// 走哪条路取决于规范秩 —— **与化学无关**。
+    ///
+    /// # 根那条路要**造**出来才测得到
+    ///
+    /// 根取的是分量里 `(rank, 下标)` 最小的原子,而 `FS(F)(F)(F)(F)F` 里
+    /// 最小的是某个氟(配位 1)—— 硫从来当不上根,那条路测不到。
+    /// `ranks` 本来就是参数,所以这里直接递一份把硫排在最前的秩。
+    ///
+    /// 判的是**契约**而不是"摆好几个":**没有任何原子的父亲是超配位中心**。
+    #[test]
+    fn a_hypervalent_centre_refuses_its_substituents_whether_or_not_it_is_the_root() {
+        for smi in ["FS(F)(F)(F)(F)F", "CS(F)(F)(F)(F)F", "F[Co](F)(F)(F)(F)F"] {
+            let (m, natural) = prep(smi);
+            let n = m.num_atoms();
+            // 找一个配位 ≥5 的中心
+            let hv = (0..n)
+                .map(|i| u32::try_from(i).expect("下标"))
+                .find(|i| m.neighbors(*i).count() >= 5)
+                .expect("该有一个超配位中心");
+            // 两份秩:自然的那份,以及**把超配位中心排到最前**的那份(逼它当根)
+            let mut forced = natural.clone();
+            for r in &mut forced {
+                *r += 1;
+            }
+            forced[hv as usize] = 0;
+            for (which, ranks) in [("自然秩", &natural), ("逼它当根", &forced)] {
+                let out = place(&m, ranks);
+                for x in 0..n {
+                    assert_ne!(
+                        out.parent[x],
+                        Some(hv),
+                        "{smi}({which}):原子 {x} 的父亲是超配位中心 {hv} —— 它一个子都不该有"
+                    );
+                }
+                assert!(
+                    out.stats.skipped_hypervalent > 0,
+                    "{smi}({which}) 该报超配位"
+                );
+                assert_eq!(
+                    out.stats.unaccounted, 0,
+                    "{smi}({which}) 的账对不上:{:?}",
+                    out.stats
+                );
+            }
+        }
     }
 
     /// **两个不相连的片段不许叠在一起。**

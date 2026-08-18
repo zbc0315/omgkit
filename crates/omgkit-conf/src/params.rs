@@ -160,10 +160,16 @@ fn angles() -> &'static HashMap<AngleKey, Row> {
 /// **永不返回 0 或非有限数。**
 #[must_use]
 pub fn bond_length(a: u8, b: u8, order: BondOrder, min_ring: usize) -> Param {
-    let (sa, sb) = (
-        element::by_atomic_num(a).map_or("C", |e| e.symbol),
-        element::by_atomic_num(b).map_or("C", |e| e.symbol),
-    );
+    // **查不到元素就直接走模型,不许拿碳的符号去查表。**
+    //
+    // 头一版回退成 `"C"`,于是一个不认识的元素会**查到碳那一行并报
+    // `Source::Table`** —— 分级来源那套东西的全部意义就是"说得出自己走的哪一级",
+    // 报错了级比查不到更坏。现在元素表 0~118 都有项,所以这条走不到,
+    // 但回退的**方向**是反的,留着迟早咬人。
+    let (Some(ea), Some(eb)) = (element::by_atomic_num(a), element::by_atomic_num(b)) else {
+        return covalent_model(a, b, order);
+    };
+    let (sa, sb) = (ea.symbol, eb.symbol);
     // 表里的元素对按**符号字典序**排(见 measure_params.py)
     let (lo_s, hi_s) = if sa <= sb { (sa, sb) } else { (sb, sa) };
     if let Some(tag) = order_tag(order) {
@@ -184,6 +190,11 @@ pub fn bond_length(a: u8, b: u8, order: BondOrder, min_ring: usize) -> Param {
             }
         }
     }
+    covalent_model(a, b, order)
+}
+
+/// 查不到表时的键长兜底:共价半径之和 × 键级系数。**只有它会报 `Source::Model`。**
+fn covalent_model(a: u8, b: u8, order: BondOrder) -> Param {
     let v = (covalent_radius(a) + covalent_radius(b)) * order_factor(order);
     Param {
         value: v,
@@ -205,7 +216,11 @@ pub fn angle(
     ring_self: usize,
     ring_shared: usize,
 ) -> Param {
-    let sym = element::by_atomic_num(center).map_or("C", |e| e.symbol);
+    // 同 `bond_length`:查不到元素就走兜底,不许拿碳的符号去查表
+    let Some(ec) = element::by_atomic_num(center) else {
+        return angle_model(center, degree);
+    };
+    let sym = ec.symbol;
     let ar = u8::from(aromatic);
     let t = angles();
     let mut tries: Vec<(AngleKey, Source)> = vec![(
@@ -232,9 +247,13 @@ pub fn angle(
             };
         }
     }
+    angle_model(center, degree)
+}
+
+/// 查不到表时的键角兜底:按配位数回退到 VSEPR 的理想角。
+fn angle_model(_center: u8, degree: usize) -> Param {
     let ideal: f64 = match degree {
-        0 | 1 => 180.0,
-        2 => 180.0,
+        0..=2 => 180.0,
         3 => 120.0,
         _ => 109.471,
     };
