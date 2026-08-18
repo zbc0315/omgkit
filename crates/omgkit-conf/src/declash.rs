@@ -693,6 +693,7 @@ mod tests {
         let mut out = Placed {
             coords,
             placed,
+            parent: vec![None; n],
             stats: crate::build::Stats::default(),
         };
         let before = out.coords.clone();

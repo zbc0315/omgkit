@@ -20,7 +20,13 @@
 
 use crate::geom::{place_nerf, Point3};
 use crate::params::{self, Source};
-use crate::vsepr::{arrangement, child_torsions, sibling_skew};
+use crate::vsepr::{arrangement, child_torsions, expected_sibling_skew};
+
+/// 两个连通片段之间沿 +x 留的空隙(Å)。
+const FRAGMENT_GAP: f64 = 5.0;
+
+/// 兄弟角被推歪超过这个角度就计一笔(弧度)。判据里那个 `STRAIN_WARN` 是同一个数。
+const STRAIN_RADIANS: f64 = 0.087_266_462_599_716_47; // 5°
 use omgkit_core::MolBuilder;
 
 /// 一次摆放的**分级计数**。
@@ -37,8 +43,31 @@ pub struct Stats {
     pub skipped_ring: usize,
     /// 因为参考原子共线、NeRF 定不出标架而没摆的。
     pub degenerate: usize,
-    /// 连不上已摆部分的(多片段分子的第二个片段等)。
-    pub disconnected: usize,
+    /// **挂在环上、因此整片都没摆的原子。**
+    ///
+    /// 分量是在"去掉环原子"的子图上算的,所以苯的每个氢都会变成一个独立"片段"。
+    /// 头一版把它们摆到 `原点 + shift` 并标成 `placed = true` —— 与真正键连的
+    /// 环碳完全脱开,实测苯 6 个氢沿 x 轴一字排开、每个间隔 5 Å。
+    /// 那是在撒谎:模块的规矩是"摆不了就说摆不了"。
+    pub skipped_ring_attached: usize,
+    /// **因为排布放不下这么多取代基而没摆的。**
+    ///
+    /// `Planar` 除父键之外只放得下 2 个、`Linear` 1 个、`Tetrahedral` 3 个。
+    /// 要更多就少给,多出来的记在这里 —— 头一版是硬凑一个**重复**的扭转角,
+    /// 于是两个原子被摆到同一个坐标上(`[Zn](C)(C)(C)C` 实测相距 0.000000 Å,
+    /// 而 `complete()` 报 true)。
+    pub skipped_arrangement: usize,
+    /// **在被拒原子的下游、因此 BFS 到不了的原子。**
+    ///
+    /// 这个数是**走出来**的(从直接被拒的那些原子出发遍历),不是拿总数减出来的。
+    pub skipped_downstream: usize,
+    /// **既没摆好、也说不出原因的原子。判据把它钉在 0。**
+    ///
+    /// 上面每一个桶都是**真的在对应分支里累加**的,所以这一条是真残差,
+    /// 不是恒等式。头一版把"剩下的"直接赋给 `skipped_hypervalent`,
+    /// 于是守恒判据变成代数恒等式:往 BFS 里插一条静默 `continue` 丢掉 191 个原子,
+    /// 守恒闸、覆盖率闸一个都不响。
+    pub unaccounted: usize,
     /// 键长查表逐项命中的次数。
     pub bond_table: usize,
     /// 键长退到"不在环里"那一行的次数。
@@ -98,6 +127,13 @@ pub struct Placed {
     pub coords: Vec<Point3>,
     /// 逐原子:摆好了没有。
     pub placed: Vec<bool>,
+    /// **摆放树上每个原子的父亲**(根与没摆的是 `None`)。
+    ///
+    /// 判据需要它:一个中心上"父–子"那几个角**按构造精确等于表值**,
+    /// 而兄弟之间的是推出来的、允许有解析偏差。分不清哪个是父亲,
+    /// 就只能把那个偏差容差**减在所有原子对上** —— 实测那样会让某些中心的
+    /// 容差涨到 180°,角判据在那儿等于整个关掉。
+    pub parent: Vec<Option<u32>>,
     /// 分级计数。
     pub stats: Stats,
 }
@@ -152,10 +188,12 @@ fn bond_between(mol: &MolBuilder, a: u32, b: u32) -> Option<omgkit_core::BondOrd
 /// 摆一个**无环**分子。
 ///
 /// `ranks` 要是规范秩(见模块文档)。有环的分子这一期不摆,
-/// 会把环上的原子记进 [`Stats::skipped_ring`] 并留在 `placed = false`。
+/// 会把环上的原子记进 [`Stats::skipped_ring`] 并留在 `placed = false`;
+/// **挂在环上的那些片段也不摆**(见 [`Stats::skipped_ring_attached`])。
 ///
 /// **永不 panic**:任何摆不了的情形都落进计数器,坐标留 `ORIGIN` 且 `placed = false`。
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn place(mol: &MolBuilder, ranks: &[u32]) -> Placed {
     let n = mol.num_atoms();
     let mut coords = vec![Point3::ORIGIN; n];
@@ -166,9 +204,14 @@ pub fn place(mol: &MolBuilder, ranks: &[u32]) -> Placed {
         ..Stats::default()
     };
     if n == 0 || ranks.len() < n {
+        // **这条也要留痕**:模块文档说每一条提前返回都得留下痕迹,
+        // 头一版这里一个计数器都不动,于是 `place(9 个原子, &[])` 报的是
+        // "9 个原子、摆好 0 个",而每一个原因桶都是 0 —— 账对不上却没人说。
+        stats.unaccounted = n;
         return Placed {
             coords,
             placed,
+            parent,
             stats,
         };
     }
@@ -193,9 +236,8 @@ pub fn place(mol: &MolBuilder, ranks: &[u32]) -> Placed {
     // **逐个连通片段摆。** 语料里带 `.` 的多片段分子(盐、共晶)不少 ——
     // 只从一个根 BFS 的话,别的片段一个原子都摆不到:实测 235 个原子因此丢掉,
     // 而它们会被记成"连不上",看着像 bug 其实是没实现。
-    // 每摆完一个片段就把下一个沿 +x 挪开,免得两片叠在一起。
-    // **连通分量要先算好,不能拿"还没摆的原子"当新片段的根。**
     //
+    // **连通分量要先算好,不能拿"还没摆的原子"当新片段的根。**
     // 头一版就是那么写的,结果:被拒绝的超配位中心、以及退化点,
     // 它们的取代基也是"还没摆的",于是被当成新片段**整体平移走** ——
     // 而那些原子跟已摆好的部分是**连着的**,键当场拉断。
@@ -221,8 +263,41 @@ pub fn place(mol: &MolBuilder, ranks: &[u32]) -> Placed {
         ncomp += 1;
     }
 
+    // **挨着环的片段整个不摆。** 分量是在"去掉环原子"的子图上算的,
+    // 于是苯的 6 个氢会各自变成一个"片段",被摆到 `原点 + shift` 上 ——
+    // 与它真正键连的环碳完全脱开。头一版把它们标成 `placed = true`:
+    // 实测苯 `placed = 6/12`,6 个氢沿 x 轴一字排开、每个间隔 5 Å,
+    // 而它们各自的碳一个都没摆。甲苯则是整块甲基飘走。
+    //
+    // 那是在对调用方**撒谎** —— 模块的规矩是"摆不了就说摆不了,不硬摆"。
+    // 二期把环摆出来之后,这些片段会以刚体装配的方式接回去(方案 §4.4)。
+    let mut ring_attached = vec![false; ncomp];
+    for a in 0..n {
+        if on_ring[a] || comp[a] == usize::MAX {
+            continue;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        if mol.neighbors(a as u32).any(|(y, _)| on_ring[y as usize]) {
+            ring_attached[comp[a]] = true;
+        }
+    }
+    let mut skipped_attached = vec![false; n];
+    for a in 0..n {
+        if !on_ring[a] && comp[a] != usize::MAX && ring_attached[comp[a]] {
+            skipped_attached[a] = true;
+            stats.skipped_ring_attached += 1;
+        }
+    }
+
+    // 直接被拒的原子(超配位/排布放不下/参考点退化)—— 它们**下游**的原子
+    // BFS 也到不了,后面要单独走一遍算清楚,不能拿"剩下的都算它"糊过去。
+    let mut refused_direct = vec![false; n];
+
     let mut shift = 0.0f64;
-    for cid in 0..ncomp {
+    for (cid, &attached) in ring_attached.iter().enumerate() {
+        if attached {
+            continue;
+        }
         // 根:本分量里 (rank, 下标) 最小的那个
         let Some(root) = (0..n)
             .filter(|a| comp[*a] == cid)
@@ -260,18 +335,25 @@ pub fn place(mol: &MolBuilder, ranks: &[u32]) -> Placed {
             let v = Point3::new(0.0, 1.0, 0.0);
             let deg = mol.neighbors(root).count();
             let arr = arrangement(mol.atoms()[root as usize].hybridization, deg);
+            let want = nbrs.len().saturating_sub(1);
             let ts = if deg >= 5 {
                 Vec::new() // 见 BFS 里那段:配位 ≥5 不摆
             } else {
-                child_torsions(arr, nbrs.len().saturating_sub(1))
+                child_torsions(arr, want)
             };
+            note_strain(&mut stats, mol, root, deg, arr, ts.len());
             for (k, &x) in nbrs.iter().skip(1).enumerate() {
                 let Some(&t) = ts.get(k) else {
+                    // **原因要分清楚。** 配位 ≥5 是范围外;排布放不下是另一回事
+                    // (`Planar` 除父键外只放得下 2 个)—— 头一版把后者记成"退化",
+                    // 名字是错的,而且它头一版根本不存在:是硬凑一个重复的扭转角,
+                    // 把两个原子摆到同一个坐标上。
                     if deg >= 5 {
                         stats.skipped_hypervalent += 1;
                     } else {
-                        stats.degenerate += 1;
+                        stats.skipped_arrangement += 1;
                     }
+                    refused_direct[x as usize] = true;
                     continue;
                 };
                 let ord = bond_between(mol, root, x).unwrap_or(omgkit_core::BondOrder::Single);
@@ -282,28 +364,13 @@ pub fn place(mol: &MolBuilder, ranks: &[u32]) -> Placed {
                     0,
                 );
                 stats.note_bond(bl.source);
-                let ang = params::angle(
-                    mol.atoms()[root as usize].atomic_num,
-                    deg,
-                    mol.atoms()[root as usize]
-                        .flags
-                        .contains(omgkit_core::AtomFlags::AROMATIC),
-                    0,
-                    0,
-                );
-                stats.note_angle(ang.source);
-                if k == 0
-                    && arr == crate::vsepr::Arrangement::Tetrahedral
-                    && sibling_skew(ang.value) > 5f64.to_radians()
-                {
-                    stats.angle_strained += 1;
-                }
+                let ang = angle_at_centre(&mut stats, mol, root, deg);
                 match place_nerf(
                     v,
                     coords[n1 as usize],
                     coords[root as usize],
                     bl.value,
-                    ang.value,
+                    ang,
                     t,
                 ) {
                     Some(p) => {
@@ -312,7 +379,10 @@ pub fn place(mol: &MolBuilder, ranks: &[u32]) -> Placed {
                         parent[x as usize] = Some(root);
                         queue.push_back(x);
                     }
-                    None => stats.degenerate += 1,
+                    None => {
+                        stats.degenerate += 1;
+                        refused_direct[x as usize] = true;
+                    }
                 }
             }
         }
@@ -329,6 +399,9 @@ pub fn place(mol: &MolBuilder, ranks: &[u32]) -> Placed {
             }
             let Some(p) = p else {
                 stats.degenerate += kids.len();
+                for &x in &kids {
+                    refused_direct[x as usize] = true;
+                }
                 continue;
             };
             // 祖父:`p` 身上另一个已摆好的邻居;没有就用一个虚点定扭转零点
@@ -345,13 +418,18 @@ pub fn place(mol: &MolBuilder, ranks: &[u32]) -> Placed {
             // 硬摆一个错的不如如实说摆不了(方案 §4.5)。
             if deg >= 5 {
                 stats.skipped_hypervalent += kids.len();
+                for &x in &kids {
+                    refused_direct[x as usize] = true;
+                }
                 continue;
             }
             let arr = arrangement(mol.atoms()[c as usize].hybridization, deg);
             let ts = child_torsions(arr, kids.len());
+            note_strain(&mut stats, mol, c, deg, arr, ts.len());
             for (k, &x) in kids.iter().enumerate() {
                 let Some(&t) = ts.get(k) else {
-                    stats.degenerate += 1;
+                    stats.skipped_arrangement += 1;
+                    refused_direct[x as usize] = true;
                     continue;
                 };
                 let ord = bond_between(mol, c, x).unwrap_or(omgkit_core::BondOrder::Single);
@@ -362,41 +440,19 @@ pub fn place(mol: &MolBuilder, ranks: &[u32]) -> Placed {
                     0,
                 );
                 stats.note_bond(bl.source);
-                let ang = params::angle(
-                    mol.atoms()[c as usize].atomic_num,
-                    deg,
-                    mol.atoms()[c as usize]
-                        .flags
-                        .contains(omgkit_core::AtomFlags::AROMATIC),
-                    0,
-                    0,
-                );
-                stats.note_angle(ang.source);
-                if k == 0
-                    && arr == crate::vsepr::Arrangement::Tetrahedral
-                    && sibling_skew(ang.value) > 5f64.to_radians()
-                {
-                    stats.angle_strained += 1;
-                }
+                let ang = angle_at_centre(&mut stats, mol, c, deg);
                 // 共线定不出标架时,换一个垂直的参考点再试一次(炔基/腈/累积双键)
-                let got = place_nerf(
-                    g,
-                    coords[p as usize],
-                    coords[c as usize],
-                    bl.value,
-                    ang.value,
-                    t,
-                )
-                .or_else(|| {
-                    place_nerf(
-                        perpendicular_reference(coords[p as usize], coords[c as usize]),
-                        coords[p as usize],
-                        coords[c as usize],
-                        bl.value,
-                        ang.value,
-                        t,
-                    )
-                });
+                let got = place_nerf(g, coords[p as usize], coords[c as usize], bl.value, ang, t)
+                    .or_else(|| {
+                        place_nerf(
+                            perpendicular_reference(coords[p as usize], coords[c as usize]),
+                            coords[p as usize],
+                            coords[c as usize],
+                            bl.value,
+                            ang,
+                            t,
+                        )
+                    });
                 match got {
                     Some(q) => {
                         coords[x as usize] = q;
@@ -404,41 +460,124 @@ pub fn place(mol: &MolBuilder, ranks: &[u32]) -> Placed {
                         parent[x as usize] = Some(c);
                         queue.push_back(x);
                     }
-                    None => stats.degenerate += 1,
+                    None => {
+                        stats.degenerate += 1;
+                        refused_direct[x as usize] = true;
+                    }
                 }
             }
         }
 
-        // 把这一片沿 +x 挪到上一片右边,免得两片重叠
-        let mut maxx = f64::NEG_INFINITY;
+        // **把这一片挪到上一片右边。** 平移量要减掉本片自己的 min x ——
+        // 头一版写的是 `shift = 上一片的 max x + 5`,没减新片的 min x,
+        // 而片段从自己的根长出去时**也向 −x 伸**(实测单个片段的 min x 能到 −18.7 Å),
+        // 于是两片会叠上:语料里最狠的一对相距 0.5 Å。
+        let (mut minx, mut maxx) = (f64::INFINITY, f64::NEG_INFINITY);
         for i in 0..n {
             if placed[i] && !before[i] {
-                coords[i] = coords[i] + Point3::new(shift, 0.0, 0.0);
+                minx = minx.min(coords[i].x);
                 maxx = maxx.max(coords[i].x);
             }
         }
-        if maxx.is_finite() {
-            shift = maxx + 5.0;
+        if minx.is_finite() {
+            let dx = shift - minx;
+            for i in 0..n {
+                if placed[i] && !before[i] {
+                    coords[i] = coords[i] + Point3::new(dx, 0.0, 0.0);
+                }
+            }
+            shift = maxx + dx + FRAGMENT_GAP;
         }
     }
 
     stats.placed = placed.iter().filter(|x| **x).count();
-    // 没摆好、又不在环上、又不是退化的 —— 那就是连不上(多片段)
-    // **超配位那一档要连下游一起算。** 拒绝一个 ≥5 配位中心的取代基之后,
-    // 那些取代基**下游**的原子 BFS 也到不了 —— 它们同样是"因为路径经过
-    // 不支持的中心而摆不到",不是"连不上"。头一版把它们记进 `disconnected`,
-    // 名字是错的(实测 205 个)。
+
+    // **下游原子要走出来,不能拿"剩下的都算它"顶。**
     //
-    // 分量是预先算好的,所以剩下的没摆好的原子只可能是这一类:
-    stats.skipped_hypervalent = stats
-        .atoms
-        .saturating_sub(stats.placed + stats.skipped_ring + stats.degenerate);
-    // 于是这一条该恒为 0 —— 它现在是**守恒检查**,不是一类原因。
-    stats.disconnected = 0;
+    // 头一版这里是 `skipped_hypervalent = atoms − (placed + skipped_ring + degenerate)`,
+    // 于是判据里那条守恒式变成**代数恒等式** —— 往 BFS 里插一条静默 `continue`
+    // 丢掉 191 个原子,守恒闸、覆盖率闸、"连不上"闸**一个都没响**,
+    // 唯一挡住的是那个总额上限常数,而它的报错还指向了一条毫不相干的路。
+    //
+    // 现在从直接被拒的那些原子出发走一遍,真正算出下游有多少;
+    // 剩下的进 `unaccounted`,判据把它钉在 0 —— 那才是一道真闸。
+    let mut blocked = refused_direct.clone();
+    let mut stack: Vec<usize> = (0..n).filter(|i| refused_direct[*i]).collect();
+    while let Some(x) = stack.pop() {
+        #[allow(clippy::cast_possible_truncation)]
+        for (y, _) in mol.neighbors(x as u32) {
+            let y = y as usize;
+            if !placed[y] && !on_ring[y] && !skipped_attached[y] && !blocked[y] {
+                blocked[y] = true;
+                stack.push(y);
+            }
+        }
+    }
+    stats.skipped_downstream = (0..n)
+        .filter(|i| blocked[*i] && !refused_direct[*i])
+        .count();
+    stats.unaccounted = stats.atoms.saturating_sub(
+        stats.placed
+            + stats.skipped_ring
+            + stats.skipped_ring_attached
+            + stats.degenerate
+            + stats.skipped_hypervalent
+            + stats.skipped_arrangement
+            + stats.skipped_downstream,
+    );
     Placed {
         coords,
         placed,
+        parent,
         stats,
+    }
+}
+
+/// 查这个中心的键角,顺带记下它走的哪一级表。
+fn angle_at_centre(stats: &mut Stats, mol: &MolBuilder, c: u32, deg: usize) -> f64 {
+    let a = params::angle(
+        mol.atoms()[c as usize].atomic_num,
+        deg,
+        mol.atoms()[c as usize]
+            .flags
+            .contains(omgkit_core::AtomFlags::AROMATIC),
+        0,
+        0,
+    );
+    stats.note_angle(a.source);
+    a.value
+}
+
+/// 记一笔"这个中心的兄弟角被推歪了多少"。**只有真有兄弟(≥2 个子)时才算。**
+///
+/// 头一版只数 `Tetrahedral` 那一档,漏掉的正是偏得最狠的:平面中心的表角一旦
+/// 不是 120°,兄弟角被强制偏 `|2π − 3θ|`,θ = 109.47° 时是 **31.6°** ——
+/// 比四面体那一支能产生的任何值都大。实测漏报了大约一半(400 对真值约 817)。
+///
+/// 另外头一版在 `k == 0` 时无条件计数,哪怕那个中心只有一个子、根本没有兄弟。
+fn note_strain(
+    stats: &mut Stats,
+    mol: &MolBuilder,
+    c: u32,
+    deg: usize,
+    arr: crate::vsepr::Arrangement,
+    n_children: usize,
+) {
+    if n_children < 2 {
+        return;
+    }
+    let theta = params::angle(
+        mol.atoms()[c as usize].atomic_num,
+        deg,
+        mol.atoms()[c as usize]
+            .flags
+            .contains(omgkit_core::AtomFlags::AROMATIC),
+        0,
+        0,
+    )
+    .value;
+    if expected_sibling_skew(arr, theta) > STRAIN_RADIANS {
+        stats.angle_strained += 1;
     }
 }
 
@@ -446,6 +585,7 @@ pub fn place(mol: &MolBuilder, ranks: &[u32]) -> Placed {
 mod tests {
     use super::*;
     use crate::geom::{angle_at, dihedral};
+    use crate::vsepr::sibling_skew;
 
     /// 从 SMILES 造一个补好氢、感知过的分子,外加规范秩。
     fn prep(smi: &str) -> (MolBuilder, Vec<u32>) {
@@ -522,6 +662,67 @@ mod tests {
         assert!(checked > 100, "只验了 {checked} 根键");
     }
 
+    /// **两个不相连的片段不许叠在一起。**
+    ///
+    /// 片段是沿 +x 一片一片挪开的,而平移量必须减掉**新片自己的 min x** ——
+    /// 片段从根长出去时也向 −x 伸(实测单片的 min x 能到 −18.7 Å)。
+    /// 头一版只写了"上一片的 max x + 5",于是两片会叠上。
+    ///
+    /// 这条测试是变异验证逼出来的:把那个减法去掉,当时**十二个变异里唯独它
+    /// 一个闸都没响**。语料判据现在也有一条(`MIN_FRAGMENT_GAP`),
+    /// 这里是逐分子的那道。
+    #[test]
+    fn two_disconnected_fragments_never_overlap() {
+        let mut checked = 0;
+        for smi in [
+            // 取自 harness/corpus/large.smi
+            "CCCCOP(O)(O)=O.CCCCOP(O)(=O)OCCCC",
+            "NC(N)=O.OC(=O)C(O)=O",
+            "CCCCCCCCCCCCCCCCCC(=O)O.CCCCCCCCCCCCCCCCCCO",
+            "CC(=O)O.CC(=O)O.CC(=O)O",
+        ] {
+            let (m, r) = prep(smi);
+            let out = place(&m, &r);
+            assert!(out.complete(), "{smi} 该摆全:{:?}", out.stats);
+            // 分量:测试自己算,不用 place 里那份
+            let n = m.num_atoms();
+            let mut comp = vec![usize::MAX; n];
+            let mut nc = 0usize;
+            for a in 0..n {
+                if comp[a] != usize::MAX {
+                    continue;
+                }
+                let mut st = vec![a];
+                comp[a] = nc;
+                while let Some(x) = st.pop() {
+                    for (y, _) in m.neighbors(u32::try_from(x).expect("下标")) {
+                        if comp[y as usize] == usize::MAX {
+                            comp[y as usize] = nc;
+                            st.push(y as usize);
+                        }
+                    }
+                }
+                nc += 1;
+            }
+            assert!(nc >= 2, "{smi} 该是多片段的");
+            let mut worst = f64::INFINITY;
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    if comp[i] == comp[j] {
+                        continue;
+                    }
+                    worst = worst.min(out.coords[i].dist(out.coords[j]));
+                    checked += 1;
+                }
+            }
+            assert!(
+                worst >= 4.0,
+                "{smi}:两个片段只隔 {worst:.3} Å —— 平移量减掉新片的 min x 了吗"
+            );
+        }
+        assert!(checked > 500, "只验了 {checked} 对");
+    }
+
     /// **有环的分子这一期不摆,但要如实报**:环上的原子计进 `skipped_ring`,
     /// 而且**永不 panic**。
     #[test]
@@ -536,11 +737,48 @@ mod tests {
             let (m, r) = prep(smi);
             let out = place(&m, &r);
             assert!(out.stats.skipped_ring > 0, "{smi} 该报有环");
-            assert!(!out.complete(), "{smi} 一期不该摆全");
             // 摆好的那些坐标必须是有限数
             for (i, p) in out.coords.iter().enumerate() {
                 if out.placed[i] {
                     assert!(p.is_finite(), "{smi} 第 {i} 个原子坐标不是有限数");
+                }
+            }
+            // **两端都说摆好了的键,键长必须是表里那个值。**
+            //
+            // 头一版这条测试只查"报了有环 / 没摆全 / 坐标有限",**一根键长都不查** ——
+            // 而键长正是当时唯一坏掉的东西:分量是在"去掉环原子"的子图上算的,
+            // 于是苯的 6 个氢各成一个"片段"、被摆到 5 Å 间隔的一排上并标成
+            // `placed = true`,与各自的碳完全脱开。
+            for b in m.bonds() {
+                let (x, y) = (b.begin as usize, b.end as usize);
+                if !out.placed[x] || !out.placed[y] {
+                    continue;
+                }
+                let wantb = params::bond_length(
+                    m.atoms()[x].atomic_num,
+                    m.atoms()[y].atomic_num,
+                    b.order,
+                    0,
+                )
+                .value;
+                let got = out.coords[x].dist(out.coords[y]);
+                assert!(
+                    ((got - wantb) / wantb).abs() < 1e-12,
+                    "{smi}:两端都摆好的键 {x}–{y} 长 {got:.6},该是 {wantb:.6}"
+                );
+            }
+            // **不许摆一个连不回去的原子。** 摆好的原子,它的每个非环邻居也得摆好 ——
+            // 不然那个坐标接在哪儿都不知道。二期把环摆出来之后这条自然还成立。
+            for i in 0..m.num_atoms() {
+                if !out.placed[i] {
+                    continue;
+                }
+                let iu = u32::try_from(i).expect("下标");
+                for (y, _) in m.neighbors(iu) {
+                    assert!(
+                        out.placed[y as usize],
+                        "{smi}:原子 {i} 说摆好了,可它的邻居 {y} 没摆 —— 这个坐标接不回去"
+                    );
                 }
             }
         }
@@ -572,7 +810,9 @@ mod tests {
                 None => break,
             }
         }
-        if chain.len() == 4 {
+        // 找不出主链就该红,**不能静默跳过** —— 那会让这条测试当场变恒真
+        assert_eq!(chain.len(), 4, "没走出四个碳的主链");
+        {
             let d = dihedral(
                 out.coords[chain[0] as usize],
                 out.coords[chain[1] as usize],
@@ -657,21 +897,49 @@ mod tests {
             }
         }
         assert_eq!(n, 6, "四配位中心该有六对");
-        // **六个角不可能都等于表里那一个值。** 4 个取代基有 6 个夹角、
-        // 而模掉整体转动只有 5 个自由度 —— 超定。构造法让"父–子"那几个
-        // 精确等于 θ,兄弟之间的是**推出来**的:`cos φ = cos²θ + sin²θ·cos120°`。
-        // θ = 109.4° 时 φ = 109.5423°,差 **+0.1423°**(解析式与实测逐位吻合);
-        // 只有 θ 恰好 109.4712° 时才为 0。
+        // **断契约,不断"当前的偏差落在哪个区间"。**
         //
-        // 头一版这条判据要求六个全等于表值,**是我写错了期望**,不是代码错。
-        assert!(
-            worst < 0.15,
-            "最大偏差 {worst:.4}° —— 该只有兄弟角那 0.1423°"
-        );
-        assert!(
-            worst > 0.10,
-            "偏差 {worst:.4}° 太小了 —— 兄弟角那 0.1423° 哪去了?"
-        );
+        // 头一版这里是 `0.10 < worst < 0.15` —— 下界断的是"**当前构造法的缺陷
+        // 必须存在**"。哪天把扭转角改成让 6 个夹角最小二乘均摊(完全合法、
+        // 而且更好),worst 会掉到 0.04,这条测试当场红,而代码是变好了。
+        // 那种断言是能力长进的绊脚石,不是判据。
+        //
+        // 该断的是两条契约:
+        //   父–子:精确等于表值(机器精度);
+        //   兄弟 :精确等于解析式给的那个值。
+        // 4 个取代基有 6 个夹角、模掉整体转动只有 5 个自由度 —— 超定,
+        // 所以兄弟角只能是推出来的:`cos φ = cos²θ + sin²θ·cos120°`。
+        let par = out.parent[mid as usize];
+        let mut n_pc = 0;
+        let mut n_sib = 0;
+        for i in 0..nb.len() {
+            for j in (i + 1)..nb.len() {
+                let got = angle_at(
+                    out.coords[nb[i] as usize],
+                    out.coords[mid as usize],
+                    out.coords[nb[j] as usize],
+                )
+                .expect("角")
+                .to_degrees();
+                if par == Some(nb[i]) || par == Some(nb[j]) {
+                    assert!(
+                        (got - want).abs() < 1e-9,
+                        "父–子角 {got:.9}° 该精确等于表值 {want:.9}°"
+                    );
+                    n_pc += 1;
+                } else {
+                    let sib = want + sibling_skew(want.to_radians()).to_degrees();
+                    assert!(
+                        (got - sib).abs() < 1e-6,
+                        "兄弟角 {got:.6}° 该等于解析式给的 {sib:.6}°"
+                    );
+                    n_sib += 1;
+                }
+            }
+        }
+        assert_eq!(n_pc + n_sib, 6);
+        assert!(n_pc >= 1 && n_sib >= 1, "父–子 {n_pc} 对、兄弟 {n_sib} 对");
+        assert!(worst < 0.15, "最大偏差 {worst:.4}°");
     }
 
     /// **同一分子换个 SMILES 写法,判决不能变。**

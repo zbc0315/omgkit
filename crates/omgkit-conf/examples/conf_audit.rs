@@ -66,6 +66,67 @@ const MAX_BELOW_ABS: u64 = 8;
 /// 地板在各候选分辨率之间本来就在 1.40~1.57 之间跳,拿它当紧闸就是在拟合噪声。
 const MIN_FLOOR: f64 = 1.0;
 
+/// 两个**不相连的片段**之间至少要离多远(Å)。现值 5.029。
+///
+/// 语料里 18 个多片段的无环分子(盐、共晶)。片段之间的间隔是 `place()` 沿 +x
+/// 平移出来的,而头一版的平移量算错了:`shift = 上一片的 max x + 5`,
+/// 没减掉**新片自己的 min x** —— 片段从根长出去时也向 −x 伸(实测单片的 min x
+/// 能到 −18.7 Å),于是两片会叠上。
+///
+/// 这条闸是变异验证逼出来的:把那个减法去掉,**十二个变异里唯独它一个闸都没响**
+/// (单测 0 条红、判据退出 0)。真 bug 却没人盯着,那就是隐患。
+///
+/// 分量是**判据自己从分子图上算的**,不用 `place()` 里那份 —— 判据不该与被判的
+/// 那段代码共用实现(共用的话两边同错就同绿,这是审核报的 F4)。
+const MIN_FRAGMENT_GAP: f64 = 4.0;
+
+/// **消撞前**非键最小距离的中位数下限(Å)。现值 1.739。
+///
+/// 这三条(它、[`MAX_BELOW_FRAC_BEFORE`]、[`MAX_ANGLE_STRAINED`])是审核逼出来的:
+/// 语料闸原本**完全不约束任何扭转量**,而手性、EZ 将来正落在那里。
+/// 实测两个致命变异:
+///
+/// | | 正常 | NeRF 标架写反 | Sp2 判成四面体 |
+/// |---|---|---|---|
+/// | 消撞前中位 | 1.739 | **0.543** | 1.596 |
+/// | 消撞前撞的对数 | 10535 | **94636** | 9843 |
+/// | 兄弟角推歪的中心 | 651 | 651 | **2232** |
+///
+/// 看**消撞前**是故意的:消撞会把大部分伤害盖掉(两个变异消撞后的地板都还有
+/// 1.3 Å),于是消撞后的数看不出构造法坏了。构造法自己的质量要在消撞之前量。
+///
+/// 三条都是**单向棘轮**:构造法变好时中位往上、对数往下、推歪数不变,
+/// 不会因为能力长进而变成假话。
+const MIN_MEDIAN_BEFORE: f64 = 1.5;
+
+/// **消撞前**低于 `0.75×vdW` 的原子对数上限。现值 10535。见 [`MIN_MEDIAN_BEFORE`]。
+const MAX_BELOW_FRAC_BEFORE: u64 = 12000;
+
+/// 兄弟角被推歪 >[`STRAIN_WARN`]° 的中心数上限。现值 651。见 [`MIN_MEDIAN_BEFORE`]。
+///
+/// 这个数只取决于**表值与排布**,与摆放质量无关,所以构造法变好它也不动 ——
+/// 它动就是排布判错了。
+const MAX_ANGLE_STRAINED: usize = 700;
+
+/// 兄弟角容差被封顶的中心数上限。贴着现值。
+const MAX_BOUND_CAPPED: u64 = 0;
+
+/// 兄弟角容差的**封顶**(度)。
+///
+/// 容差是"解析上兄弟角本来就该偏多少",可它自己没有上限:
+/// `sibling_skew(180°) = 180°`,于是那个中心的角判据被自己的容差整个关掉。
+/// 封顶之后超出封顶的中心单独计数 —— **单向放松的东西必须配一道上限闸**。
+///
+/// 35° 是量出来的:平面中心表角 109.47° 时解析偏差 31.6°(真实存在,不能冤枉),
+/// 再往上就没有正当的了。
+const MAX_SIBLING_BOUND: f64 = 35.0;
+
+/// 因"排布放不下这么多取代基"而没摆的原子数上限。
+///
+/// 一期无环语料里实测 0 —— 平面/四面体中心的配位数都够小。
+/// 这一条是给二期留的闸:它一涨就说明有中心的杂化被感知成了放不下的样子。
+const MAX_ARRANGEMENT_OVERFLOW: usize = 0;
+
 /// 因超配位中心(配位数 ≥ 5)而摆不到的原子数上限。贴着现值。
 ///
 /// 这一档是方案 §4.5 写明的**范围外** —— 不进覆盖率的分母,但要有闸:
@@ -84,6 +145,8 @@ fn main() {
     let (mut n_line, mut n_parse_bad, mut n_sanitize_bad) = (0u64, 0u64, 0u64);
     let (mut n_cyclic, mut n_acyclic, mut n_full) = (0u64, 0u64, 0u64);
     let (mut worst_bond, mut worst_angle) = (0.0f64, 0.0f64);
+    // 兄弟角容差自己的分布 —— 它一旦变大,角判据就是被自己的容差关掉的
+    let (mut worst_bound, mut n_bound_capped) = (0.0f64, 0u64);
     let mut agg = build::Stats::default();
     // 非键最小距离的分布(消撞**后**)
     let mut mind_all: Vec<f64> = Vec::new();
@@ -103,6 +166,9 @@ fn main() {
     // **单调性回退**:消撞把情况弄坏的分子数。这一条是闸,必须恒 0。
     let mut n_regressed = 0u64;
     let mut worst_regress: Option<(f64, String)> = None;
+    // 片段之间的最小距离(消撞**前** —— 这是摆放摆出来的,不是消撞的功劳)
+    let mut worst_gap = f64::INFINITY;
+    let (mut worst_gap_smi, mut n_multi) = (String::new(), 0u64);
 
     for line in text.lines() {
         let smi = line.split('\t').next().unwrap_or("").trim();
@@ -132,7 +198,10 @@ fn main() {
         agg.atoms += out.stats.atoms;
         agg.placed += out.stats.placed;
         agg.degenerate += out.stats.degenerate;
-        agg.disconnected += out.stats.disconnected;
+        agg.skipped_ring_attached += out.stats.skipped_ring_attached;
+        agg.skipped_arrangement += out.stats.skipped_arrangement;
+        agg.skipped_downstream += out.stats.skipped_downstream;
+        agg.unaccounted += out.stats.unaccounted;
         agg.bond_table += out.stats.bond_table;
         agg.bond_relaxed += out.stats.bond_relaxed;
         agg.bond_model += out.stats.bond_model;
@@ -163,7 +232,16 @@ fn main() {
             worst_bond = worst_bond.max(((got - want) / want).abs());
         }
 
-        // 键角:逐个比表值(只比父–子那种,兄弟角是推出来的,见 Stats::angle_strained)
+        // 键角:**父–子那几个按构造精确等于表值,兄弟之间的才有解析偏差**。
+        //
+        // 头一版分不清哪个是父亲,于是把兄弟偏差的容差 `bound` **减在所有原子对上**,
+        // 而 `bound` 自己没有上限:`sibling_skew(180°)` = 180°,于是像
+        // `CCCCCC[Se]C#N` 那个 Se(表值 180.00°)的角判据**整个被关掉** ——
+        // 把它的子原子摆到 30°、5°、0° 都判绿。实测 13% 的原子对容忍 10~40° 的误差。
+        //
+        // 现在 `place()` 把摆放树的父亲报出来了,两类分开判:
+        //   父–子:容差 0(它就是表值,机器精度)
+        //   兄弟 :容差 = 解析式给的那个偏差,而且**封顶**并单独计数
         for k in 0..mol.num_atoms() {
             let Ok(ku) = u32::try_from(k) else { continue };
             let nb: Vec<u32> = mol.neighbors(ku).map(|(y, _)| y).collect();
@@ -181,39 +259,58 @@ fn main() {
             )
             .value
             .to_degrees();
+            let arr = omgkit_conf::vsepr::arrangement(mol.atoms()[k].hybridization, nb.len());
+            let raw_bound =
+                omgkit_conf::vsepr::expected_sibling_skew(arr, want.to_radians()).to_degrees();
+            let sib_bound = raw_bound.min(MAX_SIBLING_BOUND);
+            // **只统计真的用上了的容差。** 配位 2 的中心只有一个"父–子"对、
+            // 一个兄弟对都没有,它的容差从来不参与判决 —— 没被用上的容差
+            // 关不掉任何东西,算进来只会让这条闸冤枉人(实测正是那 3 个中心)。
+            let mut bound_used = false;
             for i in 0..nb.len() {
                 for j in (i + 1)..nb.len() {
                     if !out.placed[nb[i] as usize] || !out.placed[nb[j] as usize] {
                         continue;
                     }
-                    if let Some(a) = omgkit_conf::geom::angle_at(
+                    let Some(a) = omgkit_conf::geom::angle_at(
                         out.coords[nb[i] as usize],
                         out.coords[k],
                         out.coords[nb[j] as usize],
-                    ) {
-                        // 解析上这个中心的兄弟角**应当**偏多少
-                        let arr =
-                            omgkit_conf::vsepr::arrangement(mol.atoms()[k].hybridization, nb.len());
-                        let bound =
-                            omgkit_conf::vsepr::expected_sibling_skew(arr, want.to_radians())
-                                .to_degrees();
-                        let dev = ((a.to_degrees() - want).abs() - bound).max(0.0);
-                        if dev > worst_angle {
-                            worst_angle = dev;
-                            worst_ang_case = Some((
-                                dev,
-                                smi.to_string(),
-                                format!(
-                                    "中心元素 {} 配位 {} 表值 {want:.2}° 实得 {:.2}° 解析边界 {bound:.2}°(邻居 {} / {})",
-                                    mol.atoms()[k].atomic_num,
-                                    nb.len(),
-                                    a.to_degrees(),
-                                    nb[i],
-                                    nb[j]
-                                ),
-                            ));
-                        }
+                    ) else {
+                        continue;
+                    };
+                    // 这一对里有没有 `k` 的父亲?有就是父–子对,按构造该精确等于表值
+                    let par = out.parent[k];
+                    let is_parent_child = par == Some(nb[i]) || par == Some(nb[j]);
+                    let bound = if is_parent_child {
+                        0.0
+                    } else {
+                        bound_used = true;
+                        sib_bound
+                    };
+                    let dev = ((a.to_degrees() - want).abs() - bound).max(0.0);
+                    if dev > worst_angle {
+                        worst_angle = dev;
+                        worst_ang_case = Some((
+                            dev,
+                            smi.to_string(),
+                            format!(
+                                "中心元素 {} 配位 {} {} 表值 {want:.2}° 实得 {:.2}° 容差 {bound:.2}°(邻居 {} / {})",
+                                mol.atoms()[k].atomic_num,
+                                nb.len(),
+                                if is_parent_child { "父–子" } else { "兄弟" },
+                                a.to_degrees(),
+                                nb[i],
+                                nb[j]
+                            ),
+                        ));
                     }
+                }
+            }
+            if bound_used {
+                worst_bound = worst_bound.max(raw_bound);
+                if raw_bound > MAX_SIBLING_BOUND {
+                    n_bound_capped += 1;
                 }
             }
         }
@@ -221,6 +318,45 @@ fn main() {
         // 非键最小距离(拓扑距离 ≥ 3 才算,1-2 与 1-3 是键长键角管的)。
         // **口径由 `declash::survey` 统一给** —— 判据与消撞不许各写一份尺子。
         let before = declash::survey(&mol, &out);
+
+        // 片段之间的距离。分量在这里**独立算一遍**,不用 `place()` 那份。
+        {
+            let na = mol.num_atoms();
+            let mut comp = vec![usize::MAX; na];
+            let mut nc = 0usize;
+            for a in 0..na {
+                if comp[a] != usize::MAX {
+                    continue;
+                }
+                let mut st = vec![a];
+                comp[a] = nc;
+                while let Some(x) = st.pop() {
+                    let Ok(xu) = u32::try_from(x) else { continue };
+                    for (y, _) in mol.neighbors(xu) {
+                        if comp[y as usize] == usize::MAX {
+                            comp[y as usize] = nc;
+                            st.push(y as usize);
+                        }
+                    }
+                }
+                nc += 1;
+            }
+            if nc >= 2 {
+                n_multi += 1;
+                for i in 0..na {
+                    for j in (i + 1)..na {
+                        if comp[i] == comp[j] || !out.placed[i] || !out.placed[j] {
+                            continue;
+                        }
+                        let d = out.coords[i].dist(out.coords[j]);
+                        if d < worst_gap {
+                            worst_gap = d;
+                            worst_gap_smi = smi.to_string();
+                        }
+                    }
+                }
+            }
+        }
 
         // ---- 消撞:只转扭转角,键长键角逐位不变 ----
         let t0 = std::time::Instant::now();
@@ -275,8 +411,8 @@ fn main() {
     println!("  有环(一期范围外,不判):{n_cyclic}");
     println!("  无环:{n_acyclic},其中全部摆好 {n_full}");
     println!(
-        "  原子 {} 个,摆好 {}(退化 {}、连不上 {})",
-        agg.atoms, agg.placed, agg.degenerate, agg.disconnected
+        "  原子 {} 个,摆好 {}(退化 {}、说不出原因 {})",
+        agg.atoms, agg.placed, agg.degenerate, agg.unaccounted
     );
     println!(
         "  参数来源 —— 键长:表 {} / 放宽 {} / 模型 {};键角:表 {} / 放宽 {} / 模型 {}",
@@ -292,7 +428,10 @@ fn main() {
         agg.degree_ge5, agg.angle_strained
     );
     println!("  键长最大相对误差 {worst_bond:.3e}(上限 {MAX_BOND_REL:.0e})");
-    println!("  键角**超出解析边界**最多 {worst_angle:.3}°(上限 {MAX_ANGLE_EXCESS}°)");
+    println!("  键角**超出容差**最多 {worst_angle:.3}°(上限 {MAX_ANGLE_EXCESS}°)");
+    println!(
+        "    兄弟角容差:最大 {worst_bound:.2}°,被封顶({MAX_SIBLING_BOUND}°)的中心 {n_bound_capped} 个"
+    );
 
     mind_all.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     mind_before.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -331,6 +470,11 @@ fn main() {
         "    单调性回退的分子 {n_regressed} 个(必须是 0);逐次转动最多让跨切口最小间距比掉 {d_move_regress:.3e}(必须 ≤ 0)"
     );
     println!("    剪不断(在环上)而没算的键 {d_in_ring} 根 —— 一期不摆环,这条该是 0");
+    if worst_gap.is_finite() {
+        println!(
+            "  多片段分子 {n_multi} 个;片段之间最小距离 {worst_gap:.3} Å(下限 {MIN_FRAGMENT_GAP})  {worst_gap_smi}"
+        );
+    }
     if let Some((d, smi)) = &worst_regress {
         println!("      回退最狠的:间距比掉了 {d:.6}  {smi}");
     }
@@ -345,9 +489,13 @@ fn main() {
     // **范围内**的原子必须 100% 摆好。超配位那一档是方案 §4.5 写明的范围外
     // (`vsepr` 对它只有"均分了事"的 Spread,实测钴的六配位差 53°),
     // 所以它不进分母 —— 但它**单独有闸**,不许悄悄变多。
-    let in_scope = agg
-        .atoms
-        .saturating_sub(agg.skipped_ring + agg.skipped_hypervalent);
+    let in_scope = agg.atoms.saturating_sub(
+        agg.skipped_ring
+            + agg.skipped_ring_attached
+            + agg.skipped_hypervalent
+            + agg.skipped_arrangement
+            + agg.skipped_downstream,
+    );
     if agg.placed != in_scope {
         eprintln!(
             "\n范围内的原子没摆全:{} / {in_scope} —— 一期这一条必须 100%",
@@ -369,11 +517,6 @@ fn main() {
         );
         fatal = true;
     }
-    // 守恒:摆好的 + 环上的 + 超配位挡住的 + 退化的 = 总数
-    if agg.placed + agg.skipped_ring + agg.skipped_hypervalent + agg.degenerate != agg.atoms {
-        eprintln!("\n原子的账对不上 —— 有没计数的分支");
-        fatal = true;
-    }
     if worst_bond > MAX_BOND_REL {
         eprintln!(
             "\n键长最大相对误差 {worst_bond:.3e} 超过 {MAX_BOND_REL:.0e} —— 构造法这条该是机器精度"
@@ -382,15 +525,38 @@ fn main() {
     }
     if worst_angle > MAX_ANGLE_EXCESS {
         eprintln!(
-            "\n键角超出解析边界 {worst_angle:.3}°,过了上限 {MAX_ANGLE_EXCESS}° —— \
+            "\n键角超出容差 {worst_angle:.3}°,过了上限 {MAX_ANGLE_EXCESS}° —— \
              这不是超定带来的偏差,是真的摆错了"
         );
         fatal = true;
     }
-    if agg.disconnected != 0 {
+    // **容差自己也要有闸。** 不然"判据变绿"可以靠把容差撑大来实现,
+    // 而那正是头一版发生过的事(某些中心的容差涨到 180°)。
+    if n_bound_capped > MAX_BOUND_CAPPED {
         eprintln!(
-            "\n有 {} 个原子既没摆好、又说不出原因 —— 分量是预先算好的,这条该恒为 0",
-            agg.disconnected
+            "\n有 {n_bound_capped} 个中心的兄弟角容差超过封顶 {MAX_SIBLING_BOUND}°,\
+             过了上限 {MAX_BOUND_CAPPED} —— 那些中心的角判据是被容差关掉的"
+        );
+        fatal = true;
+    }
+    // **这才是真的守恒闸。** 每个原因桶都在对应分支里真的累加,
+    // 所以 `unaccounted` 是真残差 —— 往 BFS 里插一条静默 `continue`,它就变正。
+    //
+    // 头一版是 `skipped_hypervalent = 总数 − (摆好 + 环上 + 退化)`,于是守恒式
+    // 变成**代数恒等式**:实测丢掉 191 个氟,守恒闸、覆盖率闸、"连不上"闸
+    // 一个都没响,唯一挡住的是那个总额上限常数,报错还指向毫不相干的一条路。
+    if agg.unaccounted != 0 {
+        eprintln!(
+            "\n有 {} 个原子既没摆好、也说不出原因 —— 有没计数的分支",
+            agg.unaccounted
+        );
+        fatal = true;
+    }
+    // 排布放不下的:一期无环语料里该是 0(平面/四面体中心的配位数都够小)
+    if agg.skipped_arrangement > MAX_ARRANGEMENT_OVERFLOW {
+        eprintln!(
+            "\n因排布放不下而没摆的原子 {} 个,超过上限 {MAX_ARRANGEMENT_OVERFLOW}",
+            agg.skipped_arrangement
         );
         fatal = true;
     }
@@ -425,6 +591,35 @@ fn main() {
     if d_move_regress > 0.0 {
         eprintln!(
             "\n有转动让跨切口的最小间距比掉了 {d_move_regress:.3e} —— 接受准则里那道守卫是不是拆了"
+        );
+        fatal = true;
+    }
+    // **构造法自己的质量要在消撞之前量**(见 MIN_MEDIAN_BEFORE 那一段的实测表)。
+    if !mind_before.is_empty() {
+        let med = quantile(&mind_before, 0.5);
+        if med < MIN_MEDIAN_BEFORE {
+            eprintln!(
+                "\n消撞前的非键最小距离中位 {med:.3} Å,低于 {MIN_MEDIAN_BEFORE} —— 构造法本身出问题了"
+            );
+            fatal = true;
+        }
+    }
+    if n_below_frac_before > MAX_BELOW_FRAC_BEFORE {
+        eprintln!(
+            "\n消撞前低于 {MIN_VDW_FRAC}×vdW 的原子对 {n_below_frac_before} 个,超过上限 {MAX_BELOW_FRAC_BEFORE}"
+        );
+        fatal = true;
+    }
+    if agg.angle_strained > MAX_ANGLE_STRAINED {
+        eprintln!(
+            "\n兄弟角被推歪 >{STRAIN_WARN}° 的中心 {} 个,超过上限 {MAX_ANGLE_STRAINED} —— 排布是不是判错了",
+            agg.angle_strained
+        );
+        fatal = true;
+    }
+    if worst_gap.is_finite() && worst_gap < MIN_FRAGMENT_GAP {
+        eprintln!(
+            "\n两个不相连的片段只隔 {worst_gap:.3} Å(下限 {MIN_FRAGMENT_GAP}) —— 平移量算错了:{worst_gap_smi}"
         );
         fatal = true;
     }

@@ -51,14 +51,26 @@ pub fn arrangement(hyb: Hybridization, degree: usize) -> Arrangement {
 
 /// **要摆 `n` 个取代基时,它们的扭转角各取多少**(弧度)。
 ///
+/// # 返回的个数可能**少于** `n`,那是故意的
+///
+/// 一种排布能放下的取代基数是有上限的:直线 1 个、共平面 2 个、四面体 3 个
+/// (都是在父键之外算的)。要多了就**只给得下的那几个**,剩下的由调用方计数。
+///
+/// 头一版是硬凑够 `n` 个,于是 `Planar` 要 3 个时给出 `[180°, 0°, 180°]` ——
+/// 第 0 个和第 2 个拿到**同样的键长、同样的键角、同样的扭转角**,NeRF 摆出
+/// **同一个坐标**。实测 `[Zn](C)(C)(C)C`(Zn 被感知成 Sp2、配位 4)两个甲基碳
+/// 相距 **0.000000 Å**,而 `place()` 报的是 `complete = true`、`degenerate = 0` ——
+/// 两个原子重合对 `1/r¹²` 就是无穷大,后续优化器直接起不来,
+/// 而这正是本 crate 文档列的"力场救不回来的四条"之一。
+///
 /// 扭转角是 `祖父–父–中心–取代基` 那个二面角。约定:
 ///
 /// - [`Arrangement::Linear`]:只摆一个,扭转角无意义(角是 180°,
 ///   NeRF 里 `sin(角)=0`,扭转项自动消掉),给 π 占位;
 /// - [`Arrangement::Planar`]:**只能是 0 或 π** —— 别的值会让 sp² 中心离面。
-///   两个取代基就是 `[π, 0]`(先反式,后顺式);
+///   所以至多给 2 个:`[π, 0]`(先反式,后顺式);
 /// - [`Arrangement::Tetrahedral`]:从 π 起按 `2π/3` 均分 → `[π, π/3, 5π/3]`,
-///   这就是标准的**交错**构象;
+///   这就是标准的**交错**构象(至多 3 个);
 /// - [`Arrangement::Spread`]:`n+1` 个方向均分(把父键也算一个)。
 ///
 /// **反式(π)永远排第一** —— 链要伸展开,而伸展的那一支应当优先。
@@ -67,8 +79,12 @@ pub fn child_torsions(arr: Arrangement, n: usize) -> Vec<f64> {
     use std::f64::consts::{PI, TAU};
     match arr {
         Arrangement::Linear => vec![PI; n.min(1)],
-        Arrangement::Planar => (0..n).map(|k| if k % 2 == 0 { PI } else { 0.0 }).collect(),
-        Arrangement::Tetrahedral => (0..n)
+        // 共平面中心除父键外只放得下 2 个 —— 要第 3 个就得离面,那不再是平面中心
+        Arrangement::Planar => (0..n.min(2))
+            .map(|k| if k % 2 == 0 { PI } else { 0.0 })
+            .collect(),
+        // 四面体除父键外放得下 3 个;第 4 个会与第 1 个重合(π + 3·2π/3 = π)
+        Arrangement::Tetrahedral => (0..n.min(3))
             .map(|k| {
                 #[allow(clippy::cast_precision_loss)]
                 let t = PI + (k as f64) * TAU / 3.0;
@@ -91,18 +107,24 @@ pub fn child_torsions(arr: Arrangement, n: usize) -> Vec<f64> {
 ///
 /// | 排布 | 兄弟角 | 与 θ 之差 | 何时为 0 |
 /// |---|---|---|---|
-/// | `Planar` | `2π − 2θ`(三个角和恒为 2π) | `\|2π − 3θ\|` | θ = 120° |
+/// | `Planar` | `min(2θ, 2π − 2θ)` | 见下 | θ = 120° |
 /// | `Tetrahedral` | `arccos(cos²θ + sin²θ·cos120°)` | 见下 | θ = 109.4712° |
 /// | `Linear` | 没有兄弟 | 0 | 恒 |
 ///
-/// **平面那一行是判据自己逮出来的**:我头一版给它写的边界是 0,
-/// 结果氮那个中心(表值 115.60°)实得 128.80°、超出 13.2° 被判红 ——
-/// 而 `360 − 2×115.6 = 128.8`,几何是对的,**错的是我的边界公式**。
+/// **平面那一行被改过两次,两次都是判据逼的**:
+///
+/// 1. 头一版写的边界是 0,结果氮那个中心(表值 115.60°)实得 128.80°、
+///    超出 13.2° 被判红 —— 而 `360 − 2×115.6 = 128.8`,几何对、**公式错**;
+/// 2. 改成 `|2π − 3θ|` 之后仍然只在 **θ ≥ 90°** 时成立。两个取代基都在平面内、
+///    各与父键成 θ、分居两侧,夹角是 `2θ`;只有 `2θ > π` 时那个夹角才折回成
+///    `2π − 2θ`。θ = 60° 时真值是 60°,而 `|2π − 3θ| = 180°` ——
+///    **方向是只把判据变绿**,那种错最难发现。
 #[must_use]
 pub fn expected_sibling_skew(arr: Arrangement, theta: f64) -> f64 {
     use std::f64::consts::TAU;
     match arr {
-        Arrangement::Planar => (TAU - 3.0 * theta).abs(),
+        // 夹角是 2θ,超过 π 才折回成 2π − 2θ
+        Arrangement::Planar => ((TAU - 2.0 * theta).min(2.0 * theta) - theta).abs(),
         Arrangement::Tetrahedral => sibling_skew(theta),
         Arrangement::Linear | Arrangement::Spread => 0.0,
     }
@@ -221,6 +243,93 @@ mod tests {
         }
     }
 
+    /// **同一个中心上,两个取代基不许拿到同一个扭转角。**
+    ///
+    /// 拿到同一个,加上同样的键长键角,NeRF 就会把它们摆到**同一个坐标**上。
+    /// 上面那条 `planar_never_hands_out_an_off_plane_torsion` 断的是"值 ∈ {0, π}",
+    /// 而 `[π, 0, π]` 照过 —— **它守不住这件事**,得单独有一条。
+    #[test]
+    fn no_two_children_ever_get_the_same_torsion() {
+        for arr in [
+            Arrangement::Linear,
+            Arrangement::Planar,
+            Arrangement::Tetrahedral,
+            Arrangement::Spread,
+        ] {
+            for n in 0..8 {
+                let ts = child_torsions(arr, n);
+                for i in 0..ts.len() {
+                    for j in (i + 1)..ts.len() {
+                        let d = (ts[i] - ts[j]).abs();
+                        let d = d.min(std::f64::consts::TAU - d);
+                        assert!(
+                            d > 1e-9,
+                            "{arr:?} 要 {n} 个时第 {i} 与第 {j} 个都是 {:.3}° —— 两个原子会重合",
+                            ts[i].to_degrees()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **放不下就少给,不许硬凑。** 各排布在父键之外能放的上限。
+    #[test]
+    fn an_arrangement_only_hands_out_as_many_as_it_can_hold() {
+        for (arr, cap) in [
+            (Arrangement::Linear, 1),
+            (Arrangement::Planar, 2),
+            (Arrangement::Tetrahedral, 3),
+        ] {
+            for n in 0..8 {
+                assert_eq!(
+                    child_torsions(arr, n).len(),
+                    n.min(cap),
+                    "{arr:?} 要 {n} 个时该给 {} 个",
+                    n.min(cap)
+                );
+            }
+        }
+    }
+
+    /// **兄弟角容差必须与实际摆出来的几何对得上,而且不许无缘无故变大。**
+    ///
+    /// 这条把 `expected_sibling_skew` 与 `child_torsions` + NeRF **真的摆一遍**
+    /// 的结果比对 —— 公式是判据的尺子,尺子错了判据就废了,而它错过两次
+    /// (平面那一支先写成 0,再写成只在 θ ≥ 90° 成立的 `|2π−3θ|`)。
+    #[test]
+    fn the_sibling_tolerance_matches_the_geometry_it_claims_to_describe() {
+        let g = Point3::new(0.0, 1.2, 0.3);
+        let p = Point3::ORIGIN;
+        let c = Point3::new(1.5, 0.0, 0.0);
+        let mut checked = 0;
+        for arr in [Arrangement::Planar, Arrangement::Tetrahedral] {
+            for deg in [60.0_f64, 90.0, 104.5, 109.4712, 115.6, 120.0, 150.0] {
+                let th = deg.to_radians();
+                let ts = child_torsions(arr, 2);
+                let x: Vec<Point3> = ts
+                    .iter()
+                    .map(|t| place_nerf(g, p, c, 1.4, th, *t).expect("摆得出来"))
+                    .collect();
+                assert_eq!(x.len(), 2, "{arr:?} 该给两个");
+                let got = angle_at(x[0], c, x[1]).expect("兄弟角");
+                let want = expected_sibling_skew(arr, th);
+                // **容差 1e-6 不是 1e-9。** θ = 90° 时两个取代基恰好反向,
+                // 兄弟角是 180°,而 `acos` 在 ±1 附近导数发散:点积上 1e-16 的
+                // 浮点误差被放大成 **1.5e-8 rad** 的角度误差。那是数值条件,不是公式错。
+                assert!(
+                    ((got - th).abs() - want).abs() < 1e-6,
+                    "{arr:?} θ={deg}°:实摆兄弟角 {:.4}°,偏差 {:.4}°,而公式说 {:.4}°",
+                    got.to_degrees(),
+                    (got - th).abs().to_degrees(),
+                    want.to_degrees()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 14, "只验了 {checked} 组");
+    }
+
     /// 配位数 ≥ 5 一律走 `Spread`,不管杂化写的是什么。
     #[test]
     fn five_or_more_neighbours_always_spread() {
@@ -236,19 +345,17 @@ mod tests {
         }
     }
 
-    /// 要几个就给几个,不多不少。
+    /// `Spread` 要几个就给几个 —— 它是"均分了事",没有容量上限。
+    ///
+    /// 别的排布**有**上限,见 `an_arrangement_only_hands_out_as_many_as_it_can_hold`。
     #[test]
-    fn the_count_always_matches_what_was_asked() {
-        for arr in [
-            Arrangement::Planar,
-            Arrangement::Tetrahedral,
-            Arrangement::Spread,
-        ] {
-            for n in 0..5 {
-                assert_eq!(child_torsions(arr, n).len(), n, "{arr:?} 要 {n} 个");
-            }
+    fn spread_always_hands_out_exactly_what_was_asked() {
+        for n in 0..8 {
+            assert_eq!(
+                child_torsions(Arrangement::Spread, n).len(),
+                n,
+                "Spread 要 {n} 个"
+            );
         }
-        // Linear 最多一个 —— 直线中心塞不下第二个取代基
-        assert_eq!(child_torsions(Arrangement::Linear, 3).len(), 1);
     }
 }
