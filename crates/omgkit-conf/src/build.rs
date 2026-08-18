@@ -20,7 +20,7 @@
 
 use crate::geom::{place_nerf, Point3};
 use crate::params::{self, Source};
-use crate::vsepr::{arrangement, child_torsions};
+use crate::vsepr::{arrangement, child_torsions, sibling_skew};
 use omgkit_core::MolBuilder;
 
 /// 一次摆放的**分级计数**。
@@ -53,6 +53,13 @@ pub struct Stats {
     pub angle_model: usize,
     /// 配位数 ≥ 5 的中心个数。**一期明确不保证它们摆得对**,只计数。
     pub degree_ge5: usize,
+    /// **因为中心配位数 ≥ 5 而没摆的原子数。**
+    ///
+    /// 方案 §4.5 写明一期不保证这一档:`vsepr` 对它只有"均分了事"的 `Spread`,
+    /// 不是真的三角双锥/八面体。实测钴的六配位中心用 `Spread` 摆出来的角是
+    /// **56.25°**,而表里查不到、退到的是 109.47° —— **差 53.22°**。
+    /// 与其硬摆一个错的,不如按本仓的规矩:**摆不了就说摆不了**。
+    pub skipped_hypervalent: usize,
     /// **兄弟角被推歪超过 5° 的中心个数。**
     ///
     /// 表只给中心一个角 θ,而 4 个取代基有 6 个夹角、模掉整体转动只有 5 个自由度 ——
@@ -103,6 +110,31 @@ impl Placed {
     }
 }
 
+/// **参考点共线时的兜底**:造一个垂直于 `p→c` 轴的点当祖父。
+///
+/// NeRF 要 `g`、`p`、`c` 不共线才定得出标架。而链上真有共线的:
+/// 炔基(`C#C`)、腈、累积双键的中心,它们的父与祖父就在一条直线上。
+/// 实测语料里 5 个原子因此摆不出来 —— 数量小,但那是个洞,不能留。
+///
+/// 垂直方向取哪个都行(它只定扭转角的零点,而绕轴的整体转动本来就是自由的),
+/// 但**必须确定**:这里固定挑与轴最不平行的那个坐标轴去叉乘。
+fn perpendicular_reference(p: Point3, c: Point3) -> Point3 {
+    let u = (c - p).normalized().unwrap_or(Point3::new(1.0, 0.0, 0.0));
+    // 与 u 最不平行的坐标轴
+    let ax = if u.x.abs() <= u.y.abs() && u.x.abs() <= u.z.abs() {
+        Point3::new(1.0, 0.0, 0.0)
+    } else if u.y.abs() <= u.z.abs() {
+        Point3::new(0.0, 1.0, 0.0)
+    } else {
+        Point3::new(0.0, 0.0, 1.0)
+    };
+    let perp = u
+        .cross(ax)
+        .normalized()
+        .unwrap_or(Point3::new(0.0, 1.0, 0.0));
+    p + perp
+}
+
 /// 按 `(rank, 下标)` 排好的邻居 —— **所有挑选都走这里**,免得漏掉某处按存储序。
 fn sorted_neighbors(mol: &MolBuilder, a: u32, ranks: &[u32]) -> Vec<u32> {
     let mut v: Vec<u32> = mol.neighbors(a).map(|(y, _)| y).collect();
@@ -115,16 +147,6 @@ fn bond_between(mol: &MolBuilder, a: u32, b: u32) -> Option<omgkit_core::BondOrd
     mol.neighbors(a)
         .find(|(y, _)| *y == b)
         .map(|(_, bi)| mol.bonds()[bi as usize].order)
-}
-
-/// 四面体排布下,表角 `θ` 推出来的兄弟角与 `θ` 差多少(弧度)。见 [`Stats::angle_strained`]。
-fn sibling_skew(theta: f64) -> f64 {
-    let phi = theta
-        .cos()
-        .mul_add(theta.cos(), theta.sin().powi(2) * -0.5)
-        .clamp(-1.0, 1.0)
-        .acos();
-    (phi - theta).abs()
 }
 
 /// 摆一个**无环**分子。
@@ -168,173 +190,251 @@ pub fn place(mol: &MolBuilder, ranks: &[u32]) -> Placed {
         }
     }
 
-    // 根:非环原子里 (rank, 下标) 最小的那个
-    let root = (0..n)
-        .filter(|a| !on_ring[*a])
-        .min_by_key(|a| (ranks[*a], *a));
-    let Some(root) = root else {
-        return Placed {
-            coords,
-            placed,
-            stats,
-        };
-    };
-    #[allow(clippy::cast_possible_truncation)]
-    let root = root as u32;
-
-    // ---- 起手:根放原点,第一个邻居沿 +x,其余绕 root–n1 轴铺开 ----
-    placed[root as usize] = true;
-    let nbrs: Vec<u32> = sorted_neighbors(mol, root, ranks)
-        .into_iter()
-        .filter(|x| !on_ring[*x as usize])
-        .collect();
-    let mut queue: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
-    if let Some(&n1) = nbrs.first() {
-        let ord = bond_between(mol, root, n1).unwrap_or(omgkit_core::BondOrder::Single);
-        let b = params::bond_length(
-            mol.atoms()[root as usize].atomic_num,
-            mol.atoms()[n1 as usize].atomic_num,
-            ord,
-            0,
-        );
-        stats.note_bond(b.source);
-        coords[n1 as usize] = Point3::new(b.value, 0.0, 0.0);
-        placed[n1 as usize] = true;
-        parent[n1 as usize] = Some(root);
-        queue.push_back(n1);
-
-        // 根上剩下的邻居:以 n1 为角的另一条边,绕 root–n1 轴按扭转角铺开。
-        // 参考点 `v` 只用来定扭转角的零点(整体转动本来就是自由的)。
-        let v = Point3::new(0.0, 1.0, 0.0);
-        let deg = mol.neighbors(root).count();
-        let arr = arrangement(mol.atoms()[root as usize].hybridization, deg);
-        let ts = child_torsions(arr, nbrs.len().saturating_sub(1));
-        for (k, &x) in nbrs.iter().skip(1).enumerate() {
-            let Some(&t) = ts.get(k) else {
-                stats.degenerate += 1;
-                continue;
-            };
-            let ord = bond_between(mol, root, x).unwrap_or(omgkit_core::BondOrder::Single);
-            let bl = params::bond_length(
-                mol.atoms()[root as usize].atomic_num,
-                mol.atoms()[x as usize].atomic_num,
-                ord,
-                0,
-            );
-            stats.note_bond(bl.source);
-            let ang = params::angle(
-                mol.atoms()[root as usize].atomic_num,
-                deg,
-                mol.atoms()[root as usize]
-                    .flags
-                    .contains(omgkit_core::AtomFlags::AROMATIC),
-                0,
-                0,
-            );
-            stats.note_angle(ang.source);
-            if k == 0
-                && arr == crate::vsepr::Arrangement::Tetrahedral
-                && sibling_skew(ang.value) > 5f64.to_radians()
-            {
-                stats.angle_strained += 1;
-            }
-            match place_nerf(
-                v,
-                coords[n1 as usize],
-                coords[root as usize],
-                bl.value,
-                ang.value,
-                t,
-            ) {
-                Some(p) => {
-                    coords[x as usize] = p;
-                    placed[x as usize] = true;
-                    parent[x as usize] = Some(root);
-                    queue.push_back(x);
+    // **逐个连通片段摆。** 语料里带 `.` 的多片段分子(盐、共晶)不少 ——
+    // 只从一个根 BFS 的话,别的片段一个原子都摆不到:实测 235 个原子因此丢掉,
+    // 而它们会被记成"连不上",看着像 bug 其实是没实现。
+    // 每摆完一个片段就把下一个沿 +x 挪开,免得两片叠在一起。
+    // **连通分量要先算好,不能拿"还没摆的原子"当新片段的根。**
+    //
+    // 头一版就是那么写的,结果:被拒绝的超配位中心、以及退化点,
+    // 它们的取代基也是"还没摆的",于是被当成新片段**整体平移走** ——
+    // 而那些原子跟已摆好的部分是**连着的**,键当场拉断。
+    // 实测键长最大相对误差从 2.4e-15 跳到 **30 Å**(判据当场逮住)。
+    let mut comp = vec![usize::MAX; n];
+    let mut ncomp = 0;
+    for a in 0..n {
+        if on_ring[a] || comp[a] != usize::MAX {
+            continue;
+        }
+        let mut stack = vec![a];
+        comp[a] = ncomp;
+        while let Some(x) = stack.pop() {
+            #[allow(clippy::cast_possible_truncation)]
+            for (y, _) in mol.neighbors(x as u32) {
+                let y = y as usize;
+                if !on_ring[y] && comp[y] == usize::MAX {
+                    comp[y] = ncomp;
+                    stack.push(y);
                 }
-                None => stats.degenerate += 1,
             }
         }
+        ncomp += 1;
     }
 
-    // ---- BFS:每个已摆好的中心,把它没摆的邻居一次摆完 ----
-    while let Some(c) = queue.pop_front() {
-        let p = parent[c as usize];
-        let kids: Vec<u32> = sorted_neighbors(mol, c, ranks)
-            .into_iter()
-            .filter(|x| !placed[*x as usize] && !on_ring[*x as usize])
-            .collect();
-        if kids.is_empty() {
-            continue;
-        }
-        let Some(p) = p else {
-            stats.degenerate += kids.len();
+    let mut shift = 0.0f64;
+    for cid in 0..ncomp {
+        // 根:本分量里 (rank, 下标) 最小的那个
+        let Some(root) = (0..n)
+            .filter(|a| comp[*a] == cid)
+            .min_by_key(|a| (ranks[*a], *a))
+        else {
             continue;
         };
-        // 祖父:`p` 身上另一个已摆好的邻居;没有就用一个虚点定扭转零点
-        let g = sorted_neighbors(mol, p, ranks)
+        #[allow(clippy::cast_possible_truncation)]
+        let root = root as u32;
+        let before: Vec<bool> = placed.clone();
+
+        // ---- 起手:根放原点,第一个邻居沿 +x,其余绕 root–n1 轴铺开 ----
+        placed[root as usize] = true;
+        let nbrs: Vec<u32> = sorted_neighbors(mol, root, ranks)
             .into_iter()
-            .find(|y| *y != c && placed[*y as usize])
-            .map_or_else(
-                || coords[p as usize] + Point3::new(0.0, 1.0, 0.0),
-                |y| coords[y as usize],
-            );
-        let deg = mol.neighbors(c).count();
-        let arr = arrangement(mol.atoms()[c as usize].hybridization, deg);
-        let ts = child_torsions(arr, kids.len());
-        for (k, &x) in kids.iter().enumerate() {
-            let Some(&t) = ts.get(k) else {
-                stats.degenerate += 1;
-                continue;
-            };
-            let ord = bond_between(mol, c, x).unwrap_or(omgkit_core::BondOrder::Single);
-            let bl = params::bond_length(
-                mol.atoms()[c as usize].atomic_num,
-                mol.atoms()[x as usize].atomic_num,
+            .filter(|x| !on_ring[*x as usize])
+            .collect();
+        let mut queue: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
+        if let Some(&n1) = nbrs.first() {
+            let ord = bond_between(mol, root, n1).unwrap_or(omgkit_core::BondOrder::Single);
+            let b = params::bond_length(
+                mol.atoms()[root as usize].atomic_num,
+                mol.atoms()[n1 as usize].atomic_num,
                 ord,
                 0,
             );
-            stats.note_bond(bl.source);
-            let ang = params::angle(
-                mol.atoms()[c as usize].atomic_num,
-                deg,
-                mol.atoms()[c as usize]
-                    .flags
-                    .contains(omgkit_core::AtomFlags::AROMATIC),
-                0,
-                0,
-            );
-            stats.note_angle(ang.source);
-            if k == 0
-                && arr == crate::vsepr::Arrangement::Tetrahedral
-                && sibling_skew(ang.value) > 5f64.to_radians()
-            {
-                stats.angle_strained += 1;
-            }
-            match place_nerf(
-                g,
-                coords[p as usize],
-                coords[c as usize],
-                bl.value,
-                ang.value,
-                t,
-            ) {
-                Some(q) => {
-                    coords[x as usize] = q;
-                    placed[x as usize] = true;
-                    parent[x as usize] = Some(c);
-                    queue.push_back(x);
+            stats.note_bond(b.source);
+            coords[n1 as usize] = Point3::new(b.value, 0.0, 0.0);
+            placed[n1 as usize] = true;
+            parent[n1 as usize] = Some(root);
+            queue.push_back(n1);
+
+            // 根上剩下的邻居:以 n1 为角的另一条边,绕 root–n1 轴按扭转角铺开。
+            // 参考点 `v` 只用来定扭转角的零点(整体转动本来就是自由的)。
+            let v = Point3::new(0.0, 1.0, 0.0);
+            let deg = mol.neighbors(root).count();
+            let arr = arrangement(mol.atoms()[root as usize].hybridization, deg);
+            let ts = if deg >= 5 {
+                Vec::new() // 见 BFS 里那段:配位 ≥5 不摆
+            } else {
+                child_torsions(arr, nbrs.len().saturating_sub(1))
+            };
+            for (k, &x) in nbrs.iter().skip(1).enumerate() {
+                let Some(&t) = ts.get(k) else {
+                    if deg >= 5 {
+                        stats.skipped_hypervalent += 1;
+                    } else {
+                        stats.degenerate += 1;
+                    }
+                    continue;
+                };
+                let ord = bond_between(mol, root, x).unwrap_or(omgkit_core::BondOrder::Single);
+                let bl = params::bond_length(
+                    mol.atoms()[root as usize].atomic_num,
+                    mol.atoms()[x as usize].atomic_num,
+                    ord,
+                    0,
+                );
+                stats.note_bond(bl.source);
+                let ang = params::angle(
+                    mol.atoms()[root as usize].atomic_num,
+                    deg,
+                    mol.atoms()[root as usize]
+                        .flags
+                        .contains(omgkit_core::AtomFlags::AROMATIC),
+                    0,
+                    0,
+                );
+                stats.note_angle(ang.source);
+                if k == 0
+                    && arr == crate::vsepr::Arrangement::Tetrahedral
+                    && sibling_skew(ang.value) > 5f64.to_radians()
+                {
+                    stats.angle_strained += 1;
                 }
-                None => stats.degenerate += 1,
+                match place_nerf(
+                    v,
+                    coords[n1 as usize],
+                    coords[root as usize],
+                    bl.value,
+                    ang.value,
+                    t,
+                ) {
+                    Some(p) => {
+                        coords[x as usize] = p;
+                        placed[x as usize] = true;
+                        parent[x as usize] = Some(root);
+                        queue.push_back(x);
+                    }
+                    None => stats.degenerate += 1,
+                }
             }
+        }
+
+        // ---- BFS:每个已摆好的中心,把它没摆的邻居一次摆完 ----
+        while let Some(c) = queue.pop_front() {
+            let p = parent[c as usize];
+            let kids: Vec<u32> = sorted_neighbors(mol, c, ranks)
+                .into_iter()
+                .filter(|x| !placed[*x as usize] && !on_ring[*x as usize])
+                .collect();
+            if kids.is_empty() {
+                continue;
+            }
+            let Some(p) = p else {
+                stats.degenerate += kids.len();
+                continue;
+            };
+            // 祖父:`p` 身上另一个已摆好的邻居;没有就用一个虚点定扭转零点
+            let g = sorted_neighbors(mol, p, ranks)
+                .into_iter()
+                .find(|y| *y != c && placed[*y as usize])
+                .map_or_else(
+                    || coords[p as usize] + Point3::new(0.0, 1.0, 0.0),
+                    |y| coords[y as usize],
+                );
+            let deg = mol.neighbors(c).count();
+            // **配位数 ≥ 5 的中心不摆它的取代基。** `Spread` 只是"均分了事",
+            // 实测钴的六配位中心给出 56.25° 而表值 109.47° —— 差 53.22°。
+            // 硬摆一个错的不如如实说摆不了(方案 §4.5)。
+            if deg >= 5 {
+                stats.skipped_hypervalent += kids.len();
+                continue;
+            }
+            let arr = arrangement(mol.atoms()[c as usize].hybridization, deg);
+            let ts = child_torsions(arr, kids.len());
+            for (k, &x) in kids.iter().enumerate() {
+                let Some(&t) = ts.get(k) else {
+                    stats.degenerate += 1;
+                    continue;
+                };
+                let ord = bond_between(mol, c, x).unwrap_or(omgkit_core::BondOrder::Single);
+                let bl = params::bond_length(
+                    mol.atoms()[c as usize].atomic_num,
+                    mol.atoms()[x as usize].atomic_num,
+                    ord,
+                    0,
+                );
+                stats.note_bond(bl.source);
+                let ang = params::angle(
+                    mol.atoms()[c as usize].atomic_num,
+                    deg,
+                    mol.atoms()[c as usize]
+                        .flags
+                        .contains(omgkit_core::AtomFlags::AROMATIC),
+                    0,
+                    0,
+                );
+                stats.note_angle(ang.source);
+                if k == 0
+                    && arr == crate::vsepr::Arrangement::Tetrahedral
+                    && sibling_skew(ang.value) > 5f64.to_radians()
+                {
+                    stats.angle_strained += 1;
+                }
+                // 共线定不出标架时,换一个垂直的参考点再试一次(炔基/腈/累积双键)
+                let got = place_nerf(
+                    g,
+                    coords[p as usize],
+                    coords[c as usize],
+                    bl.value,
+                    ang.value,
+                    t,
+                )
+                .or_else(|| {
+                    place_nerf(
+                        perpendicular_reference(coords[p as usize], coords[c as usize]),
+                        coords[p as usize],
+                        coords[c as usize],
+                        bl.value,
+                        ang.value,
+                        t,
+                    )
+                });
+                match got {
+                    Some(q) => {
+                        coords[x as usize] = q;
+                        placed[x as usize] = true;
+                        parent[x as usize] = Some(c);
+                        queue.push_back(x);
+                    }
+                    None => stats.degenerate += 1,
+                }
+            }
+        }
+
+        // 把这一片沿 +x 挪到上一片右边,免得两片重叠
+        let mut maxx = f64::NEG_INFINITY;
+        for i in 0..n {
+            if placed[i] && !before[i] {
+                coords[i] = coords[i] + Point3::new(shift, 0.0, 0.0);
+                maxx = maxx.max(coords[i].x);
+            }
+        }
+        if maxx.is_finite() {
+            shift = maxx + 5.0;
         }
     }
 
     stats.placed = placed.iter().filter(|x| **x).count();
     // 没摆好、又不在环上、又不是退化的 —— 那就是连不上(多片段)
-    stats.disconnected = stats
+    // **超配位那一档要连下游一起算。** 拒绝一个 ≥5 配位中心的取代基之后,
+    // 那些取代基**下游**的原子 BFS 也到不了 —— 它们同样是"因为路径经过
+    // 不支持的中心而摆不到",不是"连不上"。头一版把它们记进 `disconnected`,
+    // 名字是错的(实测 205 个)。
+    //
+    // 分量是预先算好的,所以剩下的没摆好的原子只可能是这一类:
+    stats.skipped_hypervalent = stats
         .atoms
         .saturating_sub(stats.placed + stats.skipped_ring + stats.degenerate);
+    // 于是这一条该恒为 0 —— 它现在是**守恒检查**,不是一类原因。
+    stats.disconnected = 0;
     Placed {
         coords,
         placed,

@@ -22,16 +22,18 @@ set -eo pipefail
 cd "$(dirname "$0")/.."
 
 
-echo "== 1/5 fmt"
+echo "== 1/6 fmt"
 cargo fmt --all --check
-echo "== 2/5 clippy(警告即失败)"
+echo "== 2/6 clippy(警告即失败)"
 cargo clippy -q --workspace --all-targets -- -D warnings
-echo "== 3/5 测试(release)"
+echo "== 3/6 测试(release)"
 cargo test -q --release
-echo "== 4/5 测试(debug —— 让 debug_assert 真的跑到)"
+echo "== 4/6 测试(debug —— 让 debug_assert 真的跑到)"
 cargo test -q --workspace
-echo "== 5/5 文档"
+echo "== 5/6 语料:初始构型(无环)"
+cargo run -q -p omgkit-conf --release --example conf_audit -- harness/corpus/large.smi
+echo "== 6/6 文档"
 cargo doc -q --workspace --no-deps --document-private-items
 
 echo
-echo "五道闸全过。"
+echo "六道闸全过。"

@@ -18,6 +18,7 @@ omgkit-chem = { path = "../omgkit-chem", version = "0.0.1" }
 
 [dev-dependencies]
 omgkit-io = { path = "../omgkit-io", version = "0.0.1" }
+omgkit-chem = { path = "../omgkit-chem", version = "0.0.1" }
 
 [lints]
 workspace = true

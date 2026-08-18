@@ -85,6 +85,49 @@ pub fn child_torsions(arr: Arrangement, n: usize) -> Vec<f64> {
     }
 }
 
+/// **按排布算:表角 `θ` 之下,兄弟角与 `θ` 应当差多少**(弧度)。
+///
+/// 判据要用它 —— 拿兄弟角直接去比表值是错的口径。两种排布各有各的式子:
+///
+/// | 排布 | 兄弟角 | 与 θ 之差 | 何时为 0 |
+/// |---|---|---|---|
+/// | `Planar` | `2π − 2θ`(三个角和恒为 2π) | `\|2π − 3θ\|` | θ = 120° |
+/// | `Tetrahedral` | `arccos(cos²θ + sin²θ·cos120°)` | 见下 | θ = 109.4712° |
+/// | `Linear` | 没有兄弟 | 0 | 恒 |
+///
+/// **平面那一行是判据自己逮出来的**:我头一版给它写的边界是 0,
+/// 结果氮那个中心(表值 115.60°)实得 128.80°、超出 13.2° 被判红 ——
+/// 而 `360 − 2×115.6 = 128.8`,几何是对的,**错的是我的边界公式**。
+#[must_use]
+pub fn expected_sibling_skew(arr: Arrangement, theta: f64) -> f64 {
+    use std::f64::consts::TAU;
+    match arr {
+        Arrangement::Planar => (TAU - 3.0 * theta).abs(),
+        Arrangement::Tetrahedral => sibling_skew(theta),
+        Arrangement::Linear | Arrangement::Spread => 0.0,
+    }
+}
+
+/// **四面体排布下,表角 `θ` 推出来的兄弟角与 `θ` 差多少**(弧度)。
+///
+/// 4 个取代基有 6 个夹角、而模掉整体转动只有 5 个自由度 —— 超定。
+/// 构造法让"父–子"那几个精确等于 θ,兄弟之间的是推出来的:
+/// 扭转差 120° 时 `cos φ = cos²θ + sin²θ·cos120°`。
+///
+/// 只有 θ **恰好** 109.4712° 时 φ = θ。表里的 109.4° 差 +0.1423°(可忽略);
+/// θ 一远就不行:120° 差 −22.82°、104.5° 差 +9.45°、98.2° 差 +19.80°。
+///
+/// **判据要用它**:拿兄弟角去比表值是错的口径,该比的是"偏差有没有超过这个解析值"。
+#[must_use]
+pub fn sibling_skew(theta: f64) -> f64 {
+    let phi = theta
+        .cos()
+        .mul_add(theta.cos(), theta.sin().powi(2) * -0.5)
+        .clamp(-1.0, 1.0)
+        .acos();
+    (phi - theta).abs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
