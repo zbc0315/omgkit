@@ -62,11 +62,14 @@ jobs:
       - name: 测试(debug —— 让 debug_assert 真的跑到)
         run: cargo test --workspace
 
-      # **五条语料判据。** 它们先前一条都不在闸门里 —— 方案里写着"补上的判据要么
-      # 进 CI,要么至少进闸门表",两处都没做,于是"违例不许涨"只是文档里的一句话。
-      #
-      # 合起来约 47 秒(audit3d 1.9s / angle_audit 1.4s / **c1_audit 42s** /
-      # pucker_audit 1.5s / closure_audit 0.6s),输入(语料与三张参考表)都已入库,
+      # **语料判据。** 判据不进 CI,"违例不许涨"就只是文档里的一句话 ——
+      # 这一步先前是空的:v1 的四条判据随 crate 一起删掉了,而 v2 的这条
+      # 只进了 `harness/gates.sh`(本地),**推送时一条都不执行**。
+      # 于是这一轮新加的闸(消撞单调性、非键地板、片段间距、三条对扭转敏感的棘轮)
+      # 全都没有执行机制。约 1.5 秒,语料已入库,没有额外代价。
+      - name: 语料:初始构型(无环)
+        run: cargo run -p omgkit-conf --release --example conf_audit -- harness/corpus/large.smi
+
       # rustdoc 的断链等三项在 Cargo.toml 里已是 deny,这一步让它真的跑到。
       # **要带 `--document-private-items`**:不带的话 rustdoc 根本不给私有条目
       # 建档,指向它们的断链一条都报不出来 —— 实测漏过三条(两条指向私有 fn

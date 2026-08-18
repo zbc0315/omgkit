@@ -8,7 +8,7 @@
 # 先前每一轮都是现敲一个临时脚本,而临时脚本里写的是:
 #
 #     set -e
-#     cargo run ... --example pucker_audit ... | tail -3
+#     cargo run ... --example conf_audit ... | tail -3
 #
 # **`set -e` 遇到管道只看最后一个命令的退出码**,`tail` 永远成功。
 # 于是判据非 0 退出、脚本照样跑到底,最后打印"全部十道闸通过"。

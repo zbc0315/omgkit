@@ -117,7 +117,7 @@ pub fn symmetry_classes(mol: &MolBuilder) -> Vec<u32> {
 ///
 /// 任何"同一个分子的任何写法必须给出全等结果"的下游:2D 布局
 /// (`omgkit_depict::ranks_of` 就是它)、三维构象生成
-/// (`omgkit_conformer`)。这些地方每一处平局都要按它打破,不能看原子的存储
+/// (`omgkit_conf`)。这些地方每一处平局都要按它打破,不能看原子的存储
 /// 下标。
 ///
 /// **完整的论证、反例与全量对照留在 `omgkit_depict::ranks_of` 的文档里** ——
