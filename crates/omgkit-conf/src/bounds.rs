@@ -47,6 +47,55 @@ pub const VDW_FRAC: f64 = 0.75;
 /// "沿着键网络走过去的最短路",所以这个数只是个占位。
 pub const MAX_UPPER: f64 = 1000.0;
 
+/// 查得到表时,键长区间取 `中位 × (1 ± 这个数)`。
+///
+/// **不用 p05/p95。** 那个跨度装的是查表键(元素+键级+环尺寸)**分辨不了**的
+/// 真实化学差异 —— 拿它当界,等于把"这一类键的全部变化"都允许给每一根键。
+/// 实测我们的 1-2 界宽中位 0.081 Å,而 RDKit 是 0.020 Å,松了 4 倍。
+///
+/// 界要紧,精修才有东西可依;真不该这么紧的会在判据一("真实构象落在界内")
+/// 上现形 —— 两条闸互相顶着,所以这个数是量出来的,不是拍的。
+pub const BOND_REL: f64 = 0.012;
+
+/// 查得到表时,键角区间取 `中位 ± 这个数`(度)。理由同 [`BOND_REL`]。
+pub const ANGLE_TOL: f64 = 2.5;
+
+/// **环内 1-4 的扭转角区间**(度),按共处环的尺寸。
+///
+/// 这是光滑化**推不出来**的信息:它只知道两条路径多长,不知道环是平的。
+/// 实测我们的 1-4 界宽中位 0.758 Å 而 RDKit 是 0.120 Å,松了 6 倍,
+/// 根子就在这里 —— 我给的是"顺式到反式"的全程,而环上的扭转是被锁死的。
+///
+/// | 共处环 | 扭转 | 依据 |
+/// |---|---|---|
+/// | 芳环 | 0° | 平面 |
+/// | 3、4 元 | 0° | 平面(三元必然,四元近似) |
+/// | 5 元 | 0–40° | 信封/半椅 |
+/// | 6 元 | 0–60° | 平面(芳/共轭)到椅式 |
+/// | 7 元及以上 | 0–90° | 柔性 |
+/// | 不共处一环 | 0–180° | 自由旋转 |
+#[must_use]
+pub fn torsion_envelope(shared_ring: usize, aromatic: bool) -> (f64, f64) {
+    // **四个原子不在同一个环里就没有环的约束。**
+    //
+    // 头一版只看"中心键是不是芳香的"就把扭转钉成 0,结果**芳环上的取代基**
+    // (第一个原子在环外)被摁到了错的一侧 —— 它的扭转是 0 **或** 180,
+    // 是个析取,塌成 0 就把上限压死了。实测真实距离 13.018 Å 越界 2.256 Å,
+    // 判据一从 0.4% 炸到 15.3%。
+    if shared_ring == 0 {
+        return (0.0, 180.0);
+    }
+    if aromatic {
+        return (0.0, 0.0);
+    }
+    match shared_ring {
+        3 | 4 => (0.0, 0.0),
+        5 => (0.0, 40.0),
+        6 => (0.0, 60.0),
+        _ => (0.0, 90.0),
+    }
+}
+
 /// 一次界矩阵构建的分级计数。**每一条提前返回都要在这儿留痕。**
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -135,7 +184,12 @@ fn bond_range(mol: &MolBuilder, i: u32, j: u32, min_ring: usize, st: &mut Stats)
         Source::RingRelaxed => st.bond_relaxed += 1,
         Source::Model => st.bond_model += 1,
     }
-    (p.lo, p.hi)
+    // 查得到表就收紧到中位 ± 相对容差;只能用模型时保留它自己那个较宽的区间
+    if p.source == Source::Model {
+        (p.lo, p.hi)
+    } else {
+        (p.value * (1.0 - BOND_REL), p.value * (1.0 + BOND_REL))
+    }
 }
 
 /// 一个中心的键角区间(度)。配位数 ≥ 5 走包络。
@@ -167,7 +221,12 @@ fn angle_range(
         Source::RingRelaxed => st.angle_relaxed += 1,
         Source::Model => st.angle_model += 1,
     }
-    (p.lo.to_degrees(), p.hi.to_degrees())
+    if p.source == Source::Model {
+        (p.lo.to_degrees(), p.hi.to_degrees())
+    } else {
+        let v = p.value.to_degrees();
+        ((v - ANGLE_TOL).max(1.0), (v + ANGLE_TOL).min(180.0))
+    }
 }
 
 /// 一对原子拿到的是哪一档约束。
@@ -297,7 +356,7 @@ pub fn build(mol: &MolBuilder) -> (Bounds, Stats) {
     }
 
     // ---- 1-4:路径 i–k–l–j,扭转角从顺式(0°)到反式(180°) ----
-    for bd in mol.bonds() {
+    for (bidx, bd) in mol.bonds().iter().enumerate() {
         let (k, l) = (bd.begin, bd.end);
         let nk: Vec<u32> = mol
             .neighbors(k)
@@ -329,7 +388,17 @@ pub fn build(mol: &MolBuilder) -> (Bounds, Stats) {
                 ) else {
                     continue;
                 };
-                tighten(&mut b, iu, ju, cis, trans);
+                // **环上的扭转是锁死的,不是顺式到反式的全程。**
+                // 光滑化推不出这件事(它只知道路径长度,不知道环是平的)。
+                let arom = mol.bonds()[bidx].order == omgkit_core::BondOrder::Aromatic;
+                let (t_lo, t_hi) = torsion_envelope(shared_ring(&ring_sets, &[i, k, l, j]), arom);
+                // d² 随 cos(扭转) 单调 —— 端点取遍区间即可
+                let f = |t: f64| {
+                    let c = t.to_radians().cos();
+                    let (a2, b2) = (cis * cis, trans * trans);
+                    (a2 + (b2 - a2) * (1.0 - c) / 2.0).max(0.0).sqrt()
+                };
+                tighten(&mut b, iu, ju, f(t_lo), f(t_hi));
                 kind[iu * n + ju] = Kind::B14;
                 kind[ju * n + iu] = Kind::B14;
                 st.n14 += 1;
@@ -456,9 +525,18 @@ mod tests {
             0,
         );
         let (i, j) = (bd.begin as usize, bd.end as usize);
-        assert!((b.lower(i, j) - want.lo).abs() < 1e-12);
-        assert!((b.upper(i, j) - want.hi).abs() < 1e-12);
-        assert!(b.upper(i, j) - b.lower(i, j) < 0.2, "键长区间不该这么宽");
+        // **断契约:区间必须包住表里的中位,而且要紧。**
+        // 头一版断的是"区间恰好等于 p05/p95" —— 那是把当时的实现抄了一遍,
+        // 一收紧就红,而收紧正是要做的事。
+        assert!(
+            b.lower(i, j) <= want.value && want.value <= b.upper(i, j),
+            "区间 [{:.4}, {:.4}] 没包住表里的中位 {:.4}",
+            b.lower(i, j),
+            b.upper(i, j),
+            want.value
+        );
+        let w = b.upper(i, j) - b.lower(i, j);
+        assert!(w < 0.06, "键长区间宽 {w:.4} —— 太松,精修就没东西可依");
     }
 
     /// **1-3 要由余弦定理算出来。** 水的 H···H:两条 O–H 各约 0.97,夹角约 104.5°。
@@ -471,13 +549,22 @@ mod tests {
             .collect();
         assert_eq!(hs.len(), 2, "水该有两个氢");
         let (lo, hi) = (b.lower(hs[0], hs[1]), b.upper(hs[0], hs[1]));
-        // 手算:0.97 与 104.5° 给 1.53;区间要包住它
-        let d = third_side(0.97, 0.97, 104.5);
+        // **参照取表里的中位,不另找来源。**
+        //
+        // 头一版写死了实验水的 0.97 Å / 104.5°(给 1.534),而区间是 [1.545, 1.633] ——
+        // 差 0.011 Å 被判红。查下来不是代码错:参数表是从 **MMFF 优化过的结构**
+        // 量出来的,**MMFF 的水不是实验的水**。拿另一个来源的数当参照,
+        // 量的就不是"余弦定理有没有用对",而是"两个来源合不合"。
+        //
+        // 这里断的是契约:区间必须以"表里的中位键长 + 中位键角按余弦定理算出的值"为心。
+        let bl = params::bond_length(8, 1, omgkit_core::BondOrder::Single, 0).value;
+        let ang = params::angle(8, 2, false, 0, 0).value.to_degrees();
+        let d = third_side(bl, bl, ang);
         assert!(
             lo <= d && d <= hi,
-            "H···H 区间 [{lo:.3}, {hi:.3}] 没包住手算的 {d:.3}"
+            "H···H 区间 [{lo:.3}, {hi:.3}] 没包住表算的 {d:.3}(键长 {bl:.3}、键角 {ang:.1}°)"
         );
-        assert!(hi - lo < 0.5, "区间 [{lo:.3}, {hi:.3}] 太宽了");
+        assert!(hi - lo < 0.2, "区间 [{lo:.3}, {hi:.3}] 太宽了");
     }
 
     /// **配位数 ≥5 走包络,而且比 RDKit 那个 `[1.0, 1.2×(b₁+b₂)]` 紧。**
