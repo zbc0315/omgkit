@@ -1,0 +1,25 @@
+[package]
+name = "omgkit-conf"
+description = "Deterministic 3D conformer generation for omgkit: distance geometry without the dice"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+omgkit-core = { path = "../omgkit-core", version = "0.0.1" }
+omgkit-chem = { path = "../omgkit-chem", version = "0.0.1" }
+
+[dev-dependencies]
+omgkit-io = { path = "../omgkit-io", version = "0.0.1" }
+# 判官读 RDKit 导出的界矩阵 JSONL
+serde_json = "1"
+
+[lints]
+workspace = true

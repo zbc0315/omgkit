@@ -6,6 +6,7 @@ members = [
     "crates/omgkit-chem",
     "crates/omgkit-match",
     "crates/omgkit-depict",
+    "crates/omgkit-conf",
     "crates/omgkit-py",
 ]
 
@@ -23,6 +24,7 @@ default-members = [
     "crates/omgkit-chem",
     "crates/omgkit-match",
     "crates/omgkit-depict",
+    "crates/omgkit-conf",
 ]
 
 [workspace.package]
