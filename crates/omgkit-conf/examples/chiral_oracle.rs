@@ -15,7 +15,10 @@
 //! cargo run -p omgkit-conf --release --example chiral_oracle
 //! ```
 
+use omgkit_conf::bounds;
 use omgkit_conf::chiral;
+use omgkit_conf::embed::{embed, reference_distances};
+use omgkit_conf::smooth::triangle_smooth;
 use omgkit_core::{BondOrder, ChiralTag, MolBuilder};
 
 /// 符号预测错的中心数上限。**这一条必须是 0** ——
@@ -27,6 +30,22 @@ const MAX_WRONG: u64 = 0;
 /// **单看"符号正确率"是不够的**:一个什么都不抽的实现,正确率是 0/0,
 /// 而 0 个错误 —— 单向的闸又会奖励"什么都不做"。
 const MAX_MISSED: u64 = 0;
+
+/// 做完一次全局反射之后,手性号正确的中心占比**下限**。
+///
+/// # 这个数决定了要不要上四维
+///
+/// 实测(247 个中心):嵌完直接对的 **53.0%** —— 基本就是掷硬币,
+/// 与"嵌入给出的坐标系定向是任意的"完全吻合。做一次全局反射之后 **86.2%**。
+///
+/// 剩下的 13.8% 是**个别中心相对多数错**,全局反射按定义救不了它们。
+/// 但那一档**三维精修救得了**:翻一个中心只要它自己的手性体积过零,
+/// 是局部的、有限的势垒;而全局反射要求**所有**中心同时压平 ——
+/// 两者的势垒不是一个量级。所以四维先不做,等精修落地之后量剩下多少再说。
+///
+/// 闸设在 0.80,是贴着现值 0.862 的棘轮:全局反射那段逻辑一旦退化,
+/// 这个数会掉回 0.53 附近,当场就红。
+const MIN_CHIRAL_AFTER_REFLECT: f64 = 0.80;
 
 fn floats3(v: &serde_json::Value) -> Vec<[f64; 3]> {
     v.as_array()
@@ -60,6 +79,9 @@ fn main() {
     let (mut n_mol, mut n_build_fail) = (0u64, 0u64);
     let (mut n_truth, mut n_found, mut n_wrong, mut n_missed) = (0u64, 0u64, 0u64, 0u64);
     let (mut n_vol_bad, mut worst_vol) = (0u64, 0.0f64);
+    // 嵌入之后手性对不对 —— 这一组数决定"要不要上四维"
+    let (mut n_emb_total, mut n_emb_before, mut n_emb_after) = (0u64, 0u64, 0u64);
+    let (mut n_reflected, mut n_mol_embedded, mut n_mol_all_right) = (0u64, 0u64, 0u64);
     let mut wrong_cases: Vec<String> = Vec::new();
 
     for line in text.lines() {
@@ -151,6 +173,33 @@ fn main() {
 
         let got = chiral::centers(&m);
         n_found += got.len() as u64;
+
+        // ---- 顺带量一件决定性的事:**嵌入给出的手性对不对,全局反射能救回多少** ----
+        //
+        // 这个数直接决定"要不要上四维"。RDKit 一有手性中心就嵌到四维,
+        // 为的是让手性能连续翻(三维里翻不了,反射不在 SO(3) 连通分支里)。
+        // 如果嵌入 + 一次离散的全局反射就能把绝大多数中心弄对,四维就不必做。
+        if !got.is_empty() {
+            let (mut bm, _) = bounds::build(&m);
+            if triangle_smooth(&mut bm).is_ok() {
+                if let Ok(e) = embed(&reference_distances(&bm), nat) {
+                    let before = chiral::correct_count(&e.coords, &got);
+                    let mut c2 = e.coords.clone();
+                    if chiral::needs_reflection(&c2, &got) {
+                        chiral::reflect(&mut c2);
+                        n_reflected += 1;
+                    }
+                    let after = chiral::correct_count(&c2, &got);
+                    n_emb_total += got.len() as u64;
+                    n_emb_before += before as u64;
+                    n_emb_after += after as u64;
+                    if after == got.len() {
+                        n_mol_all_right += 1;
+                    }
+                    n_mol_embedded += 1;
+                }
+            }
+        }
         for &(atom, _, sign) in &truth {
             let Some(c) = got.iter().find(|c| c.atom == atom) else {
                 n_missed += 1;
@@ -178,11 +227,33 @@ fn main() {
     println!("  真值里的中心 {n_truth} 个;我们抽出 {n_found} 个,漏 {n_missed}(上限 {MAX_MISSED})");
     println!("  符号预测错 {n_wrong} 个(上限 {MAX_WRONG})");
     println!("  拿真实坐标复算体积、号对不上的 {n_vol_bad} 个");
+    #[allow(clippy::cast_precision_loss)]
+    let pct = |a: u64, b: u64| 100.0 * a as f64 / b.max(1) as f64;
+    println!("  ── 嵌入之后的手性(决定要不要上四维)──");
+    println!(
+        "    中心 {n_emb_total} 个:嵌完直接对的 {n_emb_before}({:.1}%),\
+         做一次全局反射之后 {n_emb_after}({:.1}%)",
+        pct(n_emb_before, n_emb_total),
+        pct(n_emb_after, n_emb_total)
+    );
+    println!(
+        "    分子 {n_mol_embedded} 个:翻了 {n_reflected} 个;**全部中心都对**的 {n_mol_all_right}({:.1}%)",
+        pct(n_mol_all_right, n_mol_embedded)
+    );
     if !wrong_cases.is_empty() {
         println!("  错的例子:{}", wrong_cases.join("  "));
     }
 
     let mut fatal = false;
+    // 全局反射不是可有可无的一步:没有它,手性正确率就是掷硬币(实测 53%)。
+    if pct(n_emb_after, n_emb_total) / 100.0 < MIN_CHIRAL_AFTER_REFLECT {
+        eprintln!(
+            "\n全局反射之后手性正确率只有 {:.1}% < {:.0}% —— 反射那段退化了",
+            pct(n_emb_after, n_emb_total),
+            100.0 * MIN_CHIRAL_AFTER_REFLECT
+        );
+        fatal = true;
+    }
     if n_truth == 0 {
         eprintln!("\n真值里一个手性中心都没有 —— 基准文件不对");
         fatal = true;
