@@ -97,3 +97,8 @@ jobs:
       # 全程 0.7 秒)—— 400 个分子的样本量撑不住 0.3% 量级的判据。
       - name: 判官:全语料界可行率(头号指标)
         run: cargo run -p omgkit-conf --release --example feasibility -- harness/corpus/large.smi
+
+      # 手性:槽位约定排错的话**错法整批一致**,正确率不是 0% 就是 100% ——
+      # 这种错只能拿真值比,推不出来。真值是真实构象上量出来的有符号体积。
+      - name: 判官:手性中心(真值取自真实构象)
+        run: cargo run -p omgkit-conf --release --example chiral_oracle -- harness/baseline/smoke.chirality.jsonl
