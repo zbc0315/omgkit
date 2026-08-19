@@ -83,6 +83,10 @@ pub const DIST12_TOL: f64 = 0.01;
 /// 不是把两端键长区间的端点乘进去。头一版那么做,键长的松会**复利**进 1-3。
 pub const DIST13_TOL: f64 = 0.04;
 
+/// 1-4 距离的绝对容差(Å)。对应 RDKit 的 `GEN_DIST_TOL`(`BoundsMatrixBuilder.cpp:33`),
+/// 它把解掉析取的 1-4 钉成宽度 `2 × 0.06 = 0.12`,与实测中位逐位吻合。
+pub const DIST14_TOL: f64 = 0.06;
+
 /// 键长区间的相对容差 —— 只在**查不到表、只能用共价半径模型**时用。
 ///
 /// 模型的不确定度本来就大,给绝对容差不诚实。
@@ -138,7 +142,9 @@ pub const ANGLE_TOL: f64 = 2.5;
 /// 硬给一个内插值是在编数。
 #[must_use]
 pub fn ring_internal_torsion(size: usize, aromatic: bool) -> (f64, f64) {
-    static T: std::sync::OnceLock<std::collections::HashMap<(usize, bool), (f64, f64)>> =
+    /// 一行:`(中位, p05, p95)`,单位度。
+    type Row = (f64, f64, f64);
+    static T: std::sync::OnceLock<std::collections::HashMap<(usize, bool), Row>> =
         std::sync::OnceLock::new();
     let t = T.get_or_init(|| {
         let mut m = std::collections::HashMap::new();
@@ -158,11 +164,23 @@ pub fn ring_internal_torsion(size: usize, aromatic: bool) -> (f64, f64) {
             ) else {
                 continue;
             };
-            m.insert((sz, ar == 1), (p05, p95));
+            let Ok(med) = f[3].parse::<f64>() else {
+                continue;
+            };
+            m.insert((sz, ar == 1), (med, p05, p95));
         }
         m
     });
-    t.get(&(size, aromatic)).copied().unwrap_or((0.0, 180.0))
+    // **取中位那一个值,不取 p05/p95 区间** —— 与 1-2、1-3 同一条道理:
+    // 分位跨度装的是"这一类环能有多不一样",而界矩阵要的是"这一个环该多扭"。
+    // 偏了由精修拉回,偏太多在判据一上现形。
+    //
+    // 饱和六元环的中位是 20.9° 而不是椅式的 55°,因为这一档里混着共轭近平面的环 ——
+    // 我们只生成**一个**构型,挑中位是诚实的选择,力场会把它带到该去的极小。
+    //
+    // 表里没有的尺寸(10~15、17 以上)退到全程 —— 大环本来就柔,内插是在编数。
+    t.get(&(size, aromatic))
+        .map_or((0.0, 180.0), |&(med, _, _)| (med, med))
 }
 
 /// **中心键是有立体标记的双键时,一条 1-4 路径的扭转角是确定值。**
@@ -610,7 +628,8 @@ pub fn build(mol: &MolBuilder) -> (Bounds, Stats) {
                     let (a2, b2) = (cis * cis, trans * trans);
                     (a2 + (b2 - a2) * (1.0 - c) / 2.0).max(0.0).sqrt()
                 };
-                tighten(&mut b, iu, ju, f(t_lo), f(t_hi));
+                // 扭转被定死时,区间宽度就来自这个容差(与 RDKit 的 GEN_DIST_TOL 同值)
+                tighten(&mut b, iu, ju, f(t_lo) - DIST14_TOL, f(t_hi) + DIST14_TOL);
                 kind[iu * n + ju] = Kind::B14;
                 kind[ju * n + iu] = Kind::B14;
                 st.n14 += 1;
@@ -882,9 +901,14 @@ mod tests {
             widths.len()
         );
         let worst = widths.iter().fold(0.0f64, |a, x| a.max(*x));
+        // **用常数表达,不写死数字。** 头一版这里写 `< 0.05`,而"钉住"的宽度
+        // 后来变成 `2 × DIST14_TOL = 0.12` —— 断言当场红,可代码是**对的**
+        // (那正是与 RDKit 相同的钉死宽度)。判据里的阈值一旦与被判的量脱钩,
+        // 就会在下一次改进时冒充失败。
         assert!(
-            worst < 0.05,
-            "苯的 1-4 最宽 {worst:.4} Å —— 芳环扭转没被钉住"
+            worst <= 2.0 * DIST14_TOL + 1e-9,
+            "苯的 1-4 最宽 {worst:.4} Å,超过钉死宽度 {:.4} —— 芳环扭转没被钉住",
+            2.0 * DIST14_TOL
         );
     }
 
