@@ -47,7 +47,31 @@ pub const VDW_FRAC: f64 = 0.75;
 /// "沿着键网络走过去的最短路",所以这个数只是个占位。
 pub const MAX_UPPER: f64 = 1000.0;
 
-/// 查得到表时,键长区间取 `中位 × (1 ± 这个数)`。
+/// 1-2 距离的绝对容差(Å):区间取 `中位 ± 这个数`。
+///
+/// **与 RDKit 的 `DIST12_DELTA`(`BoundsMatrixBuilder.cpp:27`)取同一个值**,
+/// 它的 1-2 界宽中位 0.020 就是 `2 × 0.01`,逐位对得上。
+///
+/// # 为什么不用统计分位
+///
+/// 头一版用中位 ±1.2%(相对),得到 0.032 —— 比 RDKit 松 1.6 倍。那个宽度里
+/// 装的是**查表键(元素+键级+环尺寸)分辨不了的桶内化学差异**,而界矩阵要的是
+/// "这一根键该多长",不是"这一类键能有多不一样"。
+///
+/// RDKit 的自信来自 UFF 给的键长就是一个确定值。我们的中位同样是一个确定值,
+/// 差别只在它偏多少 —— 而这个目标是**给力场的起点**,偏一点由精修拉回中点。
+/// 偏太多会在判据一("真实构象必须落在界内")上现形,所以这个数是有闸看着的。
+pub const DIST12_TOL: f64 = 0.01;
+
+/// 1-3 距离的绝对容差(Å)。同 [`DIST12_TOL`],对应 RDKit 的 `DIST13_TOL`。
+///
+/// **1-3 由中位键长 + 中位键角按余弦定理算出一个值,再 ± 这个容差** ——
+/// 不是把两端键长区间的端点乘进去。头一版那么做,键长的松会**复利**进 1-3。
+pub const DIST13_TOL: f64 = 0.04;
+
+/// 键长区间的相对容差 —— 只在**查不到表、只能用共价半径模型**时用。
+///
+/// 模型的不确定度本来就大,给绝对容差不诚实。
 ///
 /// **不用 p05/p95。** 那个跨度装的是查表键(元素+键级+环尺寸)**分辨不了**的
 /// 真实化学差异 —— 拿它当界,等于把"这一类键的全部变化"都允许给每一根键。
@@ -325,9 +349,9 @@ fn bond_range(mol: &MolBuilder, i: u32, j: u32, min_ring: usize, st: &mut Stats)
     }
     // 查得到表就收紧到中位 ± 相对容差;只能用模型时保留它自己那个较宽的区间
     if p.source == Source::Model {
-        (p.lo, p.hi)
-    } else {
         (p.value * (1.0 - BOND_REL), p.value * (1.0 + BOND_REL))
+    } else {
+        (p.value - DIST12_TOL, p.value + DIST12_TOL)
     }
 }
 
@@ -489,10 +513,25 @@ pub fn build(mol: &MolBuilder) -> (Bounds, Stats) {
                 }
                 let shared = shared_ring(&ring_sets, &[nb[x], cu, nb[y]]);
                 let (ang_lo, ang_hi) = angle_range(mol, cu, self_ring, shared, &mut st);
-                let (b1lo, b1hi) = (b.lower(i, c), b.upper(i, c));
-                let (b2lo, b2hi) = (b.lower(c, j), b.upper(c, j));
-                let lo = third_side(b1lo, b2lo, ang_lo);
-                let hi = third_side(b1hi, b2hi, ang_hi);
+                // **由中点算一个值,再 ± 绝对容差。**
+                // 头一版拿两端键长区间的端点配最小/最大角,键长的松会**复利**进 1-3。
+                let b1 = ((b.lower(i, c)) + (b.upper(i, c))) / 2.0;
+                let b2 = ((b.lower(c, j)) + (b.upper(c, j))) / 2.0;
+                // **角也取中点,不取区间端点。** `DIST13_TOL` 本来就是用来吸收
+                // 角度不确定度的,再叠一个角度区间等于把同一件事算两遍 ——
+                // 实测那样 1-3 界宽 0.141,而只用中点是 0.080(与 RDKit 相同)。
+                //
+                // 配位数 ≥5 的中心是例外:它的"角"是个**包络**(八面体 90 或 180),
+                // 那是真的析取,不能塌成中点。
+                let (lo, hi) = if ang_hi - ang_lo > 2.0 * ANGLE_TOL + 1e-9 {
+                    (
+                        third_side(b1, b2, ang_lo) - DIST13_TOL,
+                        third_side(b1, b2, ang_hi) + DIST13_TOL,
+                    )
+                } else {
+                    let d = third_side(b1, b2, ((ang_lo) + (ang_hi)) / 2.0);
+                    (d - DIST13_TOL, d + DIST13_TOL)
+                };
                 // **取交集,不是覆盖。** 三元/四元环里同一对可以既是 1-2 又是 1-3,
                 // 头一版直接覆盖,把成键的那一对写成了 1-3 的距离。
                 tighten(&mut b, i, j, lo, hi);
@@ -858,7 +897,7 @@ mod tests {
             assert_eq!(cs.len(), 2, "2-丁烯该有两个端甲基");
             let (lo, hi) = (b.lower(cs[0], cs[1]), b.upper(cs[0], cs[1]));
             assert!(hi - lo < 0.30, "区间 [{lo:.3}, {hi:.3}] 没被立体标记钉住");
-            got.push(f64::midpoint(lo, hi));
+            got.push(((lo) + (hi)) / 2.0);
         }
         assert!(
             got[1] - got[0] > 0.5,
