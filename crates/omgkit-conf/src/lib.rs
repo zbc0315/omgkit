@@ -103,3 +103,4 @@ pub mod embed;
 pub mod linalg;
 pub mod params;
 pub mod smooth;
+pub mod threading;

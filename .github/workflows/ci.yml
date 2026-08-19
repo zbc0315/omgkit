@@ -106,6 +106,13 @@ jobs:
       - name: 判官:难例语料的界可行率(通用性)
         run: cargo run -p omgkit-conf --release --example feasibility -- harness/corpus/hard.smi
 
+      # **自穿。** 精修阶段"力场里放全部 N² 对"这个改动的目的就是防自穿,
+      # 而目的必须有判据 —— 否则收益证明不了,也防不住后续改动把它弄丢。
+      # 判据分两步且顺序不能反:**先拿真实构象校准检测器**(真实分子里没有自穿,
+      # 报出来就是检测器在乱报),再量我们自己嵌出来的坐标。
+      - name: 判官:自穿(先校准检测器,再量自己)
+        run: cargo run -p omgkit-conf --release --example threading_oracle -- harness/baseline/smoke.bounds.jsonl
+
       # 手性:槽位约定排错的话**错法整批一致**,正确率不是 0% 就是 100% ——
       # 这种错只能拿真值比,推不出来。真值是真实构象上量出来的有符号体积。
       - name: 判官:手性中心(真值取自真实构象)
