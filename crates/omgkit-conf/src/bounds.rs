@@ -14,7 +14,7 @@
 //! | 1-2(成键) | 实测键长表的 `p05`/`p95` |
 //! | 1-3(隔一个原子) | 实测键角表 + 余弦定理 |
 //! | 1-4(隔两个原子) | 扭转角从顺式转到反式,取距离的两端 |
-//! | ≥1-5 | 下限 = vdW 半径之和 ×[`VDW_FRAC`];上限交给三角光滑化去收 |
+//! | ≥1-5 | 下限 = vdW 半径之和 ×按拓扑距离分档的 vdW 系数;上限交给三角光滑化去收 |
 //!
 //! **环不需要特殊处理**:环上两个原子之间有两条路径,光滑化取最短那条,
 //! 上限自然被压到"绕不过去"的值。稠环、螺环、桥环、大环同理 —— 一条代码都不用加。
@@ -35,11 +35,25 @@ use crate::params::{self, Source};
 use crate::smooth::Bounds;
 use omgkit_core::MolBuilder;
 
-/// 非键原子对的下限 = 两个 vdW 半径之和乘这个系数。
+/// **非键下限的系数,按拓扑距离分档**(与 RDKit `BoundsMatrixBuilder.cpp:262-288` 同法)。
 ///
-/// 不取 1.0:真实分子里非键接触**本来就压得比 vdW 之和近**(氢键、堆积),
-/// 取 1.0 会让界矩阵与现实矛盾。0.75 是本仓一贯用的值。
-pub const VDW_FRAC: f64 = 0.75;
+/// | 拓扑距离 | 系数 | 理由 |
+/// |---|---|---|
+/// | 4(1-5) | 0.70 | 被链拽在一起,挤得动 |
+/// | 5(1-6) | 0.85 | 少挤一点 |
+/// | ≥6 | 1.00 | 没理由比 vdW 接触还近 |
+///
+/// 头一版一律用 0.75,理由写的是"真实分子里非键接触本来就压得比 vdW 之和近"。
+/// **那句话只对拓扑上近的成立** —— 远处的原子对没有链把它们拽在一起,
+/// 而把它们的下限压到 0.75 就等于白白放宽 6.7 万对(语料里占总数六成)的区间。
+#[must_use]
+pub fn vdw_frac(topo_dist: usize) -> f64 {
+    match topo_dist {
+        0..=4 => 0.70,
+        5 => 0.85,
+        _ => 1.00,
+    }
+}
 
 /// 没有任何约束的原子对,上限先给这个数(Å),交给三角光滑化去收。
 ///
@@ -604,6 +618,30 @@ pub fn build(mol: &MolBuilder) -> (Bounds, Stats) {
         }
     }
 
+    // 拓扑距离(封顶 6:分档只用到 4/5/≥6)
+    let mut topo = vec![6u8; n * n];
+    for start in 0..n {
+        let mut d = vec![u8::MAX; n];
+        d[start] = 0;
+        let mut q = std::collections::VecDeque::from([start]);
+        while let Some(x) = q.pop_front() {
+            if d[x] >= 6 {
+                continue;
+            }
+            let Ok(xu) = u32::try_from(x) else { continue };
+            for (y, _) in mol.neighbors(xu) {
+                let y = y as usize;
+                if y < n && d[y] == u8::MAX {
+                    d[y] = d[x] + 1;
+                    q.push_back(y);
+                }
+            }
+        }
+        for j in 0..n {
+            topo[start * n + j] = d[j].min(6);
+        }
+    }
+
     // ---- vdW 地板:**只铺给没有拓扑约束的对** ----
     // 1-2/1-3/1-4 是被键角扭转钉死的,它们本来就可以比 vdW 之和近
     // (sp 中心的 1-3 只有 2.3 Å,而 C···C 的 0.75×vdW 是 2.55)——
@@ -613,7 +651,7 @@ pub fn build(mol: &MolBuilder) -> (Bounds, Stats) {
             if kind[i * n + j] != Kind::None {
                 continue;
             }
-            let d0 = VDW_FRAC
+            let d0 = vdw_frac(topo[i * n + j] as usize)
                 * (params::vdw_radius(mol.atoms()[i].atomic_num)
                     + params::vdw_radius(mol.atoms()[j].atomic_num));
             if d0 > b.lower(i, j) {
