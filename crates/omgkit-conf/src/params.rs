@@ -227,14 +227,35 @@ pub fn angle(
         (sym.to_string(), degree, ar, ring_self, ring_shared),
         Source::Table,
     )];
-    // 环那两维查不到就放宽(先放共处环,再放中心环)
+    // # 放宽的顺序:**先归一化 `ring_self`,绝不先丢 `ring_shared`**
+    //
+    // `ring_shared != 0` 的意思是"这三个原子同在一个 `ring_shared` 元环里",
+    // 也就是**这个角是环内角**,由闭环几何直接定死 —— 它才是信息量所在。
+    // `ring_self` 只说中心原子自己在多大的环里,是附带的。
+    //
+    // 这里原先反着写:先丢 `ring_shared`。后果是把**环内角退成环外角**,
+    // 而那两个值在化学上是相反的 —— 表里 (C,4,0,3,3)=59.3° 是三元环的环内角,
+    // (C,4,0,3,0)=117.7° 是三元环碳上两个**环外**取代基之间的角
+    // (正因为环内被压到 59°,环外才张到 118°)。
+    //
+    // 实例:双环[1.1.0]丁烷 `C1CC2C1C2` 的一个角 `ring_self=3、ring_shared=4`,
+    // 而表里没有 (3,4) —— 旧顺序退到 (3,0)=117.7°,真值约 87°,**错 30.5°**。
+    // 这个 30° 直接把 1-3 的区间推到与另一个中心给的区间不相交,分子当场不可行。
     if ring_shared != 0 {
+        // 角在一个 `ring_shared` 元环里 ⟹ 中心原子必然也在这个环里,
+        // 所以把 `ring_self` 归一到 `ring_shared` 是**物理上自洽**的放宽,
+        // 不是丢信息。上例走这一步就查到 (4,4)=87.2°。
+        tries.push((
+            (sym.to_string(), degree, ar, ring_shared, ring_shared),
+            Source::RingRelaxed,
+        ));
+    }
+    if ring_shared == 0 && ring_self != 0 {
+        // 只有确认了"这个角不在任何环里",退到环外那一档才是对的
         tries.push((
             (sym.to_string(), degree, ar, ring_self, 0),
             Source::RingRelaxed,
         ));
-    }
-    if ring_self != 0 {
         tries.push(((sym.to_string(), degree, ar, 0, 0), Source::RingRelaxed));
     }
     for (k, src) in tries {
@@ -247,7 +268,39 @@ pub fn angle(
             };
         }
     }
+    // 环内角查不到就用闭环模型,**不许掉进环外那一档** —— 见上面的理由。
+    if ring_shared != 0 {
+        return ring_angle_model(ring_shared, degree);
+    }
     angle_model(center, degree)
+}
+
+/// 环内角查不到表时的兜底:平面多边形的内角与 VSEPR 理想角取小的那个。
+///
+/// 平面 `R` 元环的内角是 `180° − 360°/R`(三元 60°、四元 90°、五元 108°、
+/// 六元 120°)。小环被闭环几何压死,取多边形值;环大到内角超过 VSEPR 理想角时,
+/// 环会**皱**起来而不是把角撑开,这时理想角才是对的 —— 所以取 `min`。
+///
+/// 对着实测中位核一遍:三元 60 / 59.3、四元 90 / 87.2、五元 108 / 103.3、
+/// 六元 109.5 / 111.6、七元 109.5 / 114.0。够当兜底,不够当主路径 ——
+/// 所以它只在表里查不到时才走到。
+fn ring_angle_model(ring_size: usize, degree: usize) -> Param {
+    #[allow(clippy::cast_precision_loss)]
+    let polygon = 180.0 - 360.0 / ring_size.max(3) as f64;
+    let ideal: f64 = match degree {
+        0..=2 => 180.0,
+        3 => 120.0,
+        _ => 109.471,
+    };
+    let v = polygon.min(ideal);
+    // 兜底的区间给宽一点:这一档本来就是"没数据",宁可界松也别把真实几何排除在外 ——
+    // 界松只是让精修多干活,界空是直接判死一个分子。
+    Param {
+        value: v.to_radians(),
+        lo: (v - 10.0).to_radians(),
+        hi: (v + 10.0).to_radians(),
+        source: Source::Model,
+    }
 }
 
 /// 查不到表时的键角兜底:按配位数回退到 VSEPR 的理想角。

@@ -22,15 +22,15 @@ set -eo pipefail
 cd "$(dirname "$0")/.."
 
 
-echo "== 1/8 fmt"
+echo "== 1/9 fmt"
 cargo fmt --all --check
-echo "== 2/8 clippy(警告即失败)"
+echo "== 2/9 clippy(警告即失败)"
 cargo clippy -q --workspace --all-targets -- -D warnings
-echo "== 3/8 测试(release)"
+echo "== 3/9 测试(release)"
 cargo test -q --release
-echo "== 4/8 测试(debug —— 让 debug_assert 真的跑到)"
+echo "== 4/9 测试(debug —— 让 debug_assert 真的跑到)"
 cargo test -q --workspace
-echo "== 5/8 文档"
+echo "== 5/9 文档"
 cargo doc -q --workspace --no-deps --document-private-items
 
 # ---- 三个外部判官 ----
@@ -48,12 +48,18 @@ cargo doc -q --workspace --no-deps --document-private-items
 # (光滑化要逐位相同、特征值要对上 LAPACK、真实构象要精确回嵌),
 # 那两条在 27 个分子上照样抓得住错。
 SMOKE=harness/baseline/smoke.bounds.jsonl
-echo "== 6/8 判官:三角光滑化 vs RDKit"
+echo "== 6/9 判官:三角光滑化 vs RDKit"
 cargo run -q -p omgkit-conf --release --example smooth_oracle -- "$SMOKE"
-echo "== 7/8 判官:界矩阵(三条)"
+echo "== 7/9 判官:界矩阵(三条)"
 cargo run -q -p omgkit-conf --release --example bounds_oracle -- "$SMOKE"
-echo "== 8/8 判官:特征分解 vs LAPACK + 精确回嵌"
+echo "== 8/9 判官:特征分解 vs LAPACK + 精确回嵌"
 cargo run -q -p omgkit-conf --release --example eigen_oracle -- "$SMOKE" harness/baseline/smoke.gram_eigs.jsonl
 
+# 头号指标:界不可行的分子占比。跑**全语料 8831 个**,不跑冒烟档 ——
+# 400 个样本上真实率 0.34% 只对应 1.4 个分子,泊松噪声足以让闸随机红绿。
+# 语料随仓库入库(342 K),全程 0.7 秒。
+echo "== 9/9 判官:全语料界可行率(头号指标)"
+cargo run -q -p omgkit-conf --release --example feasibility -- harness/corpus/large.smi
+
 echo
-echo "八道闸全过。"
+echo "九道闸全过。"

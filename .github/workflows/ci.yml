@@ -91,3 +91,9 @@ jobs:
 
       - name: 判官:特征分解 vs LAPACK + 精确回嵌
         run: cargo run -p omgkit-conf --release --example eigen_oracle -- harness/baseline/smoke.bounds.jsonl harness/baseline/smoke.gram_eigs.jsonl
+
+      # **头号指标。** 界不可行的分子连嵌入都进不去,直接计入失败,而项目要赢的
+      # 就是 RDKit ETKDG 的 0.52%。这一条跑**全语料**(8831 个分子,语料随仓库入库,
+      # 全程 0.7 秒)—— 400 个分子的样本量撑不住 0.3% 量级的判据。
+      - name: 判官:全语料界可行率(头号指标)
+        run: cargo run -p omgkit-conf --release --example feasibility -- harness/corpus/large.smi

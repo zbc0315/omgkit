@@ -305,6 +305,17 @@ pub struct Stats {
     pub n13: usize,
     /// 写下的 1-4 约束条数。
     pub n14: usize,
+    /// **两条 1-3 估计交空、只好退回并集的次数。**
+    ///
+    /// 小环里同一对原子会同时是两个不同中心的 1-3(氧杂环丁烷 `C1COC1` 的
+    /// C1···C3 既经 C0 也经 O2)。两条估计各带 ±[`DIST13_TOL`],
+    /// 两张表行差过 `2×DIST13_TOL` 就交不上。
+    ///
+    /// **这个数量的是参数表的自相矛盾,不是分子的毛病。** 先前硬交集会把它
+    /// 变成一个空区间,于是查表精度问题伪装成"分子不可行"计进覆盖率损失 ——
+    /// 全语料 8831 个分子里有 21 个是这么死的。现在退并集保住可行性,
+    /// 但**必须留下这个计数**,否则表越写越矛盾也没人看得见。
+    pub n13_conflict: usize,
     /// **由 1-5 链式约束写下的条数。**
     ///
     /// 一条 5 原子路径上两个扭转都被钉住时,整段几何就定死了 ——
@@ -446,13 +457,28 @@ enum Kind {
 }
 
 /// 把 `[lo, hi]` **交**进已有区间(取更紧的那一侧)。
-fn tighten(b: &mut Bounds, i: usize, j: usize, lo: f64, hi: f64) {
-    if lo > b.lower(i, j) {
-        b.set_lower(i, j, lo);
+fn tighten(b: &mut Bounds, i: usize, j: usize, lo: f64, hi: f64) -> bool {
+    let (clo, chi) = (b.lower(i, j), b.upper(i, j));
+    let (nlo, nhi) = (clo.max(lo), chi.min(hi));
+    if nlo <= nhi {
+        b.set_lower(i, j, nlo);
+        b.set_upper(i, j, nhi);
+        return false;
     }
-    if hi < b.upper(i, j) {
-        b.set_upper(i, j, hi);
-    }
+    // **交空了不等于这个分子摆不出来。**
+    //
+    // 两条约束各自带 ±DIST13_TOL = 0.04 Å,只要两张表行差过 0.08 Å 就交不上。
+    // 那说的是**参数表自相矛盾**,不是几何不可能 —— 而硬交集会把它伪装成
+    // "分子不可行",于是一个查表精度问题被记成了覆盖率损失。
+    //
+    // 交空时退回**并集**(RDKit 的 `_checkAndSetBounds` 一直是这么做的,
+    // 它旁边的注释写着 "conservative bound setting")。这样比 RDKit 严:
+    // 交得上时我们取交集拿到更紧的界,交不上才退到与它相同的并集。
+    //
+    // **退了必须记账** —— 见 `Stats::n13_conflict`。
+    b.set_lower(i, j, clo.min(lo));
+    b.set_upper(i, j, chi.max(hi));
+    true
 }
 
 /// 每个原子所在的最小环尺寸(不在环里记 0),以及环的原子集合。
@@ -572,9 +598,20 @@ pub fn build(mol: &MolBuilder) -> (Bounds, Stats) {
                     let d = third_side(b1, b2, ((ang_lo) + (ang_hi)) / 2.0);
                     (d - DIST13_TOL, d + DIST13_TOL)
                 };
-                // **取交集,不是覆盖。** 三元/四元环里同一对可以既是 1-2 又是 1-3,
-                // 头一版直接覆盖,把成键的那一对写成了 1-3 的距离。
-                tighten(&mut b, i, j, lo, hi);
+                // **这一对已经是键了就别写 1-3。** 三元/四元环里同一对可以既是
+                // 1-2 又是 1-3(环硫乙烷 `C1CS1` 的两个碳既成键、又同时连着硫)。
+                // 直接量到的键长比"两根键 + 夹角推出来的距离"可靠得多,
+                // 让角推的那个去挤键,是拿差的信息覆盖好的信息。
+                //
+                // 头一版是硬交集,于是 `C1CS1` 的 C–C 被推成 [1.4980 > 1.3829] ——
+                // **连成键那一对都被 1-3 干掉了**,分子当场不可行。
+                if kind[i * n + j] == Kind::B12 {
+                    continue;
+                }
+                // 取交集,不是覆盖;交空了退并集并记账(见 `tighten`)
+                if tighten(&mut b, i, j, lo, hi) {
+                    st.n13_conflict += 1;
+                }
                 if kind[i * n + j] == Kind::None {
                     kind[i * n + j] = Kind::B13;
                     kind[j * n + i] = Kind::B13;
@@ -775,6 +812,18 @@ mod tests {
             "FS(F)(F)(F)(F)F",    // 超配位
             "N[Co](N)(N)(N)(N)N", // 金属配合物
             "C1CCCCCCCCCCC1",     // 大环
+            // ---- 小环与小杂环:先前这张表里**一个三元环、一个小杂环都没有** ----
+            //
+            // 恰好表里那几个(螺环、桥环)全是**全碳**且查表都命中,所以全绿,
+            // 而全语料上有 21 个分子建完界就是空区间。下面这几个是实测会死的:
+            "C1CC1",         // 环丙烷
+            "C1CS1",         // 环硫乙烷 —— 两个碳既成键、又同为 S 的 1-3
+            "C1CO1",         // 环氧乙烷
+            "C1NN1",         // 三元双氮
+            "C1COC1",        // 氧杂环丁烷 —— C1···C3 同时是 C0 与 O2 的 1-3
+            "C1C(CS1)O",     // 3-羟基硫杂环丁烷(取自 large.smi)
+            "C1CC2C1C2",     // 双环[1.1.0]丁烷 —— 角的 ring_self=3 而 ring_shared=4
+            "C1CCC2(C1)CC2", // 螺[2.4] —— 三元环与五元环共用一个碳
         ];
         for smi in smis {
             let m = prep(smi);
@@ -909,6 +958,40 @@ mod tests {
     /// 苯:环内的 `C–C–C–C` 扭转 0、环上氢的 `H–C–C–C` 扭转 180 ——
     /// 两者都是确定的,不是"顺式到反式"的区间。这条盯住 `planar_ring_torsion`
     /// 真的接上了:它不生效的话宽度会是 0.7 Å 上下。
+    #[test]
+    fn 三元环里成键那一对不许被_1_3_挤宽() {
+        // 三元环上任意两个重原子**既成键、又同为第三个原子的 1-3**。
+        // 直接量到的键长比"两根键 + 夹角推出来的距离"可靠得多,所以 1-3
+        // 不许往已经成键的那一对上写 —— 让角推的去挤键,是拿差的信息盖好的。
+        //
+        // **这条规则先前没有任何判据看着。** 语料中位一位都不动(带杂原子的
+        // 三元环太少),而实测撤掉它之后环硫乙烷的三根键宽从 0.020 涨到
+        // 0.243 / 0.132 / 0.163 —— 最狠的一根**宽了 12 倍**。
+        // 这已经是这一轮里第三次"中位藏住子群"了,所以这里直接钉具体分子。
+        for smi in ["C1CS1", "C1CO1", "C1CC1", "C1NN1"] {
+            let m = prep(smi);
+            let (b, _) = build(&m);
+            let z: Vec<u8> = m.atoms().iter().map(|a| a.atomic_num).collect();
+            for bd in m.bonds() {
+                let (i, j) = (bd.begin as usize, bd.end as usize);
+                if z[i] == 1 || z[j] == 1 {
+                    continue;
+                }
+                let w = b.upper(i, j) - b.lower(i, j);
+                // 键宽应当就是 2×DIST12_TOL。写成常数的式子,不写死 0.02 ——
+                // 容差改了这条判据要跟着改,而不是变成一句过期的断言。
+                assert!(
+                    w <= 2.0 * DIST12_TOL + 1e-9,
+                    "{smi} 的键 {i}-{j} 宽 {w:.4},超过 2×DIST12_TOL —— 1-3 挤到键上了"
+                );
+                assert!(
+                    b.lower(i, j) <= b.upper(i, j),
+                    "{smi} 的键 {i}-{j} 区间空了"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_one_four_across_an_aromatic_ring_has_a_pinned_torsion() {
         let m = prep("c1ccccc1");
