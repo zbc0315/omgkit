@@ -20,6 +20,7 @@
 //! ```
 
 use omgkit_conf::bounds;
+use omgkit_conf::embed::{embed, metric_matrix, reference_distances};
 use omgkit_conf::smooth::{triangle_smooth, Bounds};
 use omgkit_core::{BondOrder, MolBuilder};
 
@@ -62,6 +63,35 @@ const MAX_INFEASIBLE: u64 = 5;
 /// 闸设在 1.05 是**贴着现值的棘轮**:它拦得住回退,而不是把目标改成现状 ——
 /// 一条永远红的闸,所有人都会学会忽略它。**1-5 链式约束落地后这个数要跟着降。**
 const MAX_WIDTH_RATIO: f64 = 1.05;
+
+/// 判据三:`U` 的前三个特征值占正谱质量的比例,中位下限。
+///
+/// # 这条闸在守什么
+///
+/// 整个算法的立论是"**光滑化之后的上限矩阵 `U` 本身就是一张画得出来的距离表**,
+/// 所以不需要 RDKit 那一步逐对独立随机采样"。这句话是个**可以量的断言**,
+/// 不是修辞 —— 这里就量它,并且与 RDKit 真正在做的事(在区间里随机取)
+/// 在**同一张界矩阵**上对比。
+///
+/// 不设这条闸的话,界矩阵可以一边把宽度收得很漂亮(判据二全绿),
+/// 一边把 `U` 变成一张摆不出来的表 —— 而那正好抽掉了立论的地基。
+const MIN_FIT3: f64 = 0.85;
+
+/// 判据三:`U` 的负特征值占谱绝对质量的比例,中位上限。
+const MAX_NEG_SHARE: f64 = 0.08;
+
+/// 判据三:`U` 必须比"区间内随机取"好多少倍(负份额之比)。
+///
+/// 只卡绝对值不够:万一哪天界矩阵整体变紧,两种取法会一起变好,
+/// 而"换掉随机采样"这件事本身值不值就看不出来了。
+const MIN_NEG_SHARE_GAIN: f64 = 2.0;
+
+/// 判据三:嵌出来的坐标里,越界超过 0.1 Å 的原子对占比上限。
+///
+/// **这是给精修阶段的起点质量,也是判据三里唯一直接量几何的一条。**
+/// `fit3` 与负份额都是谱上的代理量 —— 谱好看不等于坐标好用。
+/// 这条闸先立在现值附近当棘轮,精修落地后应当能大幅收紧。
+const MAX_EMBED_VIOL_FRAC: f64 = 30.0;
 
 /// 按导出的连接表建分子。
 ///
@@ -115,6 +145,66 @@ fn build_mol(
     Some(m)
 }
 
+/// 模拟 RDKit 的 `pickRandomDistMat`:在每一对的区间里**各自独立**取一个值。
+///
+/// 这是判据三的对照组,不是产品路径 —— 所以用一个确定的 LCG 顶替均匀采样,
+/// 判官才能次次跑出同一个数。取法本身与 RDKit 一致:`d = lb + r·(ub − lb)`。
+fn pick_random_dist(b: &Bounds, seed: u64) -> Vec<f64> {
+    let n = b.len();
+    let mut d = vec![0.0; n * n];
+    let mut st = seed;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            st = st.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            #[allow(clippy::cast_precision_loss)]
+            let r = ((st >> 11) as f64) / ((1u64 << 53) as f64);
+            let (lo, hi) = (b.lower(i, j), b.upper(i, j));
+            let v = r.mul_add(hi - lo, lo);
+            d[i * n + j] = v;
+            d[j * n + i] = v;
+        }
+    }
+    d
+}
+
+/// RDKit 的作废条件:`sqD0i[i] < EIGVAL_TOL` 且 `N > 3` 就把**整次尝试**判死
+/// (`DistGeomUtils.cpp:110-115`)。`sqD0i` 就是 Gram 矩阵的对角。
+///
+/// 这里只是**记账**,看这条规则如果照搬会打掉多少分子 —— 本算法不用它。
+fn rdkit_would_abort(t: &[f64], n: usize) -> bool {
+    /// RDKit 的 `EIGVAL_TOL`。注意它是**绝对**阈值,单位是 Å²,
+    /// 而同一个常数在那边还兼任特征值的零判据 —— 两个量纲不同的东西共用一个数。
+    const EIGVAL_TOL: f64 = 0.001;
+    n > 3 && (0..n).any(|i| t[i * n + i] < EIGVAL_TOL)
+}
+
+/// 嵌出来的坐标离界矩阵有多远:返回 `(越界的对数, 总对数, 最狠一处越界 Å)`。
+///
+/// # 为什么这个数比 `fit3` 重要
+///
+/// `fit3` 是**谱**上的指标 —— 它说的是"这张距离表离三维有多近",
+/// 而下一阶段(精修)真正要面对的是**几何**:坐标违反了多少条约束、违反得多厉害。
+/// 两者不是一回事:一张谱很漂亮的表照样可以嵌出一堆原子撞在一起的坐标。
+fn violations(coords: &[[f64; 3]], b: &Bounds) -> (u64, u64, f64) {
+    let n = b.len();
+    let (mut bad, mut total, mut worst) = (0u64, 0u64, 0.0f64);
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let d = ((coords[i][0] - coords[j][0]).powi(2)
+                + (coords[i][1] - coords[j][1]).powi(2)
+                + (coords[i][2] - coords[j][2]).powi(2))
+            .sqrt();
+            let over = (b.lower(i, j) - d).max(d - b.upper(i, j)).max(0.0);
+            total += 1;
+            if over > 0.1 {
+                bad += 1;
+            }
+            worst = worst.max(over);
+        }
+    }
+    (bad, total, worst)
+}
+
 fn quantile(v: &[f64], f: f64) -> f64 {
     if v.is_empty() {
         return f64::NAN;
@@ -144,6 +234,15 @@ fn main() {
     let (mut w_ours, mut w_rdkit) = (Vec::new(), Vec::new());
     // **按拓扑距离拆开** —— "整体 1.6 倍"没法指导修改,得知道松在哪一档
     let mut by_class: [(Vec<f64>, Vec<f64>); 5] = Default::default();
+    // 判据三:U 摆不摆得进三维,以及它比"区间内随机取"好多少
+    let (mut fit3_u, mut neg_u) = (Vec::new(), Vec::new());
+    let (mut fit3_r, mut neg_r) = (Vec::new(), Vec::new());
+    let (mut n_degenerate, mut n_neg_centroid, mut n_atoms) = (0u64, 0u64, 0u64);
+    // 照搬 RDKit 那条作废条件的话会打掉多少分子(两张表各记一笔)
+    let (mut n_abort_u, mut n_abort_r) = (0u64, 0u64);
+    // 嵌出来的坐标违反了多少条界 —— 这是给精修阶段的起点质量
+    let (mut v_bad_u, mut v_tot_u, mut v_bad_r, mut v_tot_r) = (0u64, 0u64, 0u64, 0u64);
+    let (mut v_worst_u, mut v_worst_r): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
 
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -244,6 +343,37 @@ fn main() {
             for j in 0..nat {
                 topo[start * nat + j] = dist[j].min(4);
             }
+        }
+
+        // ---- 判据三:U 能不能摆进三维,与"区间内随机取"同表对照 ----
+        let du = reference_distances(&b);
+        if let Ok(e) = embed(&du, nat) {
+            fit3_u.push(e.fit3);
+            neg_u.push(e.negative_share);
+            if e.degenerate_axes > 0 {
+                n_degenerate += 1;
+            }
+            n_neg_centroid += e.negative_centroid_sq as u64;
+            n_atoms += nat as u64;
+            let (bad, tot, worst) = violations(&e.coords, &b);
+            v_bad_u += bad;
+            v_tot_u += tot;
+            v_worst_u.push(worst);
+        }
+        if rdkit_would_abort(&metric_matrix(&du, nat).0, nat) {
+            n_abort_u += 1;
+        }
+        let dr = pick_random_dist(&b, 0xf00d);
+        if let Ok(e) = embed(&dr, nat) {
+            fit3_r.push(e.fit3);
+            neg_r.push(e.negative_share);
+            let (bad, tot, worst) = violations(&e.coords, &b);
+            v_bad_r += bad;
+            v_tot_r += tot;
+            v_worst_r.push(worst);
+        }
+        if rdkit_would_abort(&metric_matrix(&dr, nat).0, nat) {
+            n_abort_r += 1;
         }
 
         // ---- 判据二:界宽比 ----
@@ -365,6 +495,42 @@ fn main() {
         );
     }
 
+    for v in [&mut fit3_u, &mut neg_u, &mut fit3_r, &mut neg_r] {
+        v.sort_by(f64::total_cmp);
+    }
+    let (m_fit3, m_neg) = (quantile(&fit3_u, 0.5), quantile(&neg_u, 0.5));
+    let (r_fit3, r_neg) = (quantile(&fit3_r, 0.5), quantile(&neg_r, 0.5));
+    println!("  ── 判据三:U 摆不摆得进三维(对照组 = RDKit 那样在区间里随机取)──");
+    println!(
+        "    前三特征值占正谱质量 中位  我们 {m_fit3:.3} / 随机取 {r_fit3:.3}(下限 {MIN_FIT3})"
+    );
+    println!(
+        "    负特征值占谱绝对质量 中位  我们 {m_neg:.3} / 随机取 {r_neg:.3}(上限 {MAX_NEG_SHARE},且须优于对照 {MIN_NEG_SHARE_GAIN} 倍)"
+    );
+    #[allow(clippy::cast_precision_loss)]
+    let neg_frac = 100.0 * n_neg_centroid as f64 / n_atoms.max(1) as f64;
+    println!("    有退化轴的分子 {n_degenerate} 个;到质心平方距离出负的原子 {n_neg_centroid}/{n_atoms}({neg_frac:.2}%)");
+    // **这一行是记账,不是判据。** RDKit 只要发现一个原子的 sqD0i 低于阈值就把
+    // 整次尝试作废(`DistGeomUtils.cpp:110-115`),而那是个"全或无"的规则:
+    // 一个原子的毛病判死整个分子。本算法不作废,只把差距如实报出来。
+    println!(
+        "    照搬 RDKit 那条作废条件的话会打掉:U 表 {n_abort_u}/{n} 个分子、随机取 {n_abort_r}/{n} 个"
+    );
+    v_worst_u.sort_by(f64::total_cmp);
+    v_worst_r.sort_by(f64::total_cmp);
+    #[allow(clippy::cast_precision_loss)]
+    let (fu, fr) = (
+        100.0 * v_bad_u as f64 / v_tot_u.max(1) as f64,
+        100.0 * v_bad_r as f64 / v_tot_r.max(1) as f64,
+    );
+    // **这一行才是给精修阶段的起点质量**,`fit3` 只是谱上的代理量。
+    println!("    嵌出来的坐标越界 >0.1 Å 的对:U 表 {fu:.1}% / 随机取 {fr:.1}%");
+    println!(
+        "      每分子最狠越界 中位  U 表 {:.2} Å / 随机取 {:.2} Å(上限 {MAX_EMBED_VIOL_FRAC:.0}%)",
+        quantile(&v_worst_u, 0.5),
+        quantile(&v_worst_r, 0.5)
+    );
+
     let mut fatal = false;
     if n == 0 {
         eprintln!("\n一个分子都没读到 —— 基准文件是空的?");
@@ -400,8 +566,30 @@ fn main() {
         );
         fatal = true;
     }
+    // **判据三守的是算法的立论。** 判据一二只管界矩阵自己好不好,管不到
+    // "拿 U 当参考距离表"这个决定还成不成立 —— 界可以一边收紧一边变得摆不出来。
+    if m_fit3 < MIN_FIT3 {
+        eprintln!("\nU 的三维贴合度中位 {m_fit3:.3} < {MIN_FIT3} —— 拿 U 当参考距离表这个前提塌了");
+        fatal = true;
+    }
+    if m_neg > MAX_NEG_SHARE {
+        eprintln!(
+            "\nU 的负特征值份额中位 {m_neg:.3} > {MAX_NEG_SHARE} —— U 正在离能摆出来越来越远"
+        );
+        fatal = true;
+    }
+    if fu > MAX_EMBED_VIOL_FRAC {
+        eprintln!("\n嵌出来的坐标越界的对占 {fu:.1}% > {MAX_EMBED_VIOL_FRAC:.0}% —— 起点太差,精修要从很深的坑里爬");
+        fatal = true;
+    }
+    if m_neg * MIN_NEG_SHARE_GAIN > r_neg {
+        eprintln!(
+            "\nU 的负份额 {m_neg:.3} 相对随机取 {r_neg:.3} 不足 {MIN_NEG_SHARE_GAIN} 倍优势 —— 换掉随机采样这一步不再值得"
+        );
+        fatal = true;
+    }
     if fatal {
         std::process::exit(1);
     }
-    println!("\n两条都过。");
+    println!("\n三条都过。");
 }
