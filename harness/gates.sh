@@ -22,15 +22,15 @@ set -eo pipefail
 cd "$(dirname "$0")/.."
 
 
-echo "== 1/12 fmt"
+echo "== 1/13 fmt"
 cargo fmt --all --check
-echo "== 2/12 clippy(警告即失败)"
+echo "== 2/13 clippy(警告即失败)"
 cargo clippy -q --workspace --all-targets -- -D warnings
-echo "== 3/12 测试(release)"
+echo "== 3/13 测试(release)"
 cargo test -q --release
-echo "== 4/12 测试(debug —— 让 debug_assert 真的跑到)"
+echo "== 4/13 测试(debug —— 让 debug_assert 真的跑到)"
 cargo test -q --workspace
-echo "== 5/12 文档"
+echo "== 5/13 文档"
 cargo doc -q --workspace --no-deps --document-private-items
 
 # ---- 三个外部判官 ----
@@ -48,31 +48,36 @@ cargo doc -q --workspace --no-deps --document-private-items
 # (光滑化要逐位相同、特征值要对上 LAPACK、真实构象要精确回嵌),
 # 那两条在 27 个分子上照样抓得住错。
 SMOKE=harness/baseline/smoke.bounds.jsonl
-echo "== 6/12 判官:三角光滑化 vs RDKit"
+echo "== 6/13 判官:三角光滑化 vs RDKit"
 cargo run -q -p omgkit-conf --release --example smooth_oracle -- "$SMOKE"
-echo "== 7/12 判官:界矩阵(三条)"
+echo "== 7/13 判官:界矩阵(三条)"
 cargo run -q -p omgkit-conf --release --example bounds_oracle -- "$SMOKE"
-echo "== 8/12 判官:特征分解 vs LAPACK + 精确回嵌"
+echo "== 8/13 判官:特征分解 vs LAPACK + 精确回嵌"
 cargo run -q -p omgkit-conf --release --example eigen_oracle -- "$SMOKE" harness/baseline/smoke.gram_eigs.jsonl
 
 # 头号指标:界不可行的分子占比。跑**全语料 8831 个**,不跑冒烟档 ——
 # 400 个样本上真实率 0.34% 只对应 1.4 个分子,泊松噪声足以让闸随机红绿。
 # 语料随仓库入库(342 K),全程 0.7 秒。
-echo "== 9/12 判官:全语料界可行率(头号指标)"
+echo "== 9/13 判官:全语料界可行率(头号指标)"
 cargo run -q -p omgkit-conf --release --example feasibility -- harness/corpus/large.smi
 
 # **通用性难例语料。** large.smi 是药物样分子,在它上面全绿只说明"对药物样分子成立"。
 # 这一份是照着算法的假设挑的:笼状/张力环、超配位、累积双键、超大环、少见元素、
 # 金属、自由基、两性离子。一类分子在这里红了,答案必须是补一行约束表,不是加分支。
 # 68 个分子,闸与全量档同一条(0.12%,对这个规模等于**一个都不许有**)。
-echo "== 10/12 判官:难例语料的界可行率(通用性)"
+echo "== 10/13 判官:难例语料的界可行率(通用性)"
 cargo run -q -p omgkit-conf --release --example feasibility -- harness/corpus/hard.smi
 # 自穿:先拿真实构象校准检测器(必须报 0),再量我们自己的。
 # 反过来做是自证 —— 检测器要是根本报不出东西,那个 0 只说明它没在看。
-echo "== 11/12 判官:自穿(先校准检测器,再量自己)"
+echo "== 11/13 判官:自穿(先校准检测器,再量自己)"
 cargo run -q -p omgkit-conf --release --example threading_oracle -- "$SMOKE"
-echo "== 12/12 判官:手性中心(真值取自真实构象)"
+echo "== 12/13 判官:手性中心(真值取自真实构象)"
 cargo run -q -p omgkit-conf --release --example chiral_oracle -- harness/baseline/smoke.chirality.jsonl
 
+# **端到端。** 前面各条守一段,这一条守产物:分子进去、坐标出来,那组坐标满不满足化学。
+# 精修前后各量一遍 —— 只报"之后"看不出精修有没有在干活。
+echo "== 13/13 判官:端到端构型(产物好不好)"
+cargo run -q -p omgkit-conf --release --example conformer_oracle -- harness/baseline/smoke.chirality.jsonl
+
 echo
-echo "十二道闸全过。"
+echo "十三道闸全过。"

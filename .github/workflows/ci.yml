@@ -113,6 +113,12 @@ jobs:
       - name: 判官:自穿(先校准检测器,再量自己)
         run: cargo run -p omgkit-conf --release --example threading_oracle -- harness/baseline/smoke.bounds.jsonl
 
+      # **端到端。** 前面各条守一段,这一条守**产物**:分子进去、坐标出来,
+      # 那组坐标满不满足化学(键长/键角/扭转越界、自穿、手性、耗时)。
+      # 精修前后各量一遍 —— 只报"之后"看不出精修有没有在干活。
+      - name: 判官:端到端构型(产物好不好)
+        run: cargo run -p omgkit-conf --release --example conformer_oracle -- harness/baseline/smoke.chirality.jsonl
+
       # 手性:槽位约定排错的话**错法整批一致**,正确率不是 0% 就是 100% ——
       # 这种错只能拿真值比,推不出来。真值是真实构象上量出来的有符号体积。
       - name: 判官:手性中心(真值取自真实构象)

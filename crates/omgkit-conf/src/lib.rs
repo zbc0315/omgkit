@@ -104,5 +104,6 @@ pub mod field;
 pub mod linalg;
 pub mod optimize;
 pub mod params;
+pub mod pipeline;
 pub mod smooth;
 pub mod threading;
