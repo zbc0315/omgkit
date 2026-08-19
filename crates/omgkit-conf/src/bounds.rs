@@ -74,46 +74,77 @@ pub const ANGLE_TOL: f64 = 2.5;
 /// | 6 元 | 0–60° | 平面(芳/共轭)到椅式 |
 /// | 7 元及以上 | 0–90° | 柔性 |
 /// | 不共处一环 | 0–180° | 自由旋转 |
-/// **平面环上,一条 1-4 路径的扭转角是确定值,不是区间。**
+/// **环的内扭转角范围**(度),按环尺寸。
 ///
-/// 这是从 RDKit 读来的关键一课(`BoundsMatrixBuilder.cpp:1005-1038`):
-/// 它**不取凸包,而是用化学把析取解掉** —— 双键上问立体描述符"这一对是顺是反",
-/// 然后 `dl = du`,宽度为 0。
-///
-/// 平面环上这件事更简单,连立体描述符都不用:环是平的,于是每个原子有个确定的
-/// **侧** —— 环内原子在圆心那一侧,环外取代基朝外。中心键 `k–l` 在环上时:
-///
-/// | `i`、`j` 的归属 | 扭转 | 例子(苯) |
+/// | 环 | 内扭转 | 依据 |
 /// |---|---|---|
-/// | 都在环里 | **0°** | `C6–C1–C2–C3` |
-/// | 一个在环外 | **180°** | 取代基 `X–C1–C2–C3` |
-/// | 都在环外 | **0°** | 邻位两个取代基 `X–C1–C2–Y`,都朝外,同侧 |
+/// | 芳环 | 0 | 平面 |
+/// | 3 元 | 0 | 平面(几何必然) |
+/// | 4 元 | 0–25 | 蝶式折叠 |
+/// | 5 元 | 0–40 | 信封/半椅 |
+/// | 6 元 | 0–65 | 平面(共轭)到椅式(±55) |
+/// | 7 元及以上 | 0–90 | 柔性 |
 ///
-/// 返回 `None` 表示这条路径的中心键不在**平面**环上,由调用方退回包络。
+/// 上界都留了余量:**收过头会把真实几何排除在界外**,而那会在判据一
+/// ("真实构象必须落在界内")上现形。两条闸互相顶着,所以这些数是量出来的。
+#[must_use]
+pub fn ring_internal_torsion(size: usize, aromatic: bool) -> (f64, f64) {
+    if aromatic {
+        return (0.0, 0.0);
+    }
+    match size {
+        0 | 3 => (0.0, 0.0),
+        4 => (0.0, 25.0),
+        5 => (0.0, 40.0),
+        6 => (0.0, 65.0),
+        _ => (0.0, 90.0),
+    }
+}
+
+/// **中心键在环上时,一条 1-4 路径的扭转角范围。**
 ///
-/// # 只认芳环
+/// 这是从 RDKit 读来的一课(`BoundsMatrixBuilder.cpp:1005-1038`):
+/// 它**不取凸包,而是用化学把析取解掉** —— 双键上问立体描述符"这一对是顺是反",
+/// 然后 `dl = du`,宽度是 `2×GEN_DIST_TOL = 0.12 Å`。实测它把 **59.1%** 的 1-4
+/// 都这么解掉了,而取凸包只能解掉个位数。
 ///
-/// 非芳香环的平面性没有保证(环己烷是椅式),所以这里只对芳环下确定值,
-/// 其余交给 [`torsion_envelope`] 按环尺寸给区间。
-fn planar_ring_torsion(
+/// 环上不用立体描述符就能解:环有一个内扭转 `τ`([`ring_internal_torsion`]),
+/// 而环外的取代基相对环内的路径是**反过来的**。于是
+///
+/// | `i`、`j` 的归属 | 扭转 |
+/// |---|---|
+/// | 都在环里 | `τ` |
+/// | 都在环外(邻位取代基,都朝外) | `τ` |
+/// | 一个在环外 | `180 − τ` |
+///
+/// 芳环是 `τ = 0` 的特例,正好给出 0 / 0 / 180 —— **不需要单独一条分支**。
+///
+/// 返回 `None` 表示中心键不在任何环上,由调用方给自由旋转的全程。
+fn ring_path_torsion(
     ring_sets: &[Vec<u32>],
-    aromatic_ring: &[bool],
+    ring_aromatic: &[bool],
     i: u32,
     k: u32,
     l: u32,
     j: u32,
-) -> Option<f64> {
+) -> Option<(f64, f64)> {
+    // 中心键所在的**最小**环说了算:环越小越硬,给出的约束越紧
+    let mut best: Option<(usize, usize)> = None; // (尺寸, 下标)
     for (r, set) in ring_sets.iter().enumerate() {
-        if !aromatic_ring[r] {
-            continue;
-        }
         let has = |a: u32| set.binary_search(&a).is_ok();
-        if !(has(k) && has(l)) {
-            continue;
+        if has(k) && has(l) && best.map_or(true, |(sz, _)| set.len() < sz) {
+            best = Some((set.len(), r));
         }
-        return Some(if has(i) == has(j) { 0.0 } else { 180.0 });
     }
-    None
+    let (size, r) = best?;
+    let set = &ring_sets[r];
+    let has = |a: u32| set.binary_search(&a).is_ok();
+    let (t_lo, t_hi) = ring_internal_torsion(size, ring_aromatic[r]);
+    Some(if has(i) == has(j) {
+        (t_lo, t_hi)
+    } else {
+        (180.0 - t_hi, 180.0 - t_lo)
+    })
 }
 
 /// 解不掉时按共处环尺寸给的扭转包络(度)。
@@ -447,11 +478,10 @@ pub fn build(mol: &MolBuilder) -> (Bounds, Stats) {
                 let arom = mol.bonds()[bidx].order == omgkit_core::BondOrder::Aromatic;
                 // 芳环上的扭转是**确定值**(见 `planar_ring_torsion`),不是区间;
                 // 解不掉的才退回按环尺寸的包络
-                let (t_lo, t_hi) = planar_ring_torsion(&ring_sets, &aromatic_ring, i, k, l, j)
-                    .map_or_else(
-                        || torsion_envelope(shared_ring(&ring_sets, &[i, k, l, j]), arom),
-                        |t| (t, t),
-                    );
+                let (t_lo, t_hi) = ring_path_torsion(&ring_sets, &aromatic_ring, i, k, l, j)
+                    .unwrap_or_else(|| {
+                        torsion_envelope(shared_ring(&ring_sets, &[i, k, l, j]), arom)
+                    });
                 // d² 随 cos(扭转) 单调 —— 端点取遍区间即可
                 let f = |t: f64| {
                     let c = t.to_radians().cos();
