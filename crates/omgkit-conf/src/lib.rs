@@ -100,6 +100,7 @@
 pub mod bounds;
 pub mod chiral;
 pub mod embed;
+pub mod field;
 pub mod linalg;
 pub mod optimize;
 pub mod params;
