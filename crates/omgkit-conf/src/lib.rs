@@ -98,6 +98,7 @@
 //! `fourD` 设 true),"全部对 + 只有三维"是它从不跑的组合。
 
 pub mod bounds;
+pub mod chiral;
 pub mod embed;
 pub mod linalg;
 pub mod params;
