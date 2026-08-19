@@ -31,15 +31,37 @@ const MAX_VIOLATION: f64 = 0.35;
 /// 越界超过 [`MAX_VIOLATION`] 的原子对占比上限。
 const MAX_VIOLATION_FRAC: f64 = 0.02;
 
-/// 按连接表建不出来的分子数上限。**样本被腰斩不许静悄悄。**
-const MAX_BUILD_FAIL: u64 = 8;
+/// 按连接表建不出来的分子**占比**上限。**样本被腰斩不许静悄悄。**
+///
+/// 用占比不用绝对数:先前写的是"至多 8 个",那是照 400 个分子的全量档定的,
+/// 而判官现在也跑 27 个分子的冒烟档 —— 同一个 8 在那边等于 **30%**,近乎空过。
+/// **绝对计数的闸换一档样本量就失效**,所以这里全部按比例。
+const MAX_BUILD_FAIL_FRAC: f64 = 0.02;
 
-/// 界矩阵自相矛盾(光滑化判不可行)的分子数上限。
+/// 界矩阵自相矛盾(光滑化判不可行)的分子**占比**上限。
 ///
 /// **这一项先前只报不闸,是个洞**:界可以越写越不自洽,而判据只会看到
 /// 参与统计的对数在掉 —— 而对数掉了之后,剩下样本上的比值反而更好看。
 /// 实测加 1-5 链式约束时它从 3 涨到 11,正是这么暴露的。
-const MAX_INFEASIBLE: u64 = 5;
+const MAX_INFEASIBLE_FRAC: f64 = 0.02;
+
+/// ≥1-5 那一档单独的宽度比棘轮。
+///
+/// **总体中位看不见这一档。** 总体中位被 1-2/1-3/1-4 三档主导,而那三档已经
+/// 与 RDKit 逐位相同(比值恒 1.00),于是 ≥1-5 从 1.06 涨到 1.15 时总体中位
+/// 只从 1.020 动到 1.003 —— 方向甚至是反的。这正是当初"中位藏住芳环 1-4 改进"
+/// 那件事的镜像,只不过这次藏住的是**退步**。
+///
+/// 定在 1.20:全量档实测 1.06、冒烟档 1.15(小样本更松),两档都成立。
+/// 1-5 链式约束落地后这个数要跟着降。
+const MAX_LONG_RANGE_RATIO: f64 = 1.20;
+
+/// 嵌出来的坐标,越界量 RMS 的上限(Å)。
+///
+/// **比"越界的对数"好在没有阈值悬崖。** 计数用 0.1 Å 卡,把一堆 0.11 压到 0.09
+/// 就满分,同时把少数几对推到 5 Å 不扣分;RMS 骗不过去。
+/// 实测 U 表 0.323 Å、随机取 0.812 Å,闸设在 0.40 当棘轮。
+const MAX_EMBED_RMS: f64 = 0.40;
 
 /// 我们的界宽相对 RDKit 的中位比值上限。
 ///
@@ -178,31 +200,128 @@ fn rdkit_would_abort(t: &[f64], n: usize) -> bool {
     n > 3 && (0..n).any(|i| t[i * n + i] < EIGVAL_TOL)
 }
 
-/// 嵌出来的坐标离界矩阵有多远:返回 `(越界的对数, 总对数, 最狠一处越界 Å)`。
+/// 嵌出来的坐标离界矩阵有多远,**按方向与拓扑档分开记**。
 ///
 /// # 为什么这个数比 `fit3` 重要
 ///
 /// `fit3` 是**谱**上的指标 —— 它说的是"这张距离表离三维有多近",
 /// 而下一阶段(精修)真正要面对的是**几何**:坐标违反了多少条约束、违反得多厉害。
 /// 两者不是一回事:一张谱很漂亮的表照样可以嵌出一堆原子撞在一起的坐标。
-fn violations(coords: &[[f64; 3]], b: &Bounds) -> (u64, u64, f64) {
+///
+/// # 为什么必须拆开
+///
+/// 头一版这里写的是 `(l − d).max(d − u).max(0)` —— 一个 `max` 把**方向**合掉了,
+/// 于是"29.3% 越界"根本分不清是**撞在一起**(下越界,化学上致命)还是
+/// **拉太开**(上越界,精修一拉就回来)。两者该做的事完全不同。
+///
+/// 拆拓扑档同理:`N = 56` 时 1540 对里长程占 **87%**,1-2 与 1-3 加起来不到 13%。
+/// 只看总数的判据可以**把键长全毁掉去换几百对长程达标**而显示为大幅变绿 ——
+/// 单向的闸奖励错误的东西,这个项目栽过好几次。
+#[derive(Default, Clone, Copy)]
+struct Viol {
+    /// 下越界(实距 < 下限,撞在一起)的对数,按拓扑档 1/2/3/4+
+    below: [u64; 5],
+    /// 上越界(实距 > 上限,拉太开)的对数
+    above: [u64; 5],
+    /// 每一档的总对数
+    total: [u64; 5],
+    /// 最狠的下越界与上越界(Å)
+    worst_below: f64,
+    worst_above: f64,
+    /// 越界量的平方和,用来算 RMS —— **计数有阈值悬崖,量没有**
+    sq_sum: f64,
+}
+
+impl Viol {
+    fn all(v: &[u64; 5]) -> u64 {
+        v.iter().sum()
+    }
+
+    /// 把一个分子的账并进总账。
+    fn merge(&mut self, o: &Self) {
+        for k in 0..5 {
+            self.below[k] += o.below[k];
+            self.above[k] += o.above[k];
+            self.total[k] += o.total[k];
+        }
+        self.worst_below = self.worst_below.max(o.worst_below);
+        self.worst_above = self.worst_above.max(o.worst_above);
+        self.sq_sum += o.sq_sum;
+    }
+
+    /// 越界量的 RMS(Å)。**计数有 0.1 Å 的悬崖,这个量没有** ——
+    /// 把一堆 0.11 压到 0.09 能让计数满分,却骗不过 RMS。
+    fn rms(&self) -> f64 {
+        let n = Self::all(&self.total);
+        if n == 0 {
+            return 0.0;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        (self.sq_sum / n as f64).sqrt()
+    }
+
+    /// 逐档打印:对数、下越界%、上越界%。
+    fn report(&self, tag: &str) {
+        println!(
+            "      {tag:8} 下越界 {:5.1}% / 上越界 {:5.1}%  RMS {:.3} Å  最狠 下 {:.2} / 上 {:.2} Å",
+            100.0 * Self::pct(&self.below, &self.total),
+            100.0 * Self::pct(&self.above, &self.total),
+            self.rms(),
+            self.worst_below,
+            self.worst_above
+        );
+        for (c, name) in [(1usize, "1-2"), (2, "1-3"), (3, "1-4"), (4, "长程")] {
+            if self.total[c] == 0 {
+                continue;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let (b, a) = (
+                100.0 * self.below[c] as f64 / self.total[c] as f64,
+                100.0 * self.above[c] as f64 / self.total[c] as f64,
+            );
+            println!(
+                "        {name:5} 对数 {:6}  下越界 {b:5.1}%  上越界 {a:5.1}%",
+                self.total[c]
+            );
+        }
+    }
+
+    fn pct(v: &[u64; 5], t: &[u64; 5]) -> f64 {
+        let n = Self::all(t);
+        if n == 0 {
+            return 0.0;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        {
+            Self::all(v) as f64 / n as f64
+        }
+    }
+}
+
+fn violations(coords: &[[f64; 3]], b: &Bounds, topo: &[u8], out: &mut Viol) {
     let n = b.len();
-    let (mut bad, mut total, mut worst) = (0u64, 0u64, 0.0f64);
     for i in 0..n {
         for j in (i + 1)..n {
             let d = ((coords[i][0] - coords[j][0]).powi(2)
                 + (coords[i][1] - coords[j][1]).powi(2)
                 + (coords[i][2] - coords[j][2]).powi(2))
             .sqrt();
-            let over = (b.lower(i, j) - d).max(d - b.upper(i, j)).max(0.0);
-            total += 1;
-            if over > 0.1 {
-                bad += 1;
+            let c = topo[i * n + j] as usize;
+            out.total[c] += 1;
+            let below = b.lower(i, j) - d;
+            let above = d - b.upper(i, j);
+            if below > 0.1 {
+                out.below[c] += 1;
             }
-            worst = worst.max(over);
+            if above > 0.1 {
+                out.above[c] += 1;
+            }
+            out.worst_below = out.worst_below.max(below);
+            out.worst_above = out.worst_above.max(above);
+            let over = below.max(above).max(0.0);
+            out.sq_sum += over * over;
         }
     }
-    (bad, total, worst)
 }
 
 fn quantile(v: &[f64], f: f64) -> f64 {
@@ -241,7 +360,7 @@ fn main() {
     // 照搬 RDKit 那条作废条件的话会打掉多少分子(两张表各记一笔)
     let (mut n_abort_u, mut n_abort_r) = (0u64, 0u64);
     // 嵌出来的坐标违反了多少条界 —— 这是给精修阶段的起点质量
-    let (mut v_bad_u, mut v_tot_u, mut v_bad_r, mut v_tot_r) = (0u64, 0u64, 0u64, 0u64);
+    let (mut vio_u, mut vio_r) = (Viol::default(), Viol::default());
     let (mut v_worst_u, mut v_worst_r): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
 
     for line in text.lines() {
@@ -355,10 +474,10 @@ fn main() {
             }
             n_neg_centroid += e.negative_centroid_sq as u64;
             n_atoms += nat as u64;
-            let (bad, tot, worst) = violations(&e.coords, &b);
-            v_bad_u += bad;
-            v_tot_u += tot;
-            v_worst_u.push(worst);
+            let mut mv = Viol::default();
+            violations(&e.coords, &b, &topo, &mut mv);
+            vio_u.merge(&mv);
+            v_worst_u.push(mv.worst_below.max(mv.worst_above));
         }
         if rdkit_would_abort(&metric_matrix(&du, nat).0, nat) {
             n_abort_u += 1;
@@ -367,10 +486,10 @@ fn main() {
         if let Ok(e) = embed(&dr, nat) {
             fit3_r.push(e.fit3);
             neg_r.push(e.negative_share);
-            let (bad, tot, worst) = violations(&e.coords, &b);
-            v_bad_r += bad;
-            v_tot_r += tot;
-            v_worst_r.push(worst);
+            let mut mv = Viol::default();
+            violations(&e.coords, &b, &topo, &mut mv);
+            vio_r.merge(&mv);
+            v_worst_r.push(mv.worst_below.max(mv.worst_above));
         }
         if rdkit_would_abort(&metric_matrix(&dr, nat).0, nat) {
             n_abort_r += 1;
@@ -518,15 +637,16 @@ fn main() {
     );
     v_worst_u.sort_by(f64::total_cmp);
     v_worst_r.sort_by(f64::total_cmp);
-    #[allow(clippy::cast_precision_loss)]
-    let (fu, fr) = (
-        100.0 * v_bad_u as f64 / v_tot_u.max(1) as f64,
-        100.0 * v_bad_r as f64 / v_tot_r.max(1) as f64,
-    );
-    // **这一行才是给精修阶段的起点质量**,`fit3` 只是谱上的代理量。
-    println!("    嵌出来的坐标越界 >0.1 Å 的对:U 表 {fu:.1}% / 随机取 {fr:.1}%");
+    let fu =
+        100.0 * (Viol::pct(&vio_u.below, &vio_u.total) + Viol::pct(&vio_u.above, &vio_u.total));
+    // **这一段才是给精修阶段的起点质量**,`fit3` 只是谱上的代理量。
+    // 拆方向、拆拓扑档的理由见 `Viol` 的文档 —— 合成一个数就分不清
+    // "撞在一起"和"拉太开",而这两者要做的事完全不同。
+    println!("    嵌出来的坐标离界有多远(越界判定阈值 0.1 Å):");
+    vio_u.report("U 表");
+    vio_r.report("随机取");
     println!(
-        "      每分子最狠越界 中位  U 表 {:.2} Å / 随机取 {:.2} Å(上限 {MAX_EMBED_VIOL_FRAC:.0}%)",
+        "      每分子最狠越界 中位  U 表 {:.2} Å / 随机取 {:.2} Å",
         quantile(&v_worst_u, 0.5),
         quantile(&v_worst_r, 0.5)
     );
@@ -539,15 +659,25 @@ fn main() {
     // **样本被腰斩不许静悄悄。** 建不出来的分子会被跳过,而判据照样打印一个
     // 好看的百分比 —— 那个百分比是在剩下的分子上量的。头一版这里没有闸,
     // 实测 400 个里 201 个建不出来(漏了形式电荷),判据一照样报 0.4%。
-    if n_infeasible > MAX_INFEASIBLE {
+    // 分母用**读到的分子总数**(n + 建不出来的),不是 n —— 拿 n 当分母的话,
+    // 建不出来的分子越多分母越小,比例反而越好看。
+    #[allow(clippy::cast_precision_loss)]
+    let seen = (n + n_build_fail).max(1) as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let (bf_frac, inf_frac) = (n_build_fail as f64 / seen, n_infeasible as f64 / seen);
+    if inf_frac > MAX_INFEASIBLE_FRAC {
         eprintln!(
-            "\n有 {n_infeasible} 个分子的界自相矛盾(光滑化判不可行),超过上限 {MAX_INFEASIBLE} —— 约束之间在打架"
+            "\n有 {n_infeasible} 个分子的界自相矛盾(光滑化判不可行),占 {:.1}% > {:.1}% —— 约束之间在打架",
+            100.0 * inf_frac,
+            100.0 * MAX_INFEASIBLE_FRAC
         );
         fatal = true;
     }
-    if n_build_fail > MAX_BUILD_FAIL {
+    if bf_frac > MAX_BUILD_FAIL_FRAC {
         eprintln!(
-            "\n有 {n_build_fail} 个分子按连接表建不出来,超过上限 {MAX_BUILD_FAIL} —— 判据是在剩下的分子上量的,那个数不作数"
+            "\n有 {n_build_fail} 个分子按连接表建不出来,占 {:.1}% > {:.1}% —— 判据是在剩下的分子上量的,那个数不作数",
+            100.0 * bf_frac,
+            100.0 * MAX_BUILD_FAIL_FRAC
         );
         fatal = true;
     }
@@ -566,6 +696,18 @@ fn main() {
         );
         fatal = true;
     }
+    // **≥1-5 那一档要单独看。** 总体中位被三个已经钉住的档主导,看不见它退步。
+    {
+        let (o, r) = &by_class[4];
+        let (mo, mr) = (quantile(o, 0.5), quantile(r, 0.5));
+        let lr = mo / mr.max(1e-9);
+        if lr > MAX_LONG_RANGE_RATIO {
+            eprintln!(
+                "\n≥1-5 的界宽比 {lr:.3} > {MAX_LONG_RANGE_RATIO} —— 这一档在退,而总体中位看不见"
+            );
+            fatal = true;
+        }
+    }
     // **判据三守的是算法的立论。** 判据一二只管界矩阵自己好不好,管不到
     // "拿 U 当参考距离表"这个决定还成不成立 —— 界可以一边收紧一边变得摆不出来。
     if m_fit3 < MIN_FIT3 {
@@ -580,6 +722,15 @@ fn main() {
     }
     if fu > MAX_EMBED_VIOL_FRAC {
         eprintln!("\n嵌出来的坐标越界的对占 {fu:.1}% > {MAX_EMBED_VIOL_FRAC:.0}% —— 起点太差,精修要从很深的坑里爬");
+        fatal = true;
+    }
+    // 计数有 0.1 Å 的悬崖,RMS 没有 —— 两条一起才拦得住"把大量小越界压到阈值下、
+    // 同时让少数几对崩掉"这种换法。
+    if vio_u.rms() > MAX_EMBED_RMS {
+        eprintln!(
+            "\n嵌出来的坐标越界 RMS {:.3} Å > {MAX_EMBED_RMS} Å —— 起点在变差,而计数可能看不出来",
+            vio_u.rms()
+        );
         fatal = true;
     }
     if m_neg * MIN_NEG_SHARE_GAIN > r_neg {
