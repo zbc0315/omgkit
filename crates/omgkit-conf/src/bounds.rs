@@ -101,6 +101,45 @@ pub fn ring_internal_torsion(size: usize, aromatic: bool) -> (f64, f64) {
     }
 }
 
+/// **中心键是有立体标记的双键时,一条 1-4 路径的扭转角是确定值。**
+///
+/// 这是 RDKit `_setChain14Bounds`(`BoundsMatrixBuilder.cpp:1020-1038`)那一支:
+/// 它调 `_getAtomStereo(bnd2, aid1, aid4)` **逐对**问"这两个原子是顺还是反",
+/// 然后 `dl = du`。实测它靠这类解析把 **59.1%** 的 1-4 钉住,而取凸包只有个位数。
+///
+/// # 顺反离开参照没有意义
+///
+/// 一根双键两端各有两个取代基,说"同侧"总得回答"谁和谁同侧" ——
+/// 所以 [`BondData::stereo`](omgkit_core::BondData::stereo) 必须配
+/// [`stereo_atoms`](omgkit_core::BondData::stereo_atoms)(两侧各一个参照)。
+///
+/// 任意一对 `(i, j)` 的顺反,由立体值经**两次参照翻转**得到:`i` 不是这一侧的
+/// 参照就翻一次,`j` 不是就再翻一次,翻偶数次等于没翻。
+///
+/// 返回 `None` 表示这根键没有立体标记(或参照缺失),由调用方退回环/自由那两条。
+fn stereo_path_torsion(mol: &MolBuilder, bidx: usize, i: u32, k: u32, j: u32) -> Option<f64> {
+    use omgkit_core::BondStereo;
+    let bd = mol.bonds().get(bidx)?;
+    let same_side = match bd.stereo {
+        BondStereo::Z | BondStereo::Cis => true,
+        BondStereo::E | BondStereo::Trans => false,
+        BondStereo::None => return None,
+    };
+    let (ra, rb) = (bd.stereo_atoms[0], bd.stereo_atoms[1]);
+    if ra == omgkit_core::BondData::NO_STEREO_ATOM || rb == omgkit_core::BondData::NO_STEREO_ATOM {
+        return None;
+    }
+    // 参照是按 (begin 侧, end 侧) 存的;`k` 是路径上 `i` 那一头的原子
+    let (ref_i, ref_j) = if k == bd.begin { (ra, rb) } else { (rb, ra) };
+    let flips = usize::from(i != ref_i) + usize::from(j != ref_j);
+    let cis = if flips % 2 == 0 {
+        same_side
+    } else {
+        !same_side
+    };
+    Some(if cis { 0.0 } else { 180.0 })
+}
+
 /// **中心键在环上时,一条 1-4 路径的扭转角范围。**
 ///
 /// 这是从 RDKit 读来的一课(`BoundsMatrixBuilder.cpp:1005-1038`):
@@ -478,7 +517,11 @@ pub fn build(mol: &MolBuilder) -> (Bounds, Stats) {
                 let arom = mol.bonds()[bidx].order == omgkit_core::BondOrder::Aromatic;
                 // 芳环上的扭转是**确定值**(见 `planar_ring_torsion`),不是区间;
                 // 解不掉的才退回按环尺寸的包络
-                let (t_lo, t_hi) = ring_path_torsion(&ring_sets, &aromatic_ring, i, k, l, j)
+                // 顺序:立体标记 > 环 > 自由旋转。**有立体标记的双键最硬**,
+                // 它给的是确定值;环给区间;都没有才退回顺式到反式的全程。
+                let (t_lo, t_hi) = stereo_path_torsion(mol, bidx, i, k, j)
+                    .map(|t| (t, t))
+                    .or_else(|| ring_path_torsion(&ring_sets, &aromatic_ring, i, k, l, j))
                     .unwrap_or_else(|| {
                         torsion_envelope(shared_ring(&ring_sets, &[i, k, l, j]), arom)
                     });
@@ -555,6 +598,9 @@ mod tests {
     fn prep(smi: &str) -> MolBuilder {
         let mut m = omgkit_io::smiles::parse(smi).expect("SMILES 该解析得了");
         omgkit_chem::pipeline::sanitize(&mut m).expect("该 sanitize 得了");
+        // **立体感知要在建界之前跑。** 界矩阵消费 `bond.stereo`,
+        // 没感知的话双键那一支永远走不到,而判据看不出区别 —— 只是界更松。
+        omgkit_io::stereo::perceive_bond_stereo(&mut m);
         let r = omgkit_io::canon::classed_ranks(&m);
         omgkit_chem::add_explicit_hs(&mut m, &r);
         m
@@ -758,6 +804,42 @@ mod tests {
             }
         }
         d[b].min(4)
+    }
+
+    /// **顺式与反式必须给出不同的界。**
+    ///
+    /// 这条是防"立体那一支接了等于没接":如果 `stereo_path_torsion` 从不生效,
+    /// 两个写法会拿到**同一个**顺式到反式的区间,判据照样绿 —— 只是界更松。
+    ///
+    /// 2-丁烯:顺式的两个甲基碳约 3.0 Å,反式约 3.7 Å。
+    #[test]
+    fn cis_and_trans_get_different_bounds() {
+        let cis = prep(r"C/C=C\C");
+        let trans = prep(r"C/C=C/C");
+        let mut got = Vec::new();
+        for m in [&cis, &trans] {
+            let (b, _) = build(m);
+            // 两个甲基碳:与双键碳成键、且自己只连一个重原子
+            let cs: Vec<usize> = (0..m.num_atoms())
+                .filter(|i| {
+                    m.atoms()[*i].atomic_num == 6
+                        && m.neighbors(u32::try_from(*i).expect("下标"))
+                            .filter(|(y, _)| m.atoms()[*y as usize].atomic_num > 1)
+                            .count()
+                            == 1
+                })
+                .collect();
+            assert_eq!(cs.len(), 2, "2-丁烯该有两个端甲基");
+            let (lo, hi) = (b.lower(cs[0], cs[1]), b.upper(cs[0], cs[1]));
+            assert!(hi - lo < 0.30, "区间 [{lo:.3}, {hi:.3}] 没被立体标记钉住");
+            got.push(f64::midpoint(lo, hi));
+        }
+        assert!(
+            got[1] - got[0] > 0.5,
+            "顺式 {:.3}、反式 {:.3} —— 立体那一支没生效,两个写法拿到了同一个区间",
+            got[0],
+            got[1]
+        );
     }
 
     /// 空分子、单原子:不许 panic。

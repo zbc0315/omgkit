@@ -68,10 +68,23 @@ def main() -> int:
             # 中性氮,价键检查当场判死 —— 实测 400 个分子里 201 个因此建不出来。
             chg = [a.GetFormalCharge() for a in mol.GetAtoms()]
             rad = [a.GetNumRadicalElectrons() for a in mol.GetAtoms()]
-            bonds = [
-                [b.GetBeginAtomIdx(), b.GetEndAtomIdx(), _order_tag(b)]
-                for b in mol.GetBonds()
-            ]
+            # **立体标记也要导。** 界矩阵靠 stereo + stereo_atoms 把 1-4 的
+            # 顺反析取解掉;不导出来,判官那边这一支永远走不到,而它看不出区别 ——
+            # 只是界更松。
+            bonds = []
+            for b in mol.GetBonds():
+                st = int(b.GetStereo())
+                sa = list(b.GetStereoAtoms())
+                bonds.append(
+                    [
+                        b.GetBeginAtomIdx(),
+                        b.GetEndAtomIdx(),
+                        _order_tag(b),
+                        st,
+                        sa[0] if len(sa) == 2 else -1,
+                        sa[1] if len(sa) == 2 else -1,
+                    ]
+                )
             # 一个真实构象:ETKDG 嵌入 + MMFF 优化。判据一("界必须包住真实构象")用它。
             coords = None
             probe = Chem.Mol(mol)

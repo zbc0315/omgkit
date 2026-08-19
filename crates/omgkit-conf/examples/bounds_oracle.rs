@@ -42,7 +42,12 @@ const MAX_WIDTH_RATIO: f64 = 1.0;
 /// 带四根键的中性氮,价键检查当场判死 —— 400 个分子里 **201 个**建不出来,
 /// 而判据仍然"跑得通",只是在剩下那一半上量。**判据的样本被腰斩却不报警,
 /// 比判据本身写错更危险。**
-fn build_mol(z: &[u8], chg: &[i8], rad: &[u8], bonds: &[(u32, u32, u8)]) -> Option<MolBuilder> {
+fn build_mol(
+    z: &[u8],
+    chg: &[i8],
+    rad: &[u8],
+    bonds: &[(u32, u32, u8, i64, i64, i64)],
+) -> Option<MolBuilder> {
     let mut m = MolBuilder::new();
     for (k, &a) in z.iter().enumerate() {
         let mut ad = omgkit_core::AtomData::new(a);
@@ -50,7 +55,7 @@ fn build_mol(z: &[u8], chg: &[i8], rad: &[u8], bonds: &[(u32, u32, u8)]) -> Opti
         ad.num_radical_electrons = rad.get(k).copied().unwrap_or(0);
         m.add_atom_data(ad);
     }
-    for &(i, j, o) in bonds {
+    for &(i, j, o, _, _, _) in bonds {
         let ord = match o {
             2 => BondOrder::Double,
             3 => BondOrder::Triple,
@@ -60,6 +65,26 @@ fn build_mol(z: &[u8], chg: &[i8], rad: &[u8], bonds: &[(u32, u32, u8)]) -> Opti
         m.add_bond(i, j, ord).ok()?;
     }
     omgkit_chem::pipeline::sanitize(&mut m).ok()?;
+    // 立体标记要在 sanitize **之后**写(它可能重排键),而且要在建界**之前**
+    for (bi, &(_, _, _, st, sa0, sa1)) in bonds.iter().enumerate() {
+        if sa0 < 0 || sa1 < 0 {
+            continue;
+        }
+        // RDKit 的 Bond::BondStereo:0 无 2 Z 3 E 4 cis 5 trans
+        let s = match st {
+            2 => omgkit_core::BondStereo::Z,
+            3 => omgkit_core::BondStereo::E,
+            4 => omgkit_core::BondStereo::Cis,
+            5 => omgkit_core::BondStereo::Trans,
+            _ => continue,
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        if let Some(mut b) = m.bond_mut(bi as u32) {
+            b.set_stereo(s);
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            b.set_stereo_atoms([sa0 as u32, sa1 as u32]);
+        }
+    }
     Some(m)
 }
 
@@ -109,7 +134,7 @@ fn main() {
             })
             .unwrap_or_default();
         #[allow(clippy::cast_possible_truncation)]
-        let bl: Vec<(u32, u32, u8)> = v["bonds"]
+        let bl: Vec<(u32, u32, u8, i64, i64, i64)> = v["bonds"]
             .as_array()
             .map(|a| {
                 a.iter()
@@ -119,6 +144,9 @@ fn main() {
                             t.first()?.as_u64()? as u32,
                             t.get(1)?.as_u64()? as u32,
                             t.get(2)?.as_u64()? as u8,
+                            t.get(3).and_then(serde_json::Value::as_i64).unwrap_or(0),
+                            t.get(4).and_then(serde_json::Value::as_i64).unwrap_or(-1),
+                            t.get(5).and_then(serde_json::Value::as_i64).unwrap_or(-1),
                         ))
                     })
                     .collect()
