@@ -77,7 +77,7 @@ SMILES 写法,必须净化成同一个东西、匹配同样的查询、按同样
 - **[五分钟上手](getting-started/quickstart.md)** —— 解析、净化、匹配、反应
 - **[功能与用法](guide/index.md)** —— 一个能力一页,从任务出发
 - **[Python API](api/python.md)** —— 每个可调用项,带签名
-- **[开发者帮助](dev/index.md)** —— 构建、测试,以及五道闸门
+- **[开发者帮助](dev/index.md)** —— 构建、测试,以及推之前那一整套闸门
 
 </div>
 

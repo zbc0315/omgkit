@@ -1,6 +1,6 @@
 # Building and testing
 
-## The five gates
+## The gates
 
 一条命令跑全部:
 
@@ -8,7 +8,7 @@
 bash harness/gates.sh
 ```
 
-它就是下面这五条,顺序执行、任何一条非 0 就停:
+顺序执行、任何一条非 0 就停:
 
 ```shell
 cargo fmt --all --check
@@ -16,7 +16,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --release
 cargo test --workspace                     # debug,让 debug_assert 真的跑到
 cargo doc --workspace --no-deps --document-private-items
+
+# omgkit-conf 的三个外部判官,跑冒烟档(基准随仓库入库)
+SMOKE=harness/baseline/smoke.bounds.jsonl
+cargo run -p omgkit-conf --release --example smooth_oracle -- $SMOKE
+cargo run -p omgkit-conf --release --example bounds_oracle -- $SMOKE
+cargo run -p omgkit-conf --release --example eigen_oracle  -- $SMOKE \
+    harness/baseline/smoke.gram_eigs.jsonl
 ```
+
+(这一节的标题原先写着 "The five gates",而条数早已从四变五、现在是八 ——
+数字写进标题就会掉队。现在不写数字:要知道有几道,数上面的命令。)
 
 **语料判据要随算法一起回来。** 判据不进 CI,"违例不许涨"就只是文档里的一句话 ——
 上一轮正是这么漏的:判据只进了本地脚本,推送时一条都不执行,而 CI 一直是绿的。
@@ -50,6 +60,7 @@ default-members = [
     "crates/omgkit-chem",
     "crates/omgkit-match",
     "crates/omgkit-depict",
+    "crates/omgkit-conf",
 ]
 ```
 
@@ -83,7 +94,7 @@ python harness/test_python.py
 
 The tests come in two tiers.
 
-**Smoke tier** — oracles are committed (about 680 KB), runs by default, green on
+**Smoke tier** — oracles are committed (about 1.3 MB), runs by default, green on
 a fresh clone.
 
 **Large-corpus tier** — marked `#[ignore]`, needs oracles you generate against
@@ -140,19 +151,30 @@ python3 harness/make_gallery.py out/
 The `raster` feature is optional on purpose: without it the crate has **no
 external dependencies** and emits SVG only.
 
-## 初始构型:重新设计中
+## 初始构型:确定性距离几何(建设中)
 
-`omgkit-conf`(v2)已连同 v1 一起撤销。两版都栽在同一件事上:
-**按分子的类别切分支** —— 无环走构造法、有环另说、超配位拒绝、累积双键再加一条。
-每来一类分子就多一个分支,覆盖率停在 **14.3%**(1259 / 8831),
-而 RDKit ETKDG 是 99.48%。
+`omgkit-conf` 的 v1 与 v2 都撤了。两版栽在同一件事上:**按分子的类别切分支** ——
+无环走构造法、有环另说、超配位拒绝、累积双键再加一条。每来一类分子就多一个分支,
+覆盖率停在 **14.3%**(1259 / 8831),而 RDKit ETKDG 是 99.48%。
+旧代码在 git 历史里(`4eefccd` 及之前),需要参考时 `git show` 取。
 
-要的是**一个**对所有有机小分子都成立的算法,不是一堆特例的并集。
-方案重写中(`dev-notes/`,不入库)。这一节等算法定下来再补。
+现在这一版走的是距离几何,与 RDKit 同一条主干,**只在一处分岔**:
+RDKit 在界矩阵里**逐对独立随机取**一组距离,取出来的表常常任何空间都摆不出来,
+它的应对是作废整次尝试重掷;这里直接拿三角光滑化之后的上限矩阵 `U` 当参考距离表 ——
+`U` 按构造满足三角不等式,而且**全程没有随机数**。
 
-代码在 git 历史里(`4eefccd` 及之前),需要参考时 `git show` 取。
-`harness/params/` 里的实测参数表与 `harness/baseline_rdkit_etkdg.py` 留着 ——
-那些是从语料量出来的**数据**与基线,与算法怎么写无关。
+已落地的分块,每块都配了外部判官(判官不进 CI 就不是闸,所以三条都在上面的闸门里):
+
+| 分块 | 判官 | 现状 |
+|---|---|---|
+| 三角光滑化 | RDKit 的 `GetMoleculeBoundsMatrix` 带/不带 smoothing | 逐位相同,最大偏差 5.3e-15 |
+| 界矩阵 | 真实构象要落在界内 + 界宽不许比 RDKit 松 + `U` 要摆得进三维 | 越界 0.607%;宽度比 1.020;1-2/1-3/1-4 三档与 RDKit 逐位相同 |
+| 特征分解 + 嵌入 | numpy `eigvalsh`(LAPACK)+ 真实构象精确回嵌 | 特征值偏差 5.96e-15;回嵌偏差 1.76e-11 Å |
+
+还没做:误差函数与优化器、立体化学的有符号体积项、确定性的对称性破除与修复阶梯。
+
+`harness/params/` 里的实测参数表与 `harness/baseline_rdkit_etkdg.py` 是从语料量出来的
+**数据**与基线,与算法怎么写无关,一直留着。
 
 ## Documentation
 

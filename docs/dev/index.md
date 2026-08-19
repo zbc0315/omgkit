@@ -2,7 +2,7 @@
 
 <div class="grid cards" markdown>
 
-- **[Building and testing](building.md)** — the five gates, and how to run the
+- **[Building and testing](building.md)** — the gates, and how to run the
   differential tests
 - **[Design](design.md)** — the layer stack and the invariants each layer keeps
 - **[Correctness](correctness.md)** — how the claims are checked, and how a

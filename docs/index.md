@@ -86,7 +86,7 @@ Full instructions in [Installation](getting-started/install.md).
   react in five minutes
 - **[Guides](guide/index.md)** — one page per capability, task first
 - **[Python API](api/python.md)** — every callable, with signatures
-- **[Developing](dev/index.md)** — build, test, and the five gates
+- **[Developing](dev/index.md)** — build, test, and the full pre-push gate suite
 
 </div>
 

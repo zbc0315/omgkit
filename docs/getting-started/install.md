@@ -65,7 +65,7 @@ cargo add omgkit-core omgkit-io omgkit-chem omgkit-match
 
 ## Building from a clone
 
-The five gates below are what CI runs. They pass on a fresh clone — the smoke
+The gates below are what CI runs. They pass on a fresh clone — the smoke
 oracles for the differential tests are committed, so nothing has to be
 generated first.
 
@@ -75,6 +75,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --release
 cargo test --workspace
 cargo doc --workspace --no-deps --document-private-items
+
+# the external judges for omgkit-conf, on the committed smoke baseline
+cargo run -p omgkit-conf --release --example smooth_oracle -- harness/baseline/smoke.bounds.jsonl
+cargo run -p omgkit-conf --release --example bounds_oracle -- harness/baseline/smoke.bounds.jsonl
+cargo run -p omgkit-conf --release --example eigen_oracle  -- harness/baseline/smoke.bounds.jsonl harness/baseline/smoke.gram_eigs.jsonl
 ```
 
 The large-corpus tier of the differential tests is marked `#[ignore]` and needs

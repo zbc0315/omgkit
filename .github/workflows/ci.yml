@@ -1,6 +1,10 @@
-# 四道闸门,与本地 `harness/README.md` 里写的是同一套。
+# 闸门,与本地 `harness/gates.sh` 是同一套。
 #
-# 只跑纯 Rust 那四个 crate(工作区的 `default-members`)。omgkit-py 是 cdylib,
+# (这里原先写着"四道闸门",而步骤早已加到五步、现在八步 —— 数字写在散文里
+#  就会这样掉队。所以现在不写数字:要知道有几道,数下面的 step。
+#  根 Cargo.toml 里的 `default-members` 注释栽过同一个跟头。)
+#
+# 只跑纯 Rust 那几个 crate(工作区的 `default-members`)。omgkit-py 是 cdylib,
 # 链接时把 Python 符号欠着,给它建测试可执行文件必然失败 —— 理由写在
 # 根 Cargo.toml 里。
 #
@@ -68,3 +72,22 @@ jobs:
       # 的新注释、一条函数改名遗留)。
       - name: 文档
         run: cargo doc --workspace --no-deps --document-private-items
+
+      # ---- omgkit-conf 的三个外部判官 ----
+      #
+      # **闸不进 CI 就不是闸。** 这三条先前只在本地手动跑,于是"光滑化与 RDKit
+      # 逐位相同"、"界宽比 1.020"、"特征值对得上 LAPACK"全靠自觉维持 ——
+      # 谁都可能在不知情的时候把它们推回去,而 CI 全程绿灯。
+      #
+      # 跑的是冒烟档(27 个分子,随仓库入库,合计 454 K),全量基准 7.7 M 不入库。
+      # 三条里有两条是**逐分子的硬判据**(逐位相同 / 对上 LAPACK / 精确回嵌),
+      # 27 个分子照样抓得住错;只有界矩阵那三条统计判据在冒烟档上精度较低,
+      # 全量档留给本地 `harness/gates.sh` 之外手动跑。
+      - name: 判官:三角光滑化 vs RDKit
+        run: cargo run -p omgkit-conf --release --example smooth_oracle -- harness/baseline/smoke.bounds.jsonl
+
+      - name: 判官:界矩阵(三条)
+        run: cargo run -p omgkit-conf --release --example bounds_oracle -- harness/baseline/smoke.bounds.jsonl
+
+      - name: 判官:特征分解 vs LAPACK + 精确回嵌
+        run: cargo run -p omgkit-conf --release --example eigen_oracle -- harness/baseline/smoke.bounds.jsonl harness/baseline/smoke.gram_eigs.jsonl
