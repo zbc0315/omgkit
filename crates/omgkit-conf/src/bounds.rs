@@ -144,10 +144,10 @@ pub const ANGLE_TOL: f64 = 2.5;
 /// 表里没有的尺寸(10~15、17 以上)按"越大越柔"退到全程 —— 大环本来就柔,
 /// 硬给一个内插值是在编数。
 #[must_use]
-pub fn ring_internal_torsion(size: usize, aromatic: bool) -> (f64, f64) {
+pub fn ring_internal_torsion(size: usize, aromatic: bool, sp3: bool) -> (f64, f64) {
     /// 一行:`(中位, p05, p95)`,单位度。
     type Row = (f64, f64, f64);
-    static T: std::sync::OnceLock<std::collections::HashMap<(usize, bool), Row>> =
+    static T: std::sync::OnceLock<std::collections::HashMap<(usize, bool, bool), Row>> =
         std::sync::OnceLock::new();
     let t = T.get_or_init(|| {
         let mut m = std::collections::HashMap::new();
@@ -156,21 +156,22 @@ pub fn ring_internal_torsion(size: usize, aromatic: bool) -> (f64, f64) {
                 continue;
             }
             let f: Vec<&str> = line.split('\t').collect();
-            if f.len() < 6 {
+            if f.len() < 7 {
                 continue;
             }
-            let (Ok(sz), Ok(ar), Ok(p05), Ok(p95)) = (
+            let (Ok(sz), Ok(ar), Ok(sp), Ok(p05), Ok(p95)) = (
                 f[0].parse::<usize>(),
                 f[1].parse::<u8>(),
-                f[4].parse::<f64>(),
+                f[2].parse::<u8>(),
                 f[5].parse::<f64>(),
+                f[6].parse::<f64>(),
             ) else {
                 continue;
             };
-            let Ok(med) = f[3].parse::<f64>() else {
+            let Ok(med) = f[4].parse::<f64>() else {
                 continue;
             };
-            m.insert((sz, ar == 1), (med, p05, p95));
+            m.insert((sz, ar == 1, sp == 1), (med, p05, p95));
         }
         m
     });
@@ -182,15 +183,35 @@ pub fn ring_internal_torsion(size: usize, aromatic: bool) -> (f64, f64) {
     // 我们只生成**一个**构型,挑中位是诚实的选择,力场会把它带到该去的极小。
     //
     // 表里没有的尺寸(10~15、17 以上)退到全程 —— 大环本来就柔,内插是在编数。
-    t.get(&(size, aromatic))
-        .map_or((0.0, 180.0), |&(med, _, _)| (med, med))
+    t.get(&(size, aromatic, sp3))
+        .map_or((0.0, 180.0), |&(med, p05, p95)| {
+            if aromatic {
+                // 芳环真的是**一个值**:六元芳环 p05=0.0、p95=2.2,整桶挤在 0 附近。
+                // 这一档钉成中位是诚实的。
+                (med, med)
+            } else {
+                // **饱和环不能钉成一个值** —— 它有多个构象。六元全 sp³ 那一桶
+                // p05=19.0、p95=64.4(椅 ~55°、扭船 ~30°),钉在中位 53.8° 上
+                // 就把扭船排除在界外了:实测判据一从 0.135% 涨到 0.431%,
+                // 而 1-4 界宽只从 7.68 收到 7.54 —— **代价大、收益几乎没有**。
+                //
+                // 改用实测的 [p05, p95]:比"顺式到反式全程"紧得多,又包得住真实构象。
+                (p05, p95)
+            }
+        })
 }
 
 /// **中心键是有立体标记的双键时,一条 1-4 路径的扭转角是确定值。**
 ///
 /// 这是 RDKit `_setChain14Bounds`(`BoundsMatrixBuilder.cpp:1020-1038`)那一支:
 /// 它调 `_getAtomStereo(bnd2, aid1, aid4)` **逐对**问"这两个原子是顺还是反",
-/// 然后 `dl = du`。实测它靠这类解析把 **59.1%** 的 1-4 钉住,而取凸包只有个位数。
+/// 然后 `dl = du`。
+///
+/// **注意别把这条路的功劳记大了。** 先前这里写着"它靠这类解析把 59.1% 的 1-4 钉住" ——
+/// 那是**记错了**:实测语料里 9298 根键上只有 **51 根**带立体标记(0.55%),
+/// 这条路撑不起 59% 的钉住率。RDKit 那 58.7% 的来源是 **sp²–sp² 键**
+/// (芳环、共轭、酰胺 —— 由共轭定平面),见 `_setInRing14Bounds` 里的 `preferCis`。
+/// 我们目前只钉了芳**环**,没钉一般的 sp²–sp² 键 —— 那才是 1-4 界宽还差 7.5 倍的原因。
 ///
 /// # 顺反离开参照没有意义
 ///
@@ -229,8 +250,9 @@ fn stereo_path_torsion(mol: &MolBuilder, bidx: usize, i: u32, k: u32, j: u32) ->
 ///
 /// 这是从 RDKit 读来的一课(`BoundsMatrixBuilder.cpp:1005-1038`):
 /// 它**不取凸包,而是用化学把析取解掉** —— 双键上问立体描述符"这一对是顺是反",
-/// 然后 `dl = du`,宽度是 `2×GEN_DIST_TOL = 0.12 Å`。实测它把 **59.1%** 的 1-4
-/// 都这么解掉了,而取凸包只能解掉个位数。
+/// 然后 `dl = du`,宽度是 `2×GEN_DIST_TOL = 0.12 Å`。
+/// (它总共钉住 58.7% 的 1-4,但**主要不是靠立体标记** —— 见
+/// [`stereo_path_torsion`] 里那段更正。)
 ///
 /// 环上不用立体描述符就能解:环有一个内扭转 `τ`([`ring_internal_torsion`]),
 /// 而环外的取代基相对环内的路径是**反过来的**。于是
@@ -247,6 +269,7 @@ fn stereo_path_torsion(mol: &MolBuilder, bidx: usize, i: u32, k: u32, j: u32) ->
 fn ring_path_torsion(
     ring_sets: &[Vec<u32>],
     ring_aromatic: &[bool],
+    ring_sp3: &[bool],
     i: u32,
     k: u32,
     l: u32,
@@ -286,12 +309,15 @@ fn ring_path_torsion(
     // `BoundsMatrixBuilder.cpp:708-790`),其余"here we will assume anything is
     // possible",给顺式到反式的全程。这里照同一条规矩:**芳环才钉**,
     // 饱和环退回全程,宁可界松也不要摆不出来。
-    if !ring_aromatic[r] {
+    // **只有总体齐整的那两桶才钉:芳环、全 sp³ 环。**
+    // 混合桶(非芳、非全 sp³)里既有共轭近平面环又有半椅,中位描述的是两者都不是
+    // 的东西 —— 那正是先前把六元环钉成 20.9° 的来源。
+    if !ring_aromatic[r] && !ring_sp3[r] {
         return None;
     }
     let set = &ring_sets[r];
     let has = |a: u32| set.binary_search(&a).is_ok();
-    let (t_lo, t_hi) = ring_internal_torsion(size, ring_aromatic[r]);
+    let (t_lo, t_hi) = ring_internal_torsion(size, ring_aromatic[r], ring_sp3[r]);
     Some(if has(i) == has(j) {
         (t_lo, t_hi)
     } else {
@@ -591,6 +617,16 @@ pub fn build(mol: &MolBuilder) -> (Bounds, Stats) {
             })
         })
         .collect();
+    // 每个环是不是**全 sp³** —— 这一维把"共轭近平面"与"椅/船"两个总体分开。
+    // 不分开的话中位落在两者之间,与同一张表的键角**几何上不相容**(见
+    // `ring_path_torsion` 里那段账)。
+    let sp3_ring: Vec<bool> = ring_sets
+        .iter()
+        .map(|set| {
+            set.iter()
+                .all(|a| mol.atoms()[*a as usize].hybridization == omgkit_core::Hybridization::Sp3)
+        })
+        .collect();
     let mut kind = vec![Kind::None; n * n];
 
     // ---- 1-2 ----
@@ -722,7 +758,9 @@ pub fn build(mol: &MolBuilder) -> (Bounds, Stats) {
                 // 它给的是确定值;环给区间;都没有才退回顺式到反式的全程。
                 let (t_lo, t_hi) = stereo_path_torsion(mol, bidx, i, k, j)
                     .map(|t| (t, t))
-                    .or_else(|| ring_path_torsion(&ring_sets, &aromatic_ring, i, k, l, j))
+                    .or_else(|| {
+                        ring_path_torsion(&ring_sets, &aromatic_ring, &sp3_ring, i, k, l, j)
+                    })
                     .unwrap_or_else(|| {
                         torsion_envelope(shared_ring(&ring_sets, &[i, k, l, j]), arom)
                     });

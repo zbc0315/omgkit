@@ -11,8 +11,18 @@
 - 键长键角表(`measure_params.py`)是在 ETKDGv3 + MMFF94 收敛的结构上量的,
   这里用同一套口径,数才能互相对得上。
 - 逐个环,沿环走一圈取连续四元组 `(a,b,c,d)`,记 `|扭转角|`(0~180)。
-- 分桶:**环尺寸 + 是否芳环**。芳环单列是因为它必然近平面,与同尺寸的
-  饱和环完全不是一回事(六元:苯 0° vs 环己烷椅式 ±55°)。
+- 分桶:**环尺寸 + 是否芳环 + 是否全 sp³**。
+
+# 为什么必须加"全 sp³"这一维
+
+只按"尺寸 + 芳香"分桶时,六元非芳那一桶的中位是 **20.9°**,而 p05=0.0、p95=61.2 ——
+这个跨度是**两个总体被揉在一起**的signature:共轭近平面环(环己二烯、吡喃酮…)
+在 0° 附近,全 sp³ 的椅式在 55° 附近。中位 20.9° 描述的是**两者都不是**的东西。
+
+后果不是"界松一点"。理想椅的闭环条件是 `cos τ = −cos θ / (1 + cos θ)`,
+键角 111.6°(同一张表的实测中位)解出 **|τ| = 54.4°**;反过来要让 τ = 20.9°,
+键角得是 118.9°。**把这两个中位一起写进界矩阵,得到的是摆不出来的构型** ——
+实测端到端:无环分子精修到恰好零,环己烷 1-4 越界 94.1%。
 
 用法:
 
@@ -23,7 +33,7 @@ import math
 import sys
 
 from rdkit import Chem, RDLogger
-from rdkit.Chem import AllChem, rdDistGeom, rdMolTransforms
+from rdkit.Chem import AllChem, rdDistGeom, rdMolTransforms  # noqa: F401
 
 RDLogger.DisableLog("rdApp.*")
 
@@ -75,6 +85,15 @@ def main() -> int:
             arom = int(
                 all(mol.GetAtomWithIdx(a).GetIsAromatic() for a in ring)
             )
+            # 全 sp³:环上每个原子都是 sp³ 杂化。这一维把"共轭近平面"与
+            # "椅/船"两个总体分开 —— 见文件头。
+            sp3 = int(
+                all(
+                    mol.GetAtomWithIdx(a).GetHybridization()
+                    == Chem.HybridizationType.SP3
+                    for a in ring
+                )
+            )
             for t in range(k):
                 a, b, c, d = (
                     ring[t],
@@ -87,14 +106,14 @@ def main() -> int:
                 except Exception:  # noqa: BLE001
                     continue
                 if math.isfinite(ang):
-                    buckets.setdefault((k, arom), []).append(abs(ang))
+                    buckets.setdefault((k, arom, sp3), []).append(abs(ang))
 
     with open(out, "w", encoding="utf-8") as fh:
-        fh.write("#环尺寸\t芳香\t计数\t中位\tp05\tp95\t均值\n")
-        for (k, arom), v in sorted(buckets.items()):
+        fh.write("#环尺寸\t芳香\t全sp3\t计数\t中位\tp05\tp95\t均值\n")
+        for (k, arom, sp3), v in sorted(buckets.items()):
             v.sort()
             fh.write(
-                f"{k}\t{arom}\t{len(v)}\t{quantile(v, 0.5):.1f}\t"
+                f"{k}\t{arom}\t{sp3}\t{len(v)}\t{quantile(v, 0.5):.1f}\t"
                 f"{quantile(v, 0.05):.1f}\t{quantile(v, 0.95):.1f}\t"
                 f"{sum(v) / len(v):.4f}\n"
             )
