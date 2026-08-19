@@ -94,6 +94,17 @@ pub enum EigenError {
         /// 扫了几轮。
         sweeps: usize,
     },
+    /// 输入全是有限数,但**中间量溢出**了,算出来的特征值不是有限数。
+    ///
+    /// **输入有限不蕴含中间量有限。** 入口那道扫描只查输入,而 Jacobi 会算
+    /// `d[q] += t·a_pq` 这类和 —— 元素接近 `f64::MAX` 时它会溢出到 `inf`,
+    /// 之后 `inf − inf` 就是 `NaN`。实测 `symmetric_eigen(&[9e307; 4], 2)`
+    /// 先前返回的是 `Ok(values = [inf, 0.0])`:**一个非有限的答案裹在 `Ok` 里**。
+    ///
+    /// 这条对本 crate 的嵌入路径够不着(距离表的元素要到 6e153 量级才够,
+    /// 而那时 `d²` 会先在入口被挡下),但 `symmetric_eigen` 是公开 API,
+    /// 契约不能靠调用方恰好不越界来维持。
+    Overflowed,
 }
 
 /// 判断 `g` 相对于 `x` 是否已经小到可以忽略。
@@ -121,7 +132,7 @@ fn rot(m: &mut [f64], a: usize, b: usize, s: f64, tau: f64) {
 ///
 /// # Errors
 ///
-/// 输入含非有限数,或扫满 `MAX_SWEEPS` 轮未收敛。
+/// 输入含非有限数、中间量溢出、或扫满 `MAX_SWEEPS` 轮未收敛。
 ///
 /// # Panics
 ///
@@ -143,7 +154,7 @@ pub fn symmetric_eigen(a: &[f64], n: usize) -> Result<Eigen, EigenError> {
 
     let mut m = a.to_vec();
     // `v` 的第 k **列**是第 k 个特征向量(Jacobi 内部的自然布局),最后转置出去
-    let mut v = vec![0.0; n * n];
+    let mut v: Vec<f64> = vec![0.0; n * n];
     for i in 0..n {
         v[i * n + i] = 1.0;
     }
@@ -154,8 +165,12 @@ pub fn symmetric_eigen(a: &[f64], n: usize) -> Result<Eigen, EigenError> {
     let mut z = vec![0.0; n];
 
     for sweep in 1..=MAX_SWEEPS {
-        // 上三角非对角元绝对值之和。Jacobi 的每一次旋转都让它严格下降,
-        // 降到 0 就是收敛(不是"足够小"就停 —— 是真的到 0)。
+        // 上三角非对角元绝对值之和,降到 0 就是收敛(不是"足够小"就停 —— 是真的到 0)。
+        //
+        // **别把它说成"每次旋转都严格下降"**:单调下降的是**平方和**
+        // `off(A)²`(一次旋转恰好减掉 `2·a_pq²`),绝对值之和可以在单次旋转里**上升**。
+        // 反例 `[[0, 0.1, 1], [0.1, 0, 0], [1, 0, 0]]`:头一次旋转把这个和
+        // 从 1.0 抬到 1.414,整个分解里每一次旋转它都在涨,而逐**轮**照样收敛到 0。
         let mut sm = 0.0;
         for i in 0..n {
             for j in (i + 1)..n {
@@ -163,10 +178,20 @@ pub fn symmetric_eigen(a: &[f64], n: usize) -> Result<Eigen, EigenError> {
             }
         }
         if sm == 0.0 {
+            // **出口也要查有限性。** 输入有限不蕴含中间量有限:元素接近 f64::MAX 时
+            // `d[q] += dh` 会溢出成 inf,再减就是 NaN,而收敛判据 `sm == 0.0`
+            // 对一堆 inf 反而立刻成立 —— 于是垃圾裹在 Ok 里返回。
+            if d.iter().any(|x| !x.is_finite()) || v.iter().any(|x| !x.is_finite()) {
+                return Err(EigenError::Overflowed);
+            }
             return Ok(finish(n, &d, &v, sweep - 1));
         }
-        // 前三轮设一道门槛,只转"大"的元素。小元素这时候转纯属做无用功 ——
+        // 前三轮设一道门槛,只转"大"的元素:小元素这时候转多半白转,
         // 后面的大旋转会把它们再搅乱一遍。
+        //
+        // **这是省时间的启发式,不是精度的必需品** —— 把 0.2 改成 2.0 之后
+        // 全部单测(含希尔伯特与量级跨 10^18 那两档)照样绿。照 Numerical Recipes
+        // 的原值留着,但别把它说成正确性的一部分。
         let tresh = if sweep < 4 {
             0.2 * sm / (n * n) as f64
         } else {
@@ -179,6 +204,9 @@ pub fn symmetric_eigen(a: &[f64], n: usize) -> Result<Eigen, EigenError> {
                 let g = 100.0 * apq.abs();
                 // 这一项相对两个对角元已经小到加上去都不改变它们:转它只会引入
                 // 舍入噪声,直接置零。前四轮不做这个判断 —— 那时对角还没稳定。
+                //
+                // 同上:`sweep > 4` 里那个 4 也是 NR 的经验值。改成 2 之后
+                // 单测全绿,所以它买的是轮数,不是精度。
                 if sweep > 4 && is_negligible(g, d[p]) && is_negligible(g, d[q]) {
                     m[p * n + q] = 0.0;
                     continue;
@@ -244,7 +272,9 @@ fn finish(n: usize, d: &[f64], v: &[f64], sweeps: usize) -> Eigen {
     // 于是同样的输入永远给同样的输出。
     order.sort_by(|&x, &y| {
         d[y].partial_cmp(&d[x])
-            .expect("非有限数已在入口挡掉,这里不可能有 NaN")
+            // 靠的是**出口**那道有限性检查,不是入口那道 —— 入口只管输入,
+            // 而中间量可以自己溢出成 inf/NaN。
+            .expect("出口已查过有限性,这里不可能有 NaN")
     });
     let mut values = Vec::with_capacity(n);
     let mut vectors = vec![0.0; n * n];
@@ -369,9 +399,110 @@ mod tests {
         let r = std::f64::consts::FRAC_1_SQRT_2;
         assert!((e.vector(0)[0] - r).abs() < 1e-14);
         assert!((e.vector(0)[1] - r).abs() < 1e-14);
-        // 符号约定:两个分量绝对值相等 → 取下标最小的那个为正
+        // 注意:这两个分量**不是**并列 —— 实测差一个 ulp,所以这里走的是
+        // "绝对值严格更大"那一支,与并列规则无关。并列规则由下面那条测试单独守。
         assert!((e.vector(1)[0] - r).abs() < 1e-14, "{:?}", e.vector(1));
         assert!((e.vector(1)[1] + r).abs() < 1e-14, "{:?}", e.vector(1));
+    }
+
+    #[test]
+    fn 符号约定的并列规则() {
+        // **必须造出逐位相同的分量**,否则测的是"谁绝对值更大",不是并列规则。
+        // 单位阵的特征向量直接由内部的单位阵旋转出来,分量恰好是 1.0 与 0.0 ——
+        // 而两个 0.0 逐位相同,`best` 落在哪个下标完全由并列规则决定。
+        //
+        // 这条守的是 `canonical_sign` 里那个 `>` 不能写成 `>=`。写成 `>=` 时
+        // 并列取的是**最大**下标,同一个特征子空间会给出不同的符号 —— 而符号翻转
+        // 就是一次反射,手性跟着翻(见 `canonical_sign` 的文档)。
+        let mut a = vec![0.0; 16];
+        for i in 0..4 {
+            a[i * 4 + i] = 1.0;
+        }
+        let e = symmetric_eigen(&a, 4).unwrap();
+        for k in 0..4 {
+            let v = e.vector(k);
+            // 三个 0.0 与一个 ±1.0:并列的是那三个 0,而 `best` 必须落在 ±1 上
+            let zeros = v.iter().filter(|x| **x == 0.0).count();
+            assert_eq!(zeros, 3, "第 {k} 根不是单位向量:{v:?}");
+            let big = (0..4)
+                .find(|&i| v[i].abs() == 1.0)
+                .expect("应有一个 ±1 分量");
+            assert!(v[big] > 0.0, "第 {k} 根:v[{big}] = {} 应为正", v[big]);
+        }
+
+        // **上面那段其实钉不住并列规则。** 单位向量里最大的那个分量是唯一的
+        // (那个 1.0),`>` 与 `>=` 会选出同一个 `best` —— 并列的只是几个 0,
+        // 而它们谁都赢不了那个 1.0。要真分辨,得让**最大值本身出现两次以上**,
+        // 而经过旋转出来的特征向量分量几乎不可能逐位相等
+        // (实测 `[[2,1],[1,2]]` 的两个分量差一个 ulp)。
+        //
+        // 所以直接测这个私有函数,拿精确构造的并列向量。±0.5 在二进制里是精确的,
+        // 四个分量的绝对值**逐位相同**:
+        //   `>`  → best 停在 0,v[0] = +0.5 > 0,不翻
+        //   `>=` → best 走到 3,v[3] = −0.5 < 0,整根翻号 —— 那就是一次反射
+        let mut v = [0.5, -0.5, 0.5, -0.5];
+        canonical_sign(&mut v);
+        assert_eq!(v, [0.5, -0.5, 0.5, -0.5], "并列时应取下标最小的那个");
+        let mut v = [-0.5, 0.5, -0.5, 0.5];
+        canonical_sign(&mut v);
+        assert_eq!(v, [0.5, -0.5, 0.5, -0.5], "下标最小的是负的,应整根翻正");
+    }
+
+    #[test]
+    fn 病态矩阵_量级悬殊与希尔伯特() {
+        // 前面的随机稠密阵**谱是平的**,`b/z` 累加、`sweep > 4` 的置零、
+        // `tresh` 的 0.2 这三处机制在那种输入上根本不起作用 —— 变异掉它们全绿。
+        // 要钉住它们得给量级悬殊/病态的输入。
+
+        // 一、对角跨 10^18,带耦合。小特征值必须保住**相对**精度 ——
+        // 这正是 Jacobi 相对其他算法的看家本领,也是判断"能不能装进三维"所依赖的。
+        let n = 6;
+        let mut a = vec![0.0; n * n];
+        let diag: Vec<f64> = (0..n).map(|i| 10f64.powi(-3 * i as i32)).collect();
+        for i in 0..n {
+            a[i * n + i] = diag[i];
+            for j in (i + 1)..n {
+                let c = 0.3 * (diag[i] * diag[j]).sqrt();
+                a[i * n + j] = c;
+                a[j * n + i] = c;
+            }
+        }
+        let e = symmetric_eigen(&a, n).unwrap();
+        assert!(
+            recon_err(&a, n, &e) < 1e-15,
+            "重建 {}",
+            recon_err(&a, n, &e)
+        );
+        assert!(orth_err(n, &e) < 1e-13, "正交 {}", orth_err(n, &e));
+        assert!(
+            e.values[n - 1] > 0.0,
+            "最小特征值 {} 应当仍是正的(相对精度没丢)",
+            e.values[n - 1]
+        );
+
+        // 二、希尔伯特阵:教科书级病态,n=10 的条件数约 1e13
+        for m in [6usize, 10] {
+            let mut h = vec![0.0; m * m];
+            for i in 0..m {
+                for j in 0..m {
+                    h[i * m + j] = 1.0 / (i + j + 1) as f64;
+                }
+            }
+            let e = symmetric_eigen(&h, m).unwrap();
+            assert!(recon_err(&h, m, &e) < 1e-14, "希尔伯特 {m} 重建失败");
+            assert!(orth_err(m, &e) < 1e-13, "希尔伯特 {m} 正交失败");
+            assert!(e.values[m - 1] > 0.0, "希尔伯特阵正定,最小特征值应为正");
+        }
+    }
+
+    #[test]
+    fn 中间量溢出要报错而不是裹在_ok_里() {
+        // 输入全是有限数,但 Jacobi 的 `d[q] += dh` 会溢出。
+        // 先前这里返回 `Ok(values = [inf, 0.0])` —— 非有限的答案裹在 Ok 里。
+        assert_eq!(symmetric_eigen(&[9e307; 4], 2), Err(EigenError::Overflowed));
+        // 边界另一侧仍须照常算得出来
+        let e = symmetric_eigen(&[8.9e307; 4], 2).unwrap();
+        assert!(e.values.iter().all(|v| v.is_finite()));
     }
 
     #[test]
