@@ -286,8 +286,23 @@ fn main() {
         let (o, r) = &mut by_class[c];
         o.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         r.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // **中位会把子群里的改进整个藏起来。** 实测:把芳环上的 1-4 扭转从
+        // "顺式到反式的区间"改成确定值之后,苯的 1-4 宽度掉到 0.05 以下,
+        // 而语料的 1-4 中位**一位没动**(0.762)—— 因为芳环上的 1-4 只占少数,
+        // 中位落在 sp³ 链上的氢那一群里。所以这里同时报"被钉住的比例"。
+        // 阈值取 0.15:RDKit 把"解掉了析取"的对钉成宽度 **2×GEN_DIST_TOL = 0.12 Å**
+        // (`BoundsMatrixBuilder.cpp:32` 与 `:1011-1012`)。头一版这里取 0.05,
+        // 低于它的钉死宽度,于是把 RDKit 显示成"钉住 0.0%" —— **阈值定错了,
+        // 结论就反了**:它其实把过半的 1-4 都钉住了,那正是它中位 0.120 的来源。
+        let pinned = o.iter().filter(|w| **w < 0.15).count();
+        let pinned_r = r.iter().filter(|w| **w < 0.15).count();
+        #[allow(clippy::cast_precision_loss)]
+        let (pf, pfr) = (
+            100.0 * pinned as f64 / o.len().max(1) as f64,
+            100.0 * pinned_r as f64 / r.len().max(1) as f64,
+        );
         println!(
-            "      {name:9} 对数 {:7}  我们 {:6.3}  RDKit {:6.3}  比 {:5.2}",
+            "      {name:9} 对数 {:7}  中位 我们 {:6.3} / RDKit {:6.3}(比 {:5.2})  钉住 我们 {pf:5.1}% / RDKit {pfr:5.1}%",
             o.len(),
             quantile(o, 0.5),
             quantile(r, 0.5),

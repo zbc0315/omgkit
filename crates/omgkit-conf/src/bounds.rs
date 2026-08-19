@@ -74,6 +74,49 @@ pub const ANGLE_TOL: f64 = 2.5;
 /// | 6 元 | 0–60° | 平面(芳/共轭)到椅式 |
 /// | 7 元及以上 | 0–90° | 柔性 |
 /// | 不共处一环 | 0–180° | 自由旋转 |
+/// **平面环上,一条 1-4 路径的扭转角是确定值,不是区间。**
+///
+/// 这是从 RDKit 读来的关键一课(`BoundsMatrixBuilder.cpp:1005-1038`):
+/// 它**不取凸包,而是用化学把析取解掉** —— 双键上问立体描述符"这一对是顺是反",
+/// 然后 `dl = du`,宽度为 0。
+///
+/// 平面环上这件事更简单,连立体描述符都不用:环是平的,于是每个原子有个确定的
+/// **侧** —— 环内原子在圆心那一侧,环外取代基朝外。中心键 `k–l` 在环上时:
+///
+/// | `i`、`j` 的归属 | 扭转 | 例子(苯) |
+/// |---|---|---|
+/// | 都在环里 | **0°** | `C6–C1–C2–C3` |
+/// | 一个在环外 | **180°** | 取代基 `X–C1–C2–C3` |
+/// | 都在环外 | **0°** | 邻位两个取代基 `X–C1–C2–Y`,都朝外,同侧 |
+///
+/// 返回 `None` 表示这条路径的中心键不在**平面**环上,由调用方退回包络。
+///
+/// # 只认芳环
+///
+/// 非芳香环的平面性没有保证(环己烷是椅式),所以这里只对芳环下确定值,
+/// 其余交给 [`torsion_envelope`] 按环尺寸给区间。
+fn planar_ring_torsion(
+    ring_sets: &[Vec<u32>],
+    aromatic_ring: &[bool],
+    i: u32,
+    k: u32,
+    l: u32,
+    j: u32,
+) -> Option<f64> {
+    for (r, set) in ring_sets.iter().enumerate() {
+        if !aromatic_ring[r] {
+            continue;
+        }
+        let has = |a: u32| set.binary_search(&a).is_ok();
+        if !(has(k) && has(l)) {
+            continue;
+        }
+        return Some(if has(i) == has(j) { 0.0 } else { 180.0 });
+    }
+    None
+}
+
+/// 解不掉时按共处环尺寸给的扭转包络(度)。
 #[must_use]
 pub fn torsion_envelope(shared_ring: usize, aromatic: bool) -> (f64, f64) {
     // **四个原子不在同一个环里就没有环的约束。**
@@ -311,6 +354,17 @@ pub fn build(mol: &MolBuilder) -> (Bounds, Stats) {
         return (b, st);
     }
     let (min_ring, ring_sets) = ring_info(mol);
+    // 每个环是不是芳环 —— 环上的原子全带芳香标志才算
+    let aromatic_ring: Vec<bool> = ring_sets
+        .iter()
+        .map(|set| {
+            set.iter().all(|a| {
+                mol.atoms()[*a as usize]
+                    .flags
+                    .contains(omgkit_core::AtomFlags::AROMATIC)
+            })
+        })
+        .collect();
     let mut kind = vec![Kind::None; n * n];
 
     // ---- 1-2 ----
@@ -391,7 +445,13 @@ pub fn build(mol: &MolBuilder) -> (Bounds, Stats) {
                 // **环上的扭转是锁死的,不是顺式到反式的全程。**
                 // 光滑化推不出这件事(它只知道路径长度,不知道环是平的)。
                 let arom = mol.bonds()[bidx].order == omgkit_core::BondOrder::Aromatic;
-                let (t_lo, t_hi) = torsion_envelope(shared_ring(&ring_sets, &[i, k, l, j]), arom);
+                // 芳环上的扭转是**确定值**(见 `planar_ring_torsion`),不是区间;
+                // 解不掉的才退回按环尺寸的包络
+                let (t_lo, t_hi) = planar_ring_torsion(&ring_sets, &aromatic_ring, i, k, l, j)
+                    .map_or_else(
+                        || torsion_envelope(shared_ring(&ring_sets, &[i, k, l, j]), arom),
+                        |t| (t, t),
+                    );
                 // d² 随 cos(扭转) 单调 —— 端点取遍区间即可
                 let f = |t: f64| {
                     let c = t.to_radians().cos();
@@ -615,6 +675,59 @@ mod tests {
             worst < 6.0,
             "苯里最远的一对碳上限 {worst:.3} —— 光滑化没把 MAX_UPPER 压下来"
         );
+    }
+
+    /// **芳环上的 1-4 扭转是确定值,所以那些原子对的区间宽度该近乎为零。**
+    ///
+    /// 苯:环内的 `C–C–C–C` 扭转 0、环上氢的 `H–C–C–C` 扭转 180 ——
+    /// 两者都是确定的,不是"顺式到反式"的区间。这条盯住 `planar_ring_torsion`
+    /// 真的接上了:它不生效的话宽度会是 0.7 Å 上下。
+    #[test]
+    fn a_one_four_across_an_aromatic_ring_has_a_pinned_torsion() {
+        let m = prep("c1ccccc1");
+        let (b, _) = build(&m);
+        let n = m.num_atoms();
+        // 拓扑距离恰好 3 的原子对
+        let mut widths = Vec::new();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if topo_dist(&m, i, j) != 3 {
+                    continue;
+                }
+                widths.push(b.upper(i, j) - b.lower(i, j));
+            }
+        }
+        assert!(
+            widths.len() >= 6,
+            "苯该有不少 1-4 对,只找到 {}",
+            widths.len()
+        );
+        let worst = widths.iter().fold(0.0f64, |a, x| a.max(*x));
+        assert!(
+            worst < 0.05,
+            "苯的 1-4 最宽 {worst:.4} Å —— 芳环扭转没被钉住"
+        );
+    }
+
+    /// 两点之间的拓扑距离(封顶 4)。
+    fn topo_dist(m: &MolBuilder, a: usize, b: usize) -> u8 {
+        let n = m.num_atoms();
+        let mut d = vec![u8::MAX; n];
+        d[a] = 0;
+        let mut q = std::collections::VecDeque::from([a]);
+        while let Some(x) = q.pop_front() {
+            if d[x] >= 4 {
+                continue;
+            }
+            for (y, _) in m.neighbors(u32::try_from(x).expect("下标")) {
+                let y = y as usize;
+                if d[y] == u8::MAX {
+                    d[y] = d[x] + 1;
+                    q.push_back(y);
+                }
+            }
+        }
+        d[b].min(4)
     }
 
     /// 空分子、单原子:不许 panic。
