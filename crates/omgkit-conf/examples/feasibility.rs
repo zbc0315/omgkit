@@ -33,12 +33,14 @@ const MAX_EMPTY: u64 = 0;
 /// 先前这条闸在 `bounds_oracle` 里定的是 **2%** —— 比目标松了近四倍,
 /// 于是判据一路是绿的,而实测 0.65% 早已越过目标。**闸松于目标等于没有闸。**
 ///
-/// 现在:0.65% → 0.54%(修了角的回退顺序)→ **0.34%**(修了 1-3 的写入规则)。
-/// 闸设在 0.40%,是贴着现值的棘轮,离 0.52% 的目标还留着余量。
+/// 一路降下来:0.65% → 0.54%(修了角的回退顺序)→ 0.34%(修了 1-3 的写入规则)
+/// → **0.06%**(1-4 的五个距离改用中点而非上限)。现在是 RDKit 那条线的 **1/9**。
+///
+/// 闸设在 0.12%(约 10 个分子),贴着现值 5 个分子的棘轮,留了一倍余量。
 ///
 /// 另外这条闸放在**全语料 8831 个分子**上,不放在 400 个分子的判官里:
 /// 400 个样本上真实率 0.34% 只对应 1.4 个分子,泊松噪声足以让闸随机红绿。
-const MAX_INFEASIBLE_FRAC: f64 = 0.0040;
+const MAX_INFEASIBLE_FRAC: f64 = 0.0012;
 
 fn main() {
     let path = std::env::args()
@@ -50,6 +52,7 @@ fn main() {
     });
 
     let (mut n, mut n_parse_fail, mut n_empty, mut n_infeasible) = (0u64, 0u64, 0u64, 0u64);
+    let (mut n13_conflict, mut n14_degenerate) = (0u64, 0u64);
     let mut empty_cases: Vec<String> = Vec::new();
     let mut infeasible_cases: Vec<String> = Vec::new();
 
@@ -70,7 +73,12 @@ fn main() {
         let order: Vec<u32> = (0..mol.num_atoms() as u32).collect();
         omgkit_chem::explicit_hs::add_explicit_hs(&mut mol, &order);
         n += 1;
-        let (mut b, _) = bounds::build(&mol);
+        let (mut b, stats) = bounds::build(&mol);
+        // **把 Stats 里那两个"退让计数"报出来。** 它们记的是参数表自相矛盾
+        // (`n13_conflict`)与几何退化丢约束(`n14_degenerate`)——
+        // 只写不读的计数器等于没有,而这两件事都只会让界更松、判据更容易绿。
+        n13_conflict += stats.n13_conflict as u64;
+        n14_degenerate += stats.n14_degenerate as u64;
         // 建完界先看有没有区间当场就空 —— 那是**表自相矛盾**,与几何无关
         let nat = b.len();
         let mut empty = false;
@@ -110,6 +118,7 @@ fn main() {
     if !infeasible_cases.is_empty() {
         println!("  不可行的例子:{}", infeasible_cases.join("  "));
     }
+    println!("  1-3 两条估计交空退并集 {n13_conflict} 次;1-4 几何退化丢约束 {n14_degenerate} 次");
 
     let mut fatal = false;
     if n == 0 {
