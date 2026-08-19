@@ -98,6 +98,14 @@ jobs:
       - name: 判官:全语料界可行率(头号指标)
         run: cargo run -p omgkit-conf --release --example feasibility -- harness/corpus/large.smi
 
+      # **通用性难例语料。** large.smi 是药物样分子,在它上面全绿只说明"对药物样
+      # 分子成立"。这一份是照着算法的假设挑的:笼状/张力环、超配位、累积双键、
+      # 超大环、少见元素、金属、自由基、两性离子 —— 每一类精确攻击一条假设。
+      # 一类分子在这里红了,答案必须是**补一行约束表**,不是加一个代码分支;
+      # 前两版 omgkit-conf 正是死在后者上(按分子类别切分支,覆盖率停在 14.3%)。
+      - name: 判官:难例语料的界可行率(通用性)
+        run: cargo run -p omgkit-conf --release --example feasibility -- harness/corpus/hard.smi
+
       # 手性:槽位约定排错的话**错法整批一致**,正确率不是 0% 就是 100% ——
       # 这种错只能拿真值比,推不出来。真值是真实构象上量出来的有符号体积。
       - name: 判官:手性中心(真值取自真实构象)

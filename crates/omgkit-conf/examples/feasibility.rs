@@ -57,6 +57,15 @@ fn main() {
     let mut infeasible_cases: Vec<String> = Vec::new();
 
     for line in text.lines() {
+        // 语料格式:`SMILES<TAB>名字`,**`#` 开头是注释、空行忽略**
+        // (`large.smi` 里有 24 条被注释掉的分子,`bridged.smi` 与 `hard.smi`
+        //  的抬头都是整段注释)。先前这里没认注释,把它们当 SMILES 解析,
+        // 于是"解析失败"那个数里混着注释行 —— 分母没受影响(它只数建成功的),
+        // 但报出来的数是错的。
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         let smi = line.split('\t').next().unwrap_or("").trim();
         if smi.is_empty() {
             continue;
