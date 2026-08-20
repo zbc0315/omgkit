@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 # 漏一处就是个不会报错的假数。CI 的头注释里记过同一个坑(那里原先写着
 # "四道闸门",而步骤早已加到八步)。这里由 `step` 计数,末尾自查:
 # 改了步骤忘了改 `TOTAL`,脚本最后一行会红。
-TOTAL=16
+TOTAL=18
 N=0
 step() {
     N=$((N + 1))
@@ -35,12 +35,12 @@ step() {
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-# **最后两条判据要 RDKit,所以先在这里查一次。** 放在末尾的话,要等前面十四步
+# **最后四条判据要 RDKit,所以先在这里查一次。** 放在末尾的话,要等前面十四步
 # (十来分钟 cargo)跑完才知道环境缺东西。没有就直接失败,**不跳过** ——
 # 静默跳过的判据是最坏的一种,它让人以为跑过了。
 PY=.venv/bin/python
 if [ ! -x "$PY" ]; then
-    echo "缺 $PY —— 最后两条判据要 RDKit。" >&2
+    echo "缺 $PY —— 最后四条判据要 RDKit。" >&2
     echo "  建法:python3 -m venv .venv &&" >&2
     echo "        .venv/bin/pip install --only-binary=:all: -r harness/requirements.lock" >&2
     exit 1
@@ -119,14 +119,14 @@ cargo run -q -p omgkit-conf --release --example conformer_oracle -- harness/base
 step "判官:三配位立体中心(孤对那一档)"
 cargo run -q -p omgkit-conf --release --example conformer_oracle -- harness/baseline/smoke.lonepair.jsonl
 
-# ---- 要外部实现(RDKit)的那两条 ----
+# ---- 要外部实现(RDKit)的那四条 ----
 #
-# 上面几条都是拿预先烘好的基准比,所以不需要 RDKit。这两条不一样:它们把
+# 上面几条都是拿预先烘好的基准比,所以不需要 RDKit。这四条不一样:它们把
 # **当次**画出来 / 嵌出来的东西交给 RDKit 反读,基准没法预先烘。
 #
-# CI 里这两条在单独一个 job(`external`)里,版本钉在 `harness/requirements.lock`
+# CI 里这四条在单独一个 job(`external`)里,版本钉在 `harness/requirements.lock`
 # (RDKit 2025.09.2 —— 仓库里 `harness/baseline/` 那批基准就是它导的)。
-# 开发机的 `.venv` 眼下是 2022.09.5,与 CI 不同:**这两条判据两边喂的是同一个
+# 开发机的 `.venv` 眼下是 2022.09.5,与 CI 不同:**这四条判据两边喂的是同一个
 # RDKit**,版本变化会对消,两版都实测过退 0。判据自己会打印版本号,别靠记。
 # 要跟 CI 完全对版就照 lock 重建 `.venv`。
 
@@ -144,6 +144,16 @@ cargo run -q -p omgkit-depict --release --example dump_molblock -- harness/corpu
 step "判官:交付坐标的立体化学(RDKit 从三维坐标读回)"
 cargo run -q -p omgkit-conf --release --example dump_conformers -- harness/corpus/large.smi >"$WORK/ours.jsonl"
 "$PY" harness/verify_stereo.py "$WORK/ours.jsonl"
+
+# 写出的外部裁判。**两个方向都跑** —— 规范那一条先前红了很久没人知道
+# (规范写出丢掉超价原子的方括号,`Cl[I]Cl` → `ClICl`,外部读者补氢读成另一个分子),
+# 而按存储顺序那一条一直是绿的:两个方向走不同分支,只跑一个等于只守一半。
+step "判官:SMILES 写出(按存储顺序)"
+cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/large.smi >"$WORK/written.tsv"
+"$PY" harness/check_write.py "$WORK/written.tsv" harness/corpus/large.smi
+step "判官:SMILES 写出(规范)"
+cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/large.smi --canonical >"$WORK/canon.tsv"
+"$PY" harness/check_write.py "$WORK/canon.tsv" harness/corpus/large.smi
 
 # **自查。** 加了闸门忘了改 `TOTAL` 的话,这里红 —— 上面那些 `N/TOTAL`
 # 就不会悄悄变成假数。

@@ -43,7 +43,9 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use omgkit_core::{element, AtomFlags, BondData, BondDirection, BondOrder, ChiralTag, MolBuilder};
+use omgkit_core::{
+    element, AtomFlags, BondData, BondDirection, BondFlags, BondOrder, ChiralTag, MolBuilder,
+};
 
 /// 写出的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -680,17 +682,70 @@ fn hard_bracket(mol: &MolBuilder, idx: u32) -> bool {
 
 /// 去掉方括号之后,再读回来氢数还是不是原来那个。
 ///
-/// 简写形式的氢数由价反推:补到该元素**第一个够用的**价为止。所以
+/// # 判据必须与**解析侧**同口径
 ///
-/// - 带氢时:`键级和 + 氢数 == 首位默认价`,反推出来的正好是这些氢
-/// - 不带氢时:`键级和 >= 首位默认价`,价已经填满,反推出来也是 0 个
+/// 简写形式的氢数由价反推,而反推的规则是"取**第一个不小于已用价的**允许价,
+/// 差额就是补出来的氢"——见 [`omgkit_core::element::Element::default_valence_for`] 与
+/// `omgkit_chem::valence::implicit_hs_of`。所以这里问的是一个很具体的问题:
+/// **按那条规则,裸写形式会补出几个氢?** 与本原子实际的氢数相等才能去框。
 ///
-/// 后一条不能省成"没氢就随便去框":一个三价的中性碳(`[C]`)氢数是 0,可去掉
-/// 方括号写成 `C` 再读回来就补上了一个氢 —— 分子当场变了。
+/// 先前这里只看**首位**默认价(`bonds >= valences[0]` / `bonds + hs == valences[0]`),
+/// 而多价元素的首位默认价根本不是读者会选的那个:
 ///
-/// 判据保守:算不准的一律留框(留框只是啰嗦,去错了会改掉分子)。配位键的
-/// 给体端不计价,这一带的价本就不好谈,所以碰到配位键直接留框。
+/// | | 键级和 | 价表 | 读者补的氢 | 先前判定 |
+/// |---|---|---|---|---|
+/// | `Cl[I]Cl` 的 I | 2 | `[1, 3, 5]` | 1(补到 3) | `2 >= 1` → 去框 |
+/// | `NC[S](=O)=O` 的 S | 5 | `[2, 4, 6]` | 1(补到 6) | `5 >= 2` → 去框 |
+///
+/// 去框之后写出的是 `ClICl` / `NCS(=O)=O`,任何读者(**包括我们自己的净化**)
+/// 读回来都多一个氢 —— 写出来的是另一个分子。全语料 9 条如此,
+/// 外部判据 `harness/check_write.py --canonical` 抓的就是这个。
+///
+/// 往返测试抓不住:本模块的解析器**不推隐式氢**(`num_implicit_hs` 恒为 0),
+/// 氢要到净化才出现,于是解析与写出在这一点上是共谋的。
+///
+/// # 超价一律留框
+///
+/// 已用价超过该元素**全部**允许价时(`default_valence_for` 给 `None`),
+/// 读者补几个氢**取决于它那份价表有多长**,而价表各版本各实现都不一样。
+/// 实测(全语料只有一个这样的原子:六根键的中性 P,`large.smi` 第 4554 行的
+/// PF₆):
+///
+/// | 价表来源 | P 的价表 | 裸写 `FP(F)(F)(F)(F)F` 读回来 |
+/// |---|---|---|
+/// | 本仓 `element_data.rs`(转录自 RDKit **2025.09.2**) | `[3, 5]` | 补 0 个氢 |
+/// | RDKit **2025.09.2** | `[3, 5]` | **净化直接失败**(6 > 5) |
+/// | RDKit **2022.09.5** | `[3, 5, 7]` | 补 1 个氢 → 是另一个分子 |
+///
+/// 三种结果两两不同,所以**算不准就留框**:留框在三种读者下都是对的。
+///
+/// (这段先前写的是"我们的 P 价表是 `[3,5]`,RDKit 的是 `[3,5,7]`"。那个
+///  `[3,5,7]` 是**开发机 `.venv` 里那个 2022.09.5** 的,而本仓的元素表恰恰就是
+///  从 2025.09.2 转录的 —— 两边其实一样。把没核过的版本差写成"我们 vs 别人"
+///  的分歧,正是 `harness/requirements.lock` 里记过的那个坑。)
+///
+/// # 其余的保守取舍
+///
+/// 一个中性碳(`[C]`)氢数是 0,可去掉方括号写成 `C` 再读回来就补上了
+/// 四个氢 —— 所以"没氢"绝不等于"能去框"。配位键的给体端不计价,这一带的价
+/// 本就不好谈,碰到配位键直接留框。
+///
+/// # 前置条件:调用方已经挡掉了带电 / 自由基 / 同位素的原子
+///
+/// 本函数**不做**形式电荷与自由基的调整,而 `implicit_hs_of` 是做的
+/// (`effective_atomic_num`、`can_be_hypervalent`、`+ n_radicals`)。
+/// 全语料实测有 1330 多个原子两边算出的氢数不同,**无一例外全是带电或自由基**
+/// (O⁻ 1121、N⁺ 135、S⁺ 25、N⁻ 25…)。它们全部被
+/// [`hard_bracket`] 提前判成"必须留框",走不到这里。
+///
+/// 这是**调用方保证的前置条件,不是本函数的性质** —— 所以下面有一句
+/// `debug_assert!`。哪天有人把调用顺序换了,那 1330 个原子会静默地按错规则算。
 fn hs_survive_without_brackets(mol: &MolBuilder, idx: u32) -> bool {
+    debug_assert!(
+        !hard_bracket(mol, idx),
+        "hs_survive_without_brackets 的前置条件被破坏了:带电/自由基/同位素的原子\
+         必须由 hard_bracket 提前挡掉,本函数不做那几项调整 —— 见函数文档"
+    );
     let a = mol.atoms()[idx as usize];
     let Some(e) = element::by_atomic_num(a.atomic_num) else {
         return false;
@@ -704,7 +759,6 @@ fn hs_survive_without_brackets(mol: &MolBuilder, idx: u32) -> bool {
     {
         return false;
     }
-    let default_valence = i32::from(e.valences[0]);
     let bonds: f32 = mol
         .neighbors(idx)
         .map(|(_, bi)| mol.bonds()[bi as usize].valence_contribution_to(idx))
@@ -712,10 +766,52 @@ fn hs_survive_without_brackets(mol: &MolBuilder, idx: u32) -> bool {
     // x.5 向上取整(芳香键各计 1.5),与价键计算同一约定
     #[allow(clippy::cast_possible_truncation)]
     let bonds = (bonds + 0.1).round() as i32;
+    let Ok(used) = i8::try_from(bonds) else {
+        return false; // 键级和大得离谱,算不准 → 留框
+    };
     let total_hs = i32::from(a.num_explicit_hs) + i32::from(a.num_implicit_hs);
-    if total_hs == 0 {
-        bonds >= default_valence
-    } else {
-        bonds + total_hs == default_valence
+
+    // **芳香原子只在一档上更保守。** 键级和不超过首位默认价时,
+    // `default_valence_for` 选的本来就是首位默认价,两条规则同值;差别只在
+    // 键级和**超过**首位默认价那一档 —— 那时 `implicit_hs_of` 的芳香分支
+    // 认为原子已处在某个允许价态、一个氢都不补,而非芳香那条会往上找下一个
+    // 允许价。所以这里直接不去框。
+    //
+    // 这一档是承重的,不是装饰:`c1cc[sH]c1` 的 S 两根芳香键 = 键级和 3,
+    // 非芳香规则会算"补到 4 价 = 1 个氢,与实际相符 → 可以去框",写出 `c1cccs1`,
+    // 而读者按芳香分支读回来是 **0 个氢** —— 氢丢了。变异实测:把这三行删掉,
+    // 全语料写出一行都不变、全部测试与两条外部判据照样全绿,只有
+    // `c1cc[sH]c1` 变成 `c1cccs1`。所以它由
+    // `canonical_write_survives_resanitize` 里那条用例单独钉住。
+    //
+    // **一处已知的不同步**:`omgkit_chem::valence::explicit_valence_of` 还有一步
+    // "芳香价回落"(差在 1.5 以内就取该价态),这边没有。方向是安全的
+    // (我们更保守 → 多留框,不会改分子),但两处规则分处两个 crate 各写一遍、
+    // 靠人同步 —— 那个结构问题另有任务跟着。
+    if is_aromatic(mol, idx) {
+        let v0 = i32::from(e.valences[0]);
+        return bonds <= v0 && v0 - bonds == total_hs;
     }
+    let Some(v) = e.default_valence_for(used) else {
+        return false; // 超价 → 留框,见函数文档
+    };
+    i32::from(v) - bonds == total_hs
+}
+
+/// 这个原子会被读者当成芳香的吗。
+///
+/// 与 `omgkit_chem::valence::is_aromatic_atom` 同口径:原子自己标了芳香,
+/// **或者**它连着任何一根芳香键。两处口径不同的话,写出侧算的隐式氢就不是
+/// 净化侧会算出来的那个。
+fn is_aromatic(mol: &MolBuilder, idx: u32) -> bool {
+    if mol.atoms()[idx as usize]
+        .flags
+        .contains(AtomFlags::AROMATIC)
+    {
+        return true;
+    }
+    mol.neighbors(idx).any(|(_, bi)| {
+        let b = mol.bonds()[bi as usize];
+        b.flags.contains(BondFlags::AROMATIC) || b.order == BondOrder::Aromatic
+    })
 }

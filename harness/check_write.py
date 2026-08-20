@@ -12,17 +12,33 @@ SMILES 的语义。手性尤其危险 —— 标记写反了,原子数、键集�
 
     cargo run --release -p omgkit-io --example write_smiles -- \\
         harness/corpus/large.smi > /tmp/written.tsv
-    python3 harness/check_write.py /tmp/written.tsv
+    python3 harness/check_write.py /tmp/written.tsv harness/corpus/large.smi
 
-输入是两列 TSV:原始 SMILES、omgkit 写出的 SMILES。
+输入是两列 TSV:原始 SMILES、omgkit 写出的 SMILES。第二个参数是**同一份语料**,
+用来核分母。
 
 尚未写出的立体信息会被分桶而不是算作失败 —— 见下面 `--strict` 的说明。
+
+# 分母也要有闸
+
+这条判据的分母是上游喂的,而它只数分歧、不数"该数到多少"。实测:
+
+- **喂一个空文件进去,它打印"零分歧"并退 0**;
+- 把 19 行 TSV 换成垃圾,`逐条规范形式相同` 从 8833 悄悄掉到 8814,照样退 0。
+
+所以现在要第二个参数(语料),而且数的是**真正比对过的分子数**,不是 TSV 行数
+—— 行数掉不下来。少比到的超过 `MAX_UNCOMPARED` 就判失败,反向(TSV 比语料还长)
+也判失败,否则传错语料时分母闸会静默失效。
+
+同一条在 `harness/check_wedge_readback.py` 上栽过,那边是"dump 少喂几个分子,
+每一档都会变好看"。
 """
 
 import argparse
 import pathlib
 import sys
 
+import rdkit
 from rdkit import Chem, RDLogger
 
 RDLogger.DisableLog("rdApp.*")
@@ -54,6 +70,33 @@ NOT_YET_WRITTEN = {
 }
 
 
+#: 语料里允许有几行**没真正被比对到**。
+#:
+#: 数的不是 TSV 行数,是 `exact + 各档豁免 + 分歧` —— 也就是真的被判过的分子。
+#: 头一版数的是行数,而行数掉不下来:`a is None`(外部实现读不了原串)那条
+#: `continue` 既不计数也没上限。独立审核实测:把 19 行 TSV 换成垃圾,
+#: `逐条规范形式相同` 从 8833 悄悄掉到 8814,判据照样打印"零分歧"退 0。
+#:
+#: 少比到的两条路:
+#:
+#: - **没写出**:本实现解析不了,`write_smiles` 直接跳过
+#: - **外部实现读不了原串**:判官自己解析不了输入,`a is None`
+#:
+#: 后一条是**版本相关**的,所以上限按更严的那个版本定。逐版实测:
+#:
+#: | 语料 | RDKit 2022.09.5 | RDKit 2025.09.2(CI 钉的) |
+#: |---|---|---|
+#: | `large.smi`(8839 行) | 没比到 **6** | 没比到 **8** |
+#: | `smoke.smi`(149 行) | 没比到 **12**(8 条故意解析不了 + 4 条判官读不了) | 没比到 **12** |
+#:
+#: 现值 15 = 实测最大 12 加一点余量。变异实测:把 19 行 TSV 换成垃圾,
+#: 没比到变 25,当场退 1。
+#:
+#: 这是**分母闸**,不是宽容度:它管的是"少比几个分子,分歧数跟着变好看"。
+#: 涨上去说明有一类分子进不了比对,要当场查,不是调大它。
+MAX_UNCOMPARED = 15
+
+
 def canonical_without(mol, drop):
     """抹掉若干类立体信息后的规范 SMILES。`mol` 会被就地修改,故传副本。"""
     for name in drop:
@@ -65,6 +108,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("tsv", type=pathlib.Path, help="write_smiles 的输出")
+    ap.add_argument("corpus", type=pathlib.Path, help="喂给 write_smiles 的那份语料(核分母用)")
     ap.add_argument("--limit", type=int, default=10, help="最多打印几条分歧")
     ap.add_argument(
         "--strict",
@@ -77,16 +121,22 @@ def main() -> int:
     chiral = 0
     excused = {name: 0 for name in NOT_YET_WRITTEN}
     bad = []
+    rows = 0
+    unreadable = 0
 
     for line in args.tsv.read_text().splitlines():
         parts = line.split("\t")
         if len(parts) != 2:
             continue
+        rows += 1
         orig, got = parts
         a = Chem.MolFromSmiles(orig, PARAMS)
         b = Chem.MolFromSmiles(got, PARAMS)
         if a is None:
-            continue  # 原始就读不了,不是写出的问题
+            # 原始就读不了,不是写出的问题 —— 但**要计数**:它是"少比一个分子"的
+            # 两条路之一,而少比的分子会让下面每一个数变好看。见 MAX_UNCOMPARED。
+            unreadable += 1
+            continue
         if b is None:
             bad.append((orig, got, "写出结果无法解析"))
             continue
@@ -113,7 +163,22 @@ def main() -> int:
         else:
             bad.append((orig, got, f"{Chem.MolToSmiles(a)}\n       != {Chem.MolToSmiles(b)}"))
 
+    # **分母闸。** 见 MAX_UNCOMPARED:少比几个分子,上面每一个计数都会变好看。
+    n_corpus = sum(
+        1
+        for l in args.corpus.read_text(encoding="utf-8").splitlines()
+        if l.strip() and not l.lstrip().startswith("#")
+    )
+    compared = exact + sum(excused.values()) + len(bad)
+    uncompared = n_corpus - compared
+
+    print(f"外部实现:RDKit {rdkit.__version__}")
     print(f"逐条规范形式相同 {exact} 条;含立体中心 {chiral} 条")
+    print(
+        f"语料 {n_corpus} 行,写出 {rows} 行,真正比对 {compared} 条,"
+        f"没比到 {uncompared} 条(上限 {MAX_UNCOMPARED})"
+    )
+    print(f"  没比到的两条路:没写出 {n_corpus - rows} 条,外部实现读不了原串 {unreadable} 条")
     for name, count in excused.items():
         if count:
             print(f"仅 {name} 不同 {count} 条({name}写出尚未实现,已登记)")
@@ -121,6 +186,21 @@ def main() -> int:
         print(f"\n分歧 {len(bad)} 条(最多列 {args.limit} 条):")
         for orig, got, why in bad[: args.limit]:
             print(f"  原: {orig}\n  写: {got}\n  {why}\n")
+        return 1
+    # 传错语料时 `uncompared` 会变成负数,而负数当然 <= 上限 —— 那样分母闸就
+    # 静默失效了。实测:拿 large 的 TSV 配 smoke 的语料,它打印"没写出 -8690 行"
+    # 然后退 0。所以两个方向都要闸。
+    if rows > n_corpus:
+        print(
+            f"\n写出的行数({rows})比语料还多({n_corpus})—— 十有八九是 TSV 与语料"
+            "对不上(传错文件了)。分母核不了,这条判据算出来的数没有意义"
+        )
+        return 1
+    if uncompared > MAX_UNCOMPARED:
+        print(
+            f"\n语料里有 {uncompared} 条没真正被比对,超过上限 {MAX_UNCOMPARED} —— "
+            "分歧数是分子,覆盖面是分母。别调大这个数,先查是哪一类分子进不了比对"
+        )
         return 1
     print("零分歧" + ("(严格模式)" if args.strict else ""))
     return 0

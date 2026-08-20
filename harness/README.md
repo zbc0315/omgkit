@@ -132,43 +132,64 @@ python3 harness/oracle_pipeline.py ... \
 SMILES 的语义。手性尤其危险 —— 标记写反了,原子数、键集合、连通性全都对,
 只有分子是镜像的,纯拓扑比对永远发现不了。
 
+**第二个参数是同一份语料**,判据拿它核分母:
+
 ```bash
 # 按存储顺序写出
 cargo run --release -p omgkit-io --example write_smiles -- \
     harness/corpus/large.smi > /tmp/written.tsv
-python3 harness/check_write.py /tmp/written.tsv
+python3 harness/check_write.py /tmp/written.tsv harness/corpus/large.smi
 
 # 规范 SMILES(经规范化排序)
 cargo run --release -p omgkit-io --example write_smiles -- \
     harness/corpus/large.smi --canonical > /tmp/canon.tsv
-python3 harness/check_write.py /tmp/canon.tsv
+python3 harness/check_write.py /tmp/canon.tsv harness/corpus/large.smi
 ```
 
-两边各自规范化再比字符串,判官与本实现无共谋。当前结果(2026-08-20 实测):
+两边各自规范化再比字符串,判官与本实现无共谋。当前结果(2026-08-20 实测,
+RDKit 2022.09.5):
 
 | | 大语料 | 大语料(规范) | 冒烟 |
 |---|---|---|---|
-| 规范形式逐条相同 | 8833 | 8824 | 131 |
+| 规范形式逐条相同 | 8833 | 8833 | 131 |
 | 仅配位几何立体不同(已登记) | 0 | 0 | 6 |
-| **真分歧** | **0** | **9** | **0** |
-| 退出码 | 0 | **1** | 0 |
+| **真分歧** | **0** | **0** | **0** |
+| 语料行 / 写出行 / 真正比对 | 8839 / 8839 / 8833 | 8839 / 8839 / 8833 | 149 / 141 / 137 |
 
-大语料里另有若干条外部实现净化不了,两侧都没有结果,不计入。
+**"没比到"的那几条要看清是哪一路**,它们是判据的分母闸(`MAX_UNCOMPARED`):
 
-> **规范那一列现在是红的**,而这张表先前三格全写着 **0** —— 一个过期的绿。
+- 大语料 6 条 = 外部实现**读不了原串**(`CC1=[O+][Be]2…`、`[Fe++]` 的二茂铁、
+  `[Co]`/`[Al+3]`/`[Hg]` 配合物、`CCO1=O=C1`),两侧都没有结果;
+- 冒烟档 12 条 = 8 条**故意构造的解析失败用例** + 4 条判官读不了。
+
+这个数**跟 RDKit 版本走**:换 CI 钉的 2025.09.2,大语料是 8 条(它对 Al/Si/P
+的超价收得更紧)。上限 15 是按实测最大值 12 加余量定的。
+
+先前这条判据**喂一个空文件进去照样打印"零分歧"退 0**;而头一版分母闸数的是
+TSV 行数,行数掉不下来 —— 独立审核实测把 19 行换成垃圾,"逐条相同"从 8833
+悄悄掉到 8814 而判据仍退 0。现在数的是**真正比对过的分子数**。
+
+> **规范那一列先前是红的,而这张表三格全写着 0** —— 一个过期的绿。
 > 缺陷不在判官,在 `omgkit-io` 的规范写出:它把**超价原子的方括号丢了**,
-> 于是任何外部读者都会按下一个允许价补氢,读出来是**另一个分子**:
+> 于是外部读者按下一个允许价补氢,读出来是**另一个分子**:
 >
 > ```text
-> 本实现写出 Cl[I]Cl  →  ClICl        RDKit 读回 Cl[IH]Cl   ← 多了一个 H
-> 本实现写出 F[P](F)(F)(F)(F)F → FP(...)  RDKit 读回 F[PH](F)(F)(F)(F)F
-> 本实现写出 NC[S](=O)=O → NCS(=O)=O     RDKit 读回 NC[SH](=O)=O
+> 改前写出 Cl[I]Cl  →  ClICl               RDKit 读回 Cl[IH]Cl   ← 多了一个 H
+> 改前写出 NC[S](=O)=O → NCS(=O)=O          RDKit 读回 NC[SH](=O)=O
+> 改前写出 F[P](F)(F)(F)(F)F → FP(F)...     RDKit 读回 F[PH](F)(F)(F)(F)F
 > ```
 >
-> 注意 `omgkit-chem` 的 `dump_canonical` 走的是**另一条**写出路径,它写的是
-> `Cl[I]Cl`,是对的 —— 缺陷只在 `omgkit-io` 的规范路径。
+> 根因不是与外部实现的约定分歧,是**我们自己两处规则不一致**:补氢取的是
+> "第一个不小于已用价的允许价"(碘的价表 `[1,3,5]`,两根键补到 3 价),
+> 而写出侧只看**首位**默认价,断定"2 ≥ 1,不用留框"。往返测试抓不住 ——
+> io 的解析器根本不推隐式氢,两边共谋。
 >
-> 这条判官不在 CI 里,所以红了很久没人知道。与 `check_wedge_readback.py`
+> 已修(`hs_survive_without_brackets` 改用同一条规则,超价一律留框),
+> 全语料输出只改了 10 条,按存储顺序那一列一条没动。Rust 侧补了
+> `crates/omgkit-chem/tests/canonical_write_survives_resanitize.rs`(变异验证过),
+> 这条判据的**两个方向也都进了 CI**。
+>
+> 这条判官先前不在 CI 里,所以红了很久没人知道。与 `check_wedge_readback.py`
 > 那次是同一个病:**没人跑的判据,红着也没人知道。**
 
 尚未写出的立体信息按类**分桶**,不算失败:抹掉该类之后若完全一致,差别就
