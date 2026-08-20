@@ -1,0 +1,31 @@
+# 判据用的 Python 依赖。CI 的 `external` job 照这份装。
+#
+#     pip install --only-binary=:all: -r harness/requirements.lock
+#
+# # 为什么是 2025.09.2
+#
+# **仓库只认这一个 RDKit 版本。** `harness/baseline/` 下的界矩阵/构象基准就是
+# 它导的(`harness/dump_bounds.py` 开头写着"本仓用的是 2025.09.2"),CI 里
+# `smooth_oracle` / `bounds_oracle` / `eigen_oracle` 三道闸全都坐在那批数上。
+#
+# 头一版这里钉的是 2022.9.5(只因为开发机的 `.venv` 恰好是那个版本)。那等于在
+# 仓库里立**第二个**版本约定:下一个人照着 CI 建环境、再重导 `rdkit_bounds.jsonl`,
+# 会在全绿的情况下把那三道闸的参照悄悄换掉 —— 实测两版的界能差 0.35 Å。
+# `harness/embed_ablation.py` 开头正记着同一个坑:"靶子立在三年前"。
+#
+# # numpy 必须一起钉
+#
+# 只钉 RDKit 是不够的。实测:`pip install --only-binary=:all: rdkit==2022.9.5`
+# 让 pip 自己解 numpy,解出 2.0.2,而那个 RDKit 是拿 numpy 1.x 编的,一 import
+# 就是 `AttributeError: _ARRAY_API not found`,`harness/dump_bounds.py` 直接
+# SIGSEGV(退 139)。2025.09.2 配 numpy 2.x 是对的,但**对不对不该靠运气** ——
+# 钉住才有"本地绿和 CI 绿是同一件事"这句话。
+#
+# # 升级怎么升
+#
+# 三行一起改,然后把 `harness/gates.sh` 最后那两条判据各跑一遍。**别只升 RDKit**
+# —— 上面那个 numpy 的坑就是这么来的。若升级会动到 `harness/baseline/`,
+# 那批基准要用新版重导一遍,并且在同一次提交里说明。
+rdkit==2025.9.2
+numpy==2.0.2
+pillow==11.3.0

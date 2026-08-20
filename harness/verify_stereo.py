@@ -42,8 +42,11 @@
 `AssignStereochemistryFrom3D` 读不回三配位 P,但 RDKit 的**嵌入器**认它 ——
 所以真值可以从**嵌出来的构象**上算。`harness/dump_chirality.py` 现在就是这么造
 `harness/baseline/smoke.lonepair.jsonl` 的(17 个三配位中心,号跨 seed 不稳的剔除),
-而那份基准进了 CI 的第 14 道闸。实测那条闸上 21/21 全对,
-把三配位的槽位前两个对调当场红 17 个。
+而那份基准**进了 CI**(`conformer_oracle` 跑 `smoke.lonepair.jsonl` 那一步)。
+实测那条闸上 21/21 全对,把三配位的槽位前两个对调当场红 17 个。
+
+(这里原先写着"第 14 道闸"。闸门序号是**手抄的数**,加一道闸就掉队 ——
+`gates.sh` 现在连自己的总数都是算出来 + 末尾自查的,散文里更不该写序号。)
 
 **这条判据本身仍然看不见 P** —— 所以那 2 个继续记在"够不着"里,别把它读成"我们错了"。
 
@@ -55,6 +58,7 @@
 import json
 import sys
 
+import rdkit
 from rdkit import Chem, RDLogger
 from rdkit.Chem import AllChem
 
@@ -102,6 +106,11 @@ def rdkit_can_read_itself(smi):
             return True
     return False
 
+
+# **把版本打出来。** CI 钉的是 `harness/requirements.lock`(2025.09.2),而开发机的
+# `.venv` 未必是同一个。这条判据两边喂的是同一个 RDKit,版本差异会对消 ——
+# 但"哪个版本给出的这个数"不该靠记。
+print(f"外部实现:RDKit {rdkit.__version__}")
 
 n_ok = n_bad = n_skip = n_blind = 0
 bad = []

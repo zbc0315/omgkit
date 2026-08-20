@@ -8,11 +8,17 @@
 # 链接时把 Python 符号欠着,给它建测试可执行文件必然失败 —— 理由写在
 # 根 Cargo.toml 里。
 #
-# 差分测试的**冒烟**基准随仓库入库(合计 588K),所以 CI 不需要外部实现就能跑;
-# 大语料那一档标了 `#[ignore]`,本地用 `cargo test -- --ignored` 跑。
+# 差分测试的**冒烟**基准随仓库入库(合计 588K),所以 `gates` 这个 job 不需要
+# 外部实现就能跑;大语料那一档标了 `#[ignore]`,本地用 `cargo test -- --ignored` 跑。
 #
-# Cargo.lock 不入库(库类项目的惯例),所以 CI 每次解析当时最新的兼容版本。
-# 代价是上游发新版可能让 CI 单独变红 —— 那时红的是依赖不是本仓库,按需锁版本。
+# 下面还有第二个 job(`external`)**确实要外部实现**:有两条判官是把我们的产物
+# 交给 RDKit 反读,基准没法预先烘进仓库(RDKit 读的是我们**当次**画出/嵌出的
+# 东西)。它单独一个 job,所以 pip 那一步挂了看得出是环境问题,不是本仓库。
+#
+# **Cargo.lock 入库**(理由写在 `.gitignore` 里)。先前不入库,于是 CI 每次从头
+# 解析依赖 —— 2026-08-20 `arrayref` 的 0.3.5–0.3.9 全部被上游撤版,而 `tiny-skia`
+# 要 `^0.3.6`,CI 21 秒就挂在解析上,本地却照常编译。一道会被上游随机打红的闸,
+# 和没有闸差不多。
 
 # 本地跑同一套:`bash harness/gates.sh`(那个脚本带 `set -eo pipefail`,
 # 而且判据后面不许接管道 —— 先前现敲的临时脚本用 `... | tail -3`,
@@ -130,3 +136,81 @@ jobs:
       # 这种错只能拿真值比,推不出来。真值是真实构象上量出来的有符号体积。
       - name: 判官:手性中心(真值取自真实构象)
         run: cargo run -p omgkit-conf --release --example chiral_oracle -- harness/baseline/smoke.chirality.jsonl
+
+  # ==========================================================================
+  # 要外部实现(RDKit)的那两条判官
+  # ==========================================================================
+  #
+  # 上面 `gates` 里的判官都是拿**预先烘好的基准**比,所以不需要装 RDKit。
+  # 这两条不一样:它们把**当次**画出来 / 嵌出来的东西交给 RDKit 反读,基准
+  # 没法预先烘 —— 产物变了,该拿去反读的就是新产物。
+  #
+  # 它们先前只在本地手动跑,而其中一条**当时就是红的**:`check_wedge_readback.py`
+  # 报"10 个中心画成了对映体",逐个查下去 10 个全是判官自己的下标 bug
+  # (`MolFromMolBlock` 默认删掉 SMILES 开头的显式 `[H]`,下标整体错一位)。
+  # **一条没人跑的判据,红着也没人知道** —— 这正是它必须进 CI 的理由。
+  #
+  # # 版本钉在 `harness/requirements.lock` 里,理由写在那个文件里
+  #
+  # 一句话:**仓库只认一个 RDKit 版本(2025.09.2)** —— `harness/baseline/` 下的
+  # 界矩阵/构象基准就是它导的。头一版这里钉的是开发机 `.venv` 恰好装着的
+  # 2022.9.5,那等于在仓库里立第二个版本约定。
+  #
+  # numpy 也钉了:只钉 RDKit 的话 pip 会自己解 numpy,而版本配错会让
+  # `_ARRAY_API not found` / SIGSEGV。同样见那个文件。
+  #
+  # 开发机的 `.venv` 眼下是 2022.09.5,与这里不同。这两条判据**两边喂的是同一个
+  # RDKit**(参考侧与读回侧),所以版本变化会对消,判据断的是上限而不是精确计数
+  # —— 两版都实测过退 0(2022.09.5 构型一致 498,2025.09.2 是 495,差的 3 个是
+  # 参考侧丢了 CIP 码)。判据现在会**打印它跑在哪个版本上**,别靠记。
+  external:
+    name: 外部实现判官(RDKit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装工具链
+        run: rustup show active-toolchain || rustup toolchain install stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # **不用 3.9。** 它 2025-10 已经 EOL,`actions/python-versions` 里最新的 3.9
+      # 只到 `linux-24.04`,`ubuntu-latest` 往前滚一次这个 job 就没有解释器可用,
+      # 而且没有退路。锁里那个 RDKit 的 manylinux 轮子覆盖 cp39–cp314 ——
+      # 判据只要 **RDKit** 版本对,不要解释器版本对。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: harness/requirements.lock
+
+      # `--only-binary` 是有意的:源码编译 RDKit 要几十分钟,真发生时应当当场失败
+      - name: 装判据依赖(版本全钉在 lock 里)
+        # 整条加引号:`:all:` 里的"冒号 + 空格"会被 YAML 当成映射,不引会解析失败
+        run: "pip install --only-binary=:all: -r harness/requirements.lock"
+
+      # 楔形是"试 Up/Down、取反读回来对的那一个"构造出来的,而反读用的就是
+      # 我们自己的 `read_chirality` —— 拿它们往返是**空过的**。真正要问的是
+      # "别人照着这张图读,读出来是不是同一个分子",那就必须把图交出去。
+      #
+      # 第二个参数是**同一份语料**:判据拿它核分母。`dump_molblock` 只导出
+      # "有楔形或有 unwedged"的分子,所以任何让 depict 整批看不见立体中心的回归
+      # 都会让分子从 dump 里消失、每一档跟着变好看 —— 实测空文件进去,
+      # 先前那版打印"全部通过"并退 0。
+      #
+      # 判据后面**不接管道**:`set -e` 遇到管道只看最后一个命令的退出码。
+      - name: 判官:楔形反读(别人照着图读出来是不是同一个构型)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -q -p omgkit-depict --release --example dump_molblock -- harness/corpus/large.smi > "$RUNNER_TEMP/blocks.txt"
+          python harness/check_wedge_readback.py "$RUNNER_TEMP/blocks.txt" harness/corpus/large.smi
+
+      # 交付的三维坐标满不满足输入 SMILES 指定的每一处立体。完全绕开我们自己的
+      # 任何公式,是唯一真正外部的立体化学判据。
+      - name: 判官:交付坐标的立体化学(RDKit 从三维坐标读回构型)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -q -p omgkit-conf --release --example dump_conformers -- harness/corpus/large.smi > "$RUNNER_TEMP/ours.jsonl"
+          python harness/verify_stereo.py "$RUNNER_TEMP/ours.jsonl"
