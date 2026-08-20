@@ -266,15 +266,21 @@ fn stereo_path_torsion(mol: &MolBuilder, bidx: usize, i: u32, k: u32, j: u32) ->
 /// 芳环是 `τ = 0` 的特例,正好给出 0 / 0 / 180 —— **不需要单独一条分支**。
 ///
 /// 返回 `None` 表示中心键不在任何环上,由调用方给自由旋转的全程。
+struct Rings<'a> {
+    sets: &'a [Vec<u32>],
+    aromatic: &'a [bool],
+    sp3: &'a [bool],
+}
+
 fn ring_path_torsion(
-    ring_sets: &[Vec<u32>],
-    ring_aromatic: &[bool],
-    ring_sp3: &[bool],
+    mol: &MolBuilder,
+    rings: &Rings<'_>,
     i: u32,
     k: u32,
     l: u32,
     j: u32,
 ) -> Option<(f64, f64)> {
+    let (ring_sets, ring_aromatic, ring_sp3) = (rings.sets, rings.aromatic, rings.sp3);
     // 中心键所在的**最小**环说了算:环越小越硬,给出的约束越紧
     let mut best: Option<(usize, usize)> = None; // (尺寸, 下标)
     for (r, set) in ring_sets.iter().enumerate() {
@@ -312,12 +318,28 @@ fn ring_path_torsion(
     // **只有总体齐整的那两桶才钉:芳环、全 sp³ 环。**
     // 混合桶(非芳、非全 sp³)里既有共轭近平面环又有半椅,中位描述的是两者都不是
     // 的东西 —— 那正是先前把六元环钉成 20.9° 的来源。
-    if !ring_aromatic[r] && !ring_sp3[r] {
+    // **中心键两端都是 sp² 且环不大于 8 元 → 共轭把这一段定成平面,扭转钉 0。**
+    //
+    // 这是 RDKit 的规矩(`_setInRing14Bounds`:`ringSize <= 8 && ahyb2 == SP2 &&
+    // ahyb3 == SP2` 就 `preferCis`),而它 58.7% 的 1-4 钉住率**主要就来自这一条** ——
+    // 不是来自立体标记(语料 9298 根键只有 51 根带立体标记,0.55%),
+    // 也不是来自饱和环(那一档 RDKit 同样不钉)。
+    //
+    // 先前这里只认**芳环**,于是非芳的共轭环(环己烯酮、马来酰亚胺、内酰胺……)
+    // 全漏了 —— 那正是我们 1-4 界宽还差 7.5 倍的来源。
+    let sp2 = |a: u32| mol.atoms()[a as usize].hybridization == omgkit_core::Hybridization::Sp2;
+    let conj_planar = size <= 8 && sp2(k) && sp2(l);
+    if !ring_aromatic[r] && !ring_sp3[r] && !conj_planar {
         return None;
     }
     let set = &ring_sets[r];
     let has = |a: u32| set.binary_search(&a).is_ok();
-    let (t_lo, t_hi) = ring_internal_torsion(size, ring_aromatic[r], ring_sp3[r]);
+    let (t_lo, t_hi) = if conj_planar && !ring_aromatic[r] {
+        // 共轭平面:钉 0(顺式)。与 RDKit 的 `compute14DistCis` 同一个意思。
+        (0.0, 0.0)
+    } else {
+        ring_internal_torsion(size, ring_aromatic[r], ring_sp3[r])
+    };
     Some(if has(i) == has(j) {
         (t_lo, t_hi)
     } else {
@@ -759,7 +781,18 @@ pub fn build(mol: &MolBuilder) -> (Bounds, Stats) {
                 let (t_lo, t_hi) = stereo_path_torsion(mol, bidx, i, k, j)
                     .map(|t| (t, t))
                     .or_else(|| {
-                        ring_path_torsion(&ring_sets, &aromatic_ring, &sp3_ring, i, k, l, j)
+                        ring_path_torsion(
+                            mol,
+                            &Rings {
+                                sets: &ring_sets,
+                                aromatic: &aromatic_ring,
+                                sp3: &sp3_ring,
+                            },
+                            i,
+                            k,
+                            l,
+                            j,
+                        )
                     })
                     .unwrap_or_else(|| {
                         torsion_envelope(shared_ring(&ring_sets, &[i, k, l, j]), arom)
