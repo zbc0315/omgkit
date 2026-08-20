@@ -177,7 +177,17 @@ fn per_atom_cost_does_not_grow_in_a_large_macrocycle() {
         .iter()
         .map(|&n| macrocycle(n))
         .collect();
-    let rows = measure(&inputs, 3);
+    // **轮数必须和另外两条一样是 `ROUNDS`。** 先前这里写的是 3,而
+    // [`measure`] 的"取多轮最小值"要靠轮数够多才挡得住噪声 ——
+    // 3 轮时,`cargo test --workspace` 并行争用一下就能把某一档的三轮全抬高。
+    //
+    // 实测:单独跑这条测试八次,每原子耗时是 0.38 / 0.38 / 0.39 µs,
+    // 涨幅 **1.02**,稳得很;而在整个工作区一起跑的那一次,1000 原子那一档
+    // 测到 588 µs(单独跑时约 380 µs,慢 55%),涨幅 1.55,越过 `MAX_GROWTH = 1.25`
+    // 直接落进文档标定的"缺陷版 1.4~3.1"那一带 —— **判据在报噪声,不是在报缺陷**。
+    //
+    // 代价可以忽略:20 轮 × 三档 ≈ 27 ms。
+    let rows = measure(&inputs, ROUNDS);
     assert_flat(&rows, "大环");
 }
 

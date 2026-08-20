@@ -23,8 +23,25 @@
 顺带实测过:2022 的立体标记与 2025 导出的坐标**逐个吻合**(39/39),
 所以标记这一层在两版之间是稳的。
 
-约定(实测得来,不是猜的):`@`(CCW)→ 有符号体积**为负**;`@@`(CW)→ **为正**,
-配体取 `GetNeighbors()` 的顺序。这与 `omgkit-depict` 的 `read_chirality` 一致。
+# 真值用的是哪个体积 —— 换过一次,原因是老的那个在结构上抓不到东西
+
+有符号体积有两种写法,**不是同一个量**:
+
+- 四配体:`det[l₁−l₀, l₂−l₀, l₃−l₀]`,**完全不看中心原子在哪**。
+- 中心基点:`det[l₀−c, l₁−c, l₂−c]`(RDKit 的 `assignChiralTypesFrom3D` 用这个)。
+
+头一版这里用的是**前者**,注释还写着"与 `chiral.rs::signed_volume` 同一个式子" ——
+真值与待验实现同一条式子,于是这个判官**在结构上不可能**抓到"中心原子被挤到
+配体四面体外面"(伞形翻转)那一档:那时四配体行列式一点变化都没有,而真实
+立体化学已经翻了。
+
+这一档**当前没有在发生**(实测交付坐标上 484 个中心,0 个在四面体外、0 个号不符),
+换过来是把洞堵上,不是修一个正在漏的洞 —— 但真值用一条对该失效模式天生失明的
+式子,这个判官在结构上就守不住那一档,所以还是要换。
+
+现在用**后者**。约定(实测 247 个中心:127/127、120/120):
+`@`(CCW)→ 中心基点体积**为正**;`@@`(CW)→ **为负**,配体取 `GetNeighbors()` 的顺序。
+注意这与旧的四配体口径**正好反号**(正四面体上 `V_配体 = −4·V_中心`)。
 
 用法:
 
@@ -43,17 +60,41 @@ SEED = 0xF00D
 TETRA = (Chem.ChiralType.CHI_TETRAHEDRAL_CW, Chem.ChiralType.CHI_TETRAHEDRAL_CCW)
 
 
-def signed_volume(p0, p1, p2, p3):
-    """det[p1−p0, p2−p0, p3−p0]。与 `chiral.rs::signed_volume` 同一个式子。"""
-    def d(p):
-        return [p[k] - p0[k] for k in range(3)]
-
-    a, b, c = d(p1), d(p2), d(p3)
+def det3(a, b, c):
     return (
         a[0] * (b[1] * c[2] - b[2] * c[1])
         - a[1] * (b[0] * c[2] - b[2] * c[0])
         + a[2] * (b[0] * c[1] - b[1] * c[0])
     )
+
+
+def center_volume(coords, center, nbrs):
+    """det[l₀−c, l₁−c, l₂−c] —— **以中心原子为基点**。
+
+    先前这里用的是四个配体的行列式 `det[l₁−l₀, l₂−l₀, l₃−l₀]`,注释还写着
+    "与 `chiral.rs::signed_volume` 同一个式子" —— 那正是问题所在:
+    真值与待验的实现用同一条式子,于是**这个判官在结构上不可能抓到
+    "中心原子翻到配体四面体外面"那一档**(四配体行列式对它完全不敏感)。
+
+    实测交付坐标上 484 个中心里 0 个在四面体外、0 个号不符 —— 这一档当前
+    没有在发生,换基点是把洞堵上。
+    """
+    o = coords[center]
+
+    def d(i):
+        return [coords[i][k] - o[k] for k in range(3)]
+
+    return det3(d(nbrs[0]), d(nbrs[1]), d(nbrs[2]))
+
+
+def ligand_volume(coords, nbrs):
+    """旧口径,只用来报"两者反号"这件事,不再当真值。"""
+    p0 = coords[nbrs[0]]
+
+    def d(i):
+        return [coords[i][k] - p0[k] for k in range(3)]
+
+    return det3(d(nbrs[1]), d(nbrs[2]), d(nbrs[3]))
 
 
 def main() -> int:
@@ -64,7 +105,7 @@ def main() -> int:
     limit = int(sys.argv[3]) if len(sys.argv) > 3 else 10**9
 
     n_ok = n_skip = n_centers = 0
-    n_disagree = 0
+    n_disagree = n_same_sign = n_zero = 0
     with open(out, "w", encoding="utf-8") as fh:
         for line in open(corpus, encoding="utf-8"):
             smi = line.split("\t")[0].strip()
@@ -102,13 +143,22 @@ def main() -> int:
                 nb = [x.GetIdx() for x in a.GetNeighbors()]
                 if len(nb) != 4:
                     continue
-                v = signed_volume(*[coords[i] for i in nb])
+                v = center_volume(coords, a.GetIdx(), nb)
+                vl = ligand_volume(coords, nb)
                 # 真值取**真实构象算出来的号**,不取标记推的号 ——
                 # 标记推的那个正是待验的东西,拿它当真值就成了自证。
+                # `v == 0` 时 `actual` 会静默取 +1 —— 那是掷硬币,必须计数
+                if v == 0.0:
+                    n_zero += 1
                 actual = -1 if v < 0 else 1
-                expected = -1 if t == Chem.ChiralType.CHI_TETRAHEDRAL_CCW else 1
+                # 约定:`@`(CCW)→ 中心基点体积**为正**;`@@`(CW)→ **为负**。
+                # 这与旧的四配体口径**正好反过来**(V_配体 = −4·V_中心),
+                # 因为量的根本不是同一个体积。
+                expected = 1 if t == Chem.ChiralType.CHI_TETRAHEDRAL_CCW else -1
                 if actual != expected:
                     n_disagree += 1
+                if v * vl > 0:
+                    n_same_sign += 1
                 centers.append(
                     {
                         "atom": a.GetIdx(),
@@ -116,6 +166,7 @@ def main() -> int:
                         "tag": 2 if t == Chem.ChiralType.CHI_TETRAHEDRAL_CCW else 1,
                         "sign": actual,
                         "vol": v,
+                        "vol_ligand": vl,
                     }
                 )
             if not centers:
@@ -151,7 +202,14 @@ def main() -> int:
     # 这一行是**版本自检**:标记推的号与真实构象算的号必须处处一致。
     # 不一致说明立体信息在嵌入过程中丢了,那这份真值就不能用。
     print(f"  标记与真实构象不一致的中心:{n_disagree}(必须是 0)")
-    return 1 if n_disagree else 0
+    # 这一行说明"换了基点"确实换了量:真实构象上两者应当**处处反号**。
+    # 同号的个数不是 0,就说明有中心已经翻伞(或者构象本身是废的)。
+    #
+    # **它必须进退出码。** 只 print 的自检等于没有:坏基准照样落盘,
+    # 而下游所有手性判据都以这份基准为真值。
+    print(f"  中心基点与四配体行列式**同号**的中心:{n_same_sign}(真实构象上应当是 0)")
+    print(f"  中心基点体积恰好为 0 的中心:{n_zero}(必须是 0 —— 号是掷硬币)")
+    return 1 if (n_disagree or n_same_sign or n_zero) else 0
 
 
 if __name__ == "__main__":

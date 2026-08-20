@@ -15,16 +15,25 @@
 //! 四维里在 `(x₃, x₄)` 平面转 π 就把 `x₃` 送到 `−x₃`,而**四维两两距离精确不变** ——
 //! 三维里的反射在四维里是一次免费的连续旋转。)
 //!
-//! # 符号约定
+//! # 符号约定 —— **有两个体积,号相反,别混**
 //!
-//! 有符号体积取 `det[p₁−p₀, p₂−p₀, p₃−p₀]`,四个配体按**槽位顺序**给。
-//! `det < 0` 对应 `@`([`ChiralTag::Ccw`](omgkit_core::ChiralTag::Ccw))、
-//! `det > 0` 对应 `@@`([`Cw`](omgkit_core::ChiralTag::Cw))。
+//! | 名字 | 式子 | 谁在用 |
+//! |---|---|---|
+//! | 四配体 | `det[l₁−l₀, l₂−l₀, l₃−l₀]` | [`signed_volume`];`omgkit-depict` 的 `read_chirality` |
+//! | 中心基点 | `det[l₀−c, l₁−c, l₂−c]` | [`center_volume`]、[`Center::sign`]、[`correct_count`] |
 //!
-//! 这与 `omgkit-depict` 的 `read_chirality` 是**同一个约定**,不是另起一套 ——
-//! 那边由 `the_reference_tetrahedron_pins_the_sign` 钉住符号,并且有外部判官
+//! **[`Center::sign`] 说的是后者的号:`@` → 正、`@@` → 负。**
+//! 前者正好相反(`@` → 负、`@@` → 正)—— 正四面体上 `V_配体 = −4·V_中心`。
+//!
+//! 两个体积**不是同一个量**:四配体那个完全不看中心原子在哪,所以中心被挤到
+//! 配体四面体外面(伞形翻转)时它一点变化都没有,而真实立体化学已经翻了。
+//! 判"号对不对"必须用中心基点那个,理由见 [`center_volume`]。
+//!
+//! `omgkit-depict` 的 `read_chirality` 仍用四配体口径,那边由
+//! `the_reference_tetrahedron_pins_the_sign` 钉住,并有外部判官
 //! (`harness/check_wedge_readback.py`,拿 RDKit 从导出的 molblock 反读)验过。
-//! 两套约定并存迟早会在某个交界处翻号,所以这里明确复用它。
+//! 它与这里**不冲突**,因为它读的是 2D + 楔形、产出的是 `ChiralTag` 而不是号 ——
+//! 但两边都叫"有符号体积"而号相反,这一段就是为了不让下一个人踩进去。
 //!
 //! # 抽中心那一半:**槽位约定是实测出来的,不是推的**
 
@@ -35,10 +44,13 @@
 //! 真值取自 `harness/dump_chirality.py`:每个中心的有符号体积**在真实三维构象上
 //! 的实际符号**(不是标记推出来的号 —— 那正是待验的东西)。实测:
 //!
-//! | 标记 | 有符号体积 | 样本 |
+//! | 标记 | 中心基点体积 | 样本 |
 //! |---|---|---|
-//! | `@`(Ccw) | **负** | 22 / 22 |
-//! | `@@`(Cw) | **正** | 17 / 17 |
+//! | `@`(Ccw) | **正** | 127 / 127 |
+//! | `@@`(Cw) | **负** | 120 / 120 |
+//!
+//! (头一版这张表是四配体口径的 `@`→负 22/22、`@@`→正 17/17。换基点之后
+//! 号整体反过来,上面这一组是**同一批基准换个式子重算**出来的,不是重新猜的。)
 //!
 //! 与 `omgkit-depict` 的约定一致,而且那一致性写成了机器可验的断言。
 //! 全量判官见 `examples/chiral_oracle.rs`:247 个中心,符号错 0、漏抽 0。
@@ -46,10 +58,33 @@
 //!
 //! # 调用方要负责的那一条
 //!
-//! [`centers`] 要求**标记与当前键序一致**。`omgkit_chem::add_explicit_hs` 把补出来
-//! 的氢追加到原子表末尾、并且**明确不碰 `chiral_tag`**,而 SMILES 里隐式氢占第 1 槽 ——
-//! 所以"解析 SMILES → 补氢 → 直接调 [`centers`]"中间**缺一步槽位重排**。
-//! 按一张四配位齐全的连接表建分子则天然满足(判官走的正是这条路)。
+//! [`centers`] 要求**标记与当前键序一致**:按邻居迭代顺序取四个配体,正好是
+//! `chiral_tag` 所指的槽位顺序。
+//!
+//! ## "解析 SMILES → 补氢 → 直接调 `centers`" 是**对**的
+//!
+//! 这里先前写着那条路"缺一步槽位重排",**那是错的,而且是有害的错** ——
+//! 谁照着加一步重排,就会把每个带隐式氢的中心翻成对映体。
+//!
+//! 理由:`omgkit_io::smiles::parse` **已经**把 `chiral_tag` 归一化成"相对存储序,
+//! 且**隐式氢不参与置换**"(见 `omgkit-io/src/smiles.rs` 里那张表与
+//! `needs_tag_inversion` 的两个特判:片段首原子带一个显式氢、以及带一个环闭合数)。
+//! `add_explicit_hs` 把氢追加到邻居表末尾,正好就是归一化后的标记所期望的位置。
+//!
+//! 实测,拿 RDKit 从我们交付的坐标读回立体化学
+//! (`examples/dump_conformers.rs` + `harness/verify_stereo.py`):
+//!
+//! | 语料 | 一致 |
+//! |---|---|
+//! | `harness/corpus/large.smi` 里 301 个带立体标记的分子 | 290 / 301 |
+//! | `harness/corpus/stereo_edge.smi`(专挑槽位边界) | **21 / 21** |
+//!
+//! `stereo_edge.smi` 那一份是为这条专门造的:手性原子写在**片段开头**
+//! (隐式氢排书写序第一)、写在中间、四个显式配体、以及带环闭合数的,
+//! 每档都给出同一分子的两种写法。大语料那 11 个失配与四面体手性无关
+//! (10 个是环上双键 E/Z、1 个是三配位硫)。
+//!
+//! 按一张四配位齐全的连接表建分子则天然满足这两条(判官走的正是那条路)。
 
 /// 一个四面体手性中心:四个配体的槽位顺序,以及有符号体积**该是什么号**。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -58,7 +93,12 @@ pub struct Center {
     pub atom: u32,
     /// 四个配体原子,**按槽位顺序**(见模块文档)。
     pub ligands: [u32; 4],
-    /// 目标符号:`-1.0` 对应 `@`、`+1.0` 对应 `@@`。
+    /// 目标符号,说的是 [`center_volume`]
+    /// (**以中心原子为基点**)该有的号:`+1.0` 对应 `@`、`-1.0` 对应 `@@`。
+    ///
+    /// **别按四配体行列式理解 —— 那个的号正好相反。** 这一行先前写的就是
+    /// 四配体口径,与代码相反;照它手写 `Center` 会拿到对映体,而所有判据
+    /// 都会报"号对"。
     pub sign: f64,
 }
 
@@ -70,14 +110,14 @@ pub struct Center {
 /// 2. **`chiral_tag` 必须与当前的键序一致**,也就是"按邻居迭代顺序取四个配体"
 ///    正好是标记所指的槽位顺序。
 ///
-/// 第 2 条**不是自动成立的**。`omgkit_chem::add_explicit_hs` 把补出来的氢追加到
-/// 原子表末尾,并且**明确不碰 `chiral_tag`**(它的文档写着"谁要在补氢之后用手性,
-/// 必须自己把这一层想清楚")—— 而 SMILES 里隐式氢占的是第 1 槽。
-/// 所以"解析 SMILES → 补氢 → 直接调这里"是**错**的,中间缺一步槽位重排。
+/// 这两条**从 SMILES 走过来是满足的**:解析器已经把 `chiral_tag` 归一化成
+/// "相对存储序、隐式氢不参与置换",而 `add_explicit_hs` 把氢追加到邻居表末尾,
+/// 正好对上。详细理由与实测见模块文档那一节 —— 那里先前写着这条路"缺一步
+/// 槽位重排",**是错的**,照着加一步重排会把每个带隐式氢的中心翻成对映体。
 ///
-/// 反过来,按一张**四配位齐全的连接表**建出来的分子天然满足这两条:
-/// 没有隐式氢,键序就是槽位序。判官走的正是这条路
-/// (`examples/chiral_oracle.rs`,真值取自真实构象的有符号体积)。
+/// 按一张**四配位齐全的连接表**建出来的分子同样满足:没有隐式氢,键序就是槽位序。
+/// 判官 `examples/chiral_oracle.rs` 走的是后一条路(真值取自真实构象的有符号体积),
+/// `examples/dump_conformers.rs` 走的是前一条。
 ///
 /// 抽不出四个邻居、或者标记不是四面体的原子,直接跳过 —— 不猜。
 #[must_use]
@@ -85,9 +125,13 @@ pub fn centers(mol: &omgkit_core::MolBuilder) -> Vec<Center> {
     use omgkit_core::ChiralTag;
     let mut out = Vec::new();
     for (idx, a) in mol.atoms().iter().enumerate() {
+        // **约定随基点一起翻了。** 头一版按四配体行列式标定:`@` → 负、`@@` → 正
+        // (语料实测 22/22、17/17)。[`center_volume`] 改成以中心原子为基点之后,
+        // `V_配体 = −4·V_中心`,于是符号整体反过来:`@` → **正**、`@@` → **负**。
+        // 这不是重新猜的,是同一批标定样本换个式子重算出来的。
         let sign = match a.chiral_tag {
-            ChiralTag::Ccw => -1.0,
-            ChiralTag::Cw => 1.0,
+            ChiralTag::Ccw => 1.0,
+            ChiralTag::Cw => -1.0,
             _ => continue,
         };
         let Ok(id) = u32::try_from(idx) else { continue };
@@ -116,15 +160,51 @@ pub fn signed_volume(p0: [f64; 3], p1: [f64; 3], p2: [f64; 3], p3: [f64; 3]) -> 
         + a[2] * (b[0] * c[1] - b[1] * c[0])
 }
 
-/// 一个中心在给定坐标下的有符号体积。
+/// 一个中心在给定坐标下的有符号体积:**以中心原子为基点**,
+/// `det[l₀−c, l₁−c, l₂−c]`。
+///
+/// # 为什么基点必须是中心原子,不是第一个配体
+///
+/// 先前这里用的是 `signed_volume(l₀, l₁, l₂, l₃)` —— 四个配体的行列式,
+/// **完全不看中心原子在哪**(`Center::atom` 那时在整个 crate 里从未被读过)。
+///
+/// 中心取四配体质心时两者恰好差 `−4` 倍(`V_配体 = −4·V_中心`,正四面体上可手算),
+/// 所以平时看不出区别。但中心原子被挤到配体四面体**外面**去的时候(伞形翻转),
+/// `V_中心` 变号而 `V_配体` **一点变化都没有** —— 于是判据说"号对",
+/// 而那组坐标是对映体。
+///
+/// RDKit 的 `assignChiralTypesFrom3D` 用的正是中心基点。
+///
+/// # 这一档现在**没有在发生**,换过来是把洞堵上,不是修一个正在漏的洞
+///
+/// 实测(`large.smi`,484 个中心,在**我们交付的坐标**上):
+/// 中心原子在配体四面体外的 **0 个**、号与目标不符的 **0 个**。
+/// 距离项其实已经间接挡住了大半 —— 中心跑到外面就必然拉长某条中心–配体键
+/// 或压缩某个 1-3 距离,那两档罚得很贵。
+///
+/// **所以别把这段写成"修好了 N 个对映体"。** 先前的注释写过"484 个里 21 个在
+/// 外面、2 个号已翻",那是从一份没有复核的报告里转述的,复现不出来。
+/// 换基点的理由是:四配体行列式对这一档**在数学上就是瞎的**,而代价实测为零。
+/// 变异验证说明这一档真出事就是灾难:给 300 个分子各翻一个中心的伞,
+/// 外部判据 `verify_stereo.py` 从 290/301 掉到 **2/301**。
+///
+/// 判据先前也看不见它,因为 `harness/dump_chirality.py` 的真值用的**是同一个
+/// 四配体行列式**(注释里自己写着"与 `chiral.rs::signed_volume` 同一个式子")。
+/// 那已经一并换成中心基点。
 ///
 /// # Panics
 ///
 /// 配体下标越界时 panic。
 #[must_use]
 pub fn center_volume(coords: &[[f64; 3]], c: &Center) -> f64 {
-    let p = |k: usize| coords[c.ligands[k] as usize];
-    signed_volume(p(0), p(1), p(2), p(3))
+    let o = coords[c.atom as usize];
+    let d = |k: usize| {
+        let p = coords[c.ligands[k] as usize];
+        [p[0] - o[0], p[1] - o[1], p[2] - o[2]]
+    };
+    let (a, b, e) = (d(0), d(1), d(2));
+    a[0] * (b[1] * e[2] - b[2] * e[1]) - a[1] * (b[0] * e[2] - b[2] * e[0])
+        + a[2] * (b[0] * e[1] - b[1] * e[0])
 }
 
 /// 一组中心里有几个的号是对的。
@@ -249,24 +329,47 @@ mod tests {
         assert!((a - b).abs() < 1e-12, "旋转不该改变有符号体积:{a} vs {b}");
     }
 
+    /// 一个**完整**的中心:下标 0 是中心原子(在质心),1..=4 是四个配体。
+    ///
+    /// 先前这里的夹具写的是 `atom: 0, ligands: [0,1,2,3]` —— 中心原子就是第一个
+    /// 配体,是个不存在的构型。旧公式不看中心原子,所以这个荒唐取值一直没暴露;
+    /// 它也正是"全模块没有一条测试碰过 `Center::atom`"的由来。
+    fn reference_center() -> Vec<[f64; 3]> {
+        let mut v = vec![[0.0, 0.0, 0.0]];
+        v.extend_from_slice(&reference_tetrahedron());
+        v
+    }
+
     fn ctr(sign: f64) -> Center {
         Center {
             atom: 0,
-            ligands: [0, 1, 2, 3],
+            ligands: [1, 2, 3, 4],
             sign,
         }
     }
 
     #[test]
-    fn 全局定向按多数决() {
-        let t = reference_tetrahedron();
-        let coords: Vec<[f64; 3]> = t.to_vec();
-        // 参照四面体的号是负的
+    fn 参照四面体的中心基点体积号为正() {
+        // 这一条钉住约定本身:`reference_tetrahedron` 的**四配体**行列式为负
+        // (旧口径),而**中心基点**的行列式为正 —— 两者反号,不是同一个量。
+        let c = reference_center();
+        let vl = signed_volume(c[1], c[2], c[3], c[4]);
+        let vc = center_volume(&c, &ctr(1.0));
+        assert!(vl < 0.0, "四配体行列式该是负的,实得 {vl}");
+        assert!(vc > 0.0, "中心基点行列式该是正的,实得 {vc}");
+        // 正四面体上恰好差 −4 倍(一般构型**不**成立,见 `center_volume` 的文档)
         assert!(
-            !needs_reflection(&coords, &[ctr(-1.0)]),
-            "号已经对了,不该翻"
+            (vl / vc + 4.0).abs() < 1e-9,
+            "正四面体上 V_配体 该是 −4·V_中心:{vl} / {vc}"
         );
-        assert!(needs_reflection(&coords, &[ctr(1.0)]), "号反了,应当翻");
+    }
+
+    #[test]
+    fn 全局定向按多数决() {
+        let coords = reference_center();
+        // 参照四面体的**中心基点**体积是正的
+        assert!(!needs_reflection(&coords, &[ctr(1.0)]), "号已经对了,不该翻");
+        assert!(needs_reflection(&coords, &[ctr(-1.0)]), "号反了,应当翻");
         // 两个中心一对一错 —— 平局,规则是**不翻**(必须确定,不能随实现摆动)
         assert!(
             !needs_reflection(&coords, &[ctr(-1.0), ctr(1.0)]),
@@ -274,9 +377,53 @@ mod tests {
         );
         // 二比一
         assert!(
-            needs_reflection(&coords, &[ctr(1.0), ctr(1.0), ctr(-1.0)]),
+            needs_reflection(&coords, &[ctr(-1.0), ctr(-1.0), ctr(1.0)]),
             "二比一应当翻"
         );
+    }
+
+    /// 把中心原子**沿三个配体所在的平面镜像**过去 —— 伞形翻转的干净构造。
+    ///
+    /// `V = det[l₁−c, l₂−c, l₃−c]` 是 `c` 的仿射函数,且在那张平面上恒为零,
+    /// 所以它正比于 `c` 到平面的**有号距离**。镜像把有号距离取反,于是
+    /// `V` **精确变号** —— 这是算出来的,不是试出来的。
+    fn flip_center(coords: &mut [[f64; 3]], lig: [usize; 3]) {
+        let (p, q, r) = (coords[lig[0]], coords[lig[1]], coords[lig[2]]);
+        let sub = |u: [f64; 3], v: [f64; 3]| [u[0] - v[0], u[1] - v[1], u[2] - v[2]];
+        let (a, b) = (sub(q, p), sub(r, p));
+        let n = [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ];
+        let nn = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+        let d = sub(coords[0], p);
+        let t = (d[0] * n[0] + d[1] * n[1] + d[2] * n[2]) / nn;
+        for k in 0..3 {
+            coords[0][k] -= 2.0 * t * n[k];
+        }
+    }
+
+    #[test]
+    fn 中心原子翻到配体四面体外面时号必须跟着翻() {
+        // **这就是先前那个洞。** 四个配体一动不动,只把中心原子从四面体内部
+        // 镜像到外面 —— 真实立体化学翻了,而四配体行列式**一点变化都没有**。
+        let mut coords = reference_center();
+        let before = center_volume(&coords, &ctr(1.0));
+        let vl_before = signed_volume(coords[1], coords[2], coords[3], coords[4]);
+        flip_center(&mut coords, [1, 2, 3]);
+        let after = center_volume(&coords, &ctr(1.0));
+        let vl_after = signed_volume(coords[1], coords[2], coords[3], coords[4]);
+        assert!(
+            (vl_before - vl_after).abs() < 1e-12,
+            "四配体行列式**不该**变(它正是看不见翻伞的原因):{vl_before} → {vl_after}"
+        );
+        assert!(
+            before * after < 0.0,
+            "中心基点体积必须变号:{before} → {after}"
+        );
+        // 于是判据也跟着说"错了"
+        assert_eq!(correct_count(&coords, &[ctr(1.0)]), 0, "翻伞之后号该判错");
     }
 
     #[test]

@@ -131,6 +131,8 @@ fn main() {
     let (mut cross_b, mut cross_a) = (0u64, 0u64);
     let (mut pierce_mol_b, mut pierce_mol_a) = (0u64, 0u64);
     let (mut chi_total, mut chi_before, mut chi_after) = (0u64, 0u64, 0u64);
+    let (mut truth_total, mut truth_ok, mut truth_declared) = (0u64, 0u64, 0u64);
+    let mut truth_bad: Vec<String> = Vec::new();
     let (mut iters, mut e_before, mut e_after) = (0u64, 0.0f64, 0.0f64);
     let start = std::time::Instant::now();
 
@@ -200,6 +202,25 @@ fn main() {
             }
         }
         let centers: Vec<Center> = chiral::centers(&m);
+        // **真值那一份**:中心原子、配体序、以及真实构象上算出来的号,全部取自基准。
+        // 完全绕开 `chiral::centers` —— 这样"抽错中心"与"摆错几何"就不会互相掩盖。
+        let truth: Vec<(usize, [usize; 3], f64)> = v["centers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| {
+                let atom = c["atom"].as_u64()? as usize;
+                let sign = c["sign"].as_f64()?;
+                let nb = c["nbrs"].as_array()?;
+                let g = |k: usize| nb.get(k)?.as_u64().map(|x| x as usize);
+                Some((atom, [g(0)?, g(1)?, g(2)?], sign))
+            })
+            .collect();
+        // **分母不许静默缩小。** `filter_map` 里任一 `?` 落空(基准的 `nbrs`/`sign`
+        // 字段缺失或改名)都会悄悄丢掉那个中心,于是"号对的 N/N,100%"照样绿 ——
+        // 实测把基准里除第一个外的 `nbrs` 全删掉,判官打印"真值口径 1 个:1(100.0%)"
+        // 并退出 0。基准里**声明**了几个,留着待会儿对账。
+        let declared = v["centers"].as_array().map_or(0, Vec::len) as u64;
 
         // ---- 精修前:嵌入 + 全局反射 ----
         let (mut b, _) = bounds::build(&m);
@@ -252,6 +273,33 @@ fn main() {
         chi_total += centers.len() as u64;
         chi_before += chiral::correct_count(&pre, &centers) as u64;
         chi_after += conf.chiral_ok as u64;
+
+        // ---- 真值口径:在**我们交付的坐标**上,按真值的中心与配体序复算 ----
+        // 对账放在这里,不放在解析处 —— 中途 `continue` 掉的分子(光滑化/嵌入失败)
+        // 两个计数都不该加,否则会假红。
+        truth_declared += declared;
+        for &(atom, lig, sign) in &truth {
+            if atom >= nat || lig.iter().any(|&k| k >= nat) {
+                continue;
+            }
+            let o = conf.coords[atom];
+            let d = |k: usize| {
+                let p = conf.coords[lig[k]];
+                [p[0] - o[0], p[1] - o[1], p[2] - o[2]]
+            };
+            let (a, b, c) = (d(0), d(1), d(2));
+            let vol = a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+                + a[2] * (b[0] * c[1] - b[1] * c[0]);
+            truth_total += 1;
+            if vol != 0.0 && vol.signum() == sign {
+                truth_ok += 1;
+            } else if truth_bad.len() < 6 {
+                truth_bad.push(format!(
+                    "{}#{atom}(V={vol:+.3} 目标号 {sign:+})",
+                    v["smiles"]
+                ));
+            }
+        }
     }
     let elapsed = start.elapsed();
 
@@ -283,10 +331,18 @@ fn main() {
     println!("    键交叉 {cross_b} → {cross_a};有环穿刺的分子 {pierce_mol_b} → {pierce_mol_a}(共 {n_mol})");
     println!("  ── 手性 ──");
     println!(
-        "    中心 {chi_total} 个:{:.1}% → {:.1}%",
+        "    自洽口径(我们抽的中心)  中心 {chi_total} 个:{:.1}% → {:.1}%",
         pct(chi_before, chi_total),
         pct(chi_after, chi_total)
     );
+    println!(
+        "    **真值口径**(中心与配体序取自基准,在我们交付的坐标上复算)\
+         {truth_total} 个:号对的 {truth_ok}({:.1}%)",
+        pct(truth_ok, truth_total)
+    );
+    if !truth_bad.is_empty() {
+        println!("      号不对的:{}", truth_bad.join("  "));
+    }
     println!(
         "  ── 耗时 ── 合计 {:.2} 秒,每分子 {:.2} ms",
         elapsed.as_secs_f64(),
@@ -322,6 +378,26 @@ fn main() {
             "\n精修之后还有 {cross_a} 处键交叉(上限 {MAX_CROSS_MOL})—— \
              距离判据看不见自穿,穿过去时每一对距离都可以合法"
         );
+        fatal = true;
+    }
+    if truth_total > 0 && truth_ok < truth_total {
+        eprintln!(
+            "\n真值口径下有 {} 个中心的号不对 —— 这一条**绕开了我们自己的抽取逻辑**,\
+             红了就是交付的坐标里立体化学是错的(整分子对映体)",
+            truth_total - truth_ok
+        );
+        fatal = true;
+    }
+    if truth_total != truth_declared {
+        eprintln!(
+            "\n基准里写着 {truth_declared} 个中心,真值口径只读进 {truth_total} 个 —— \
+             差的那些被 `filter_map` 静默丢了(字段缺失/改名/下标越界)。\
+             分母缩小只会让上面那条闸更好看,必须当场红"
+        );
+        fatal = true;
+    }
+    if truth_total == 0 && chi_total > 0 {
+        eprintln!("\n基准里一个真值中心都没读到 —— 上面那条闸的分母是 0,等于没在看");
         fatal = true;
     }
     if chi_total > 0 && pct(chi_after, chi_total) / 100.0 < MIN_CHIRAL_OK {
