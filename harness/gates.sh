@@ -65,7 +65,7 @@ cargo run -q -p omgkit-conf --release --example feasibility -- harness/corpus/la
 # 这一份是照着算法的假设挑的:笼状/张力环、超配位、累积双键、超大环、少见元素、
 # 金属、自由基、两性离子。一类分子在这里红了,答案必须是补一行约束表,不是加分支。
 # 68 个分子,闸与全量档同一条(0.12%,对这个规模等于**一个都不许有**)。
-echo "== 10/13 判官:难例语料的界可行率(通用性)"
+echo "== 10/13 判官:难例语料(通用性 + 硬不变量)"
 cargo run -q -p omgkit-conf --release --example feasibility -- harness/corpus/hard.smi
 # 自穿:先拿真实构象校准检测器(必须报 0),再量我们自己的。
 # 反过来做是自证 —— 检测器要是根本报不出东西,那个 0 只说明它没在看。

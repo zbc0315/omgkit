@@ -106,4 +106,5 @@ pub mod optimize;
 pub mod params;
 pub mod pipeline;
 pub mod smooth;
+pub mod spread;
 pub mod threading;

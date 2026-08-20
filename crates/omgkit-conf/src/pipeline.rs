@@ -58,6 +58,11 @@ pub struct Conformer {
     pub iterations: usize,
     /// 全局手性定向那一步有没有把结构翻过来。
     pub reflected: bool,
+    /// 破对称动了几个原子(嵌入给出重合坐标的那些)。
+    ///
+    /// **这个数不该常年是 0** —— 对称分子本来就会撞上简并。它一直是 0
+    /// 反倒说明这一步没接上,或者判据的样本里没有对称分子。
+    pub spread: usize,
     /// 手性中心数,以及精修之后号正确的个数。
     pub chiral_total: usize,
     /// 见 [`Conformer::chiral_total`]。
@@ -87,6 +92,12 @@ pub fn conformer(mol: &MolBuilder, centers: &[Center]) -> Result<Conformer, Conf
     }
     let e = embed::embed(&reference_distances(&b), n).map_err(ConformerError::Embed)?;
     let mut coords = e.coords;
+
+    // **破对称必须在优化器之前。** 对称分子的 Gram 矩阵有重特征值,等价原子会拿到
+    // 逐位相同的坐标 —— 而完全重合的两个原子**梯度恰好为零**(方向向量是零向量),
+    // 优化器永远分不开它们。实测语料里 0.50% 的分子这样,全语料 44 个,
+    // 而且是静默的:坐标照样返回,只是废的。见 `crate::spread`。
+    let spread = crate::spread::break_coincidence(&mut coords);
 
     // **全局手性定向:离散,一次,必须在精修之前。**
     // 反射不在 SO(3) 的连通分支里 —— 连续下降要走到镜像必须把整个分子压平,
@@ -121,6 +132,7 @@ pub fn conformer(mol: &MolBuilder, centers: &[Center]) -> Result<Conformer, Conf
         chiral_ok: chiral::correct_count(&coords, centers),
         coords,
         energy_before,
+        spread,
         energy: report.value,
         iterations: report.iterations,
         reflected,

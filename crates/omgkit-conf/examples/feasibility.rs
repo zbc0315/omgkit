@@ -12,7 +12,7 @@
 //! cargo run -p omgkit-conf --release --example feasibility -- harness/corpus/large.smi
 //! ```
 
-use omgkit_conf::{bounds, smooth::triangle_smooth};
+use omgkit_conf::{bounds, chiral, pipeline, smooth::triangle_smooth};
 
 /// 建界之后就有区间是空的(下限 > 上限)——**上限 0,一个都不许有**。
 ///
@@ -42,6 +42,25 @@ const MAX_EMPTY: u64 = 0;
 /// 400 个样本上真实率 0.34% 只对应 1.4 个分子,泊松噪声足以让闸随机红绿。
 const MAX_INFEASIBLE_FRAC: f64 = 0.0012;
 
+/// 整条流水线跑完之后,**坐标里有原子完全重合**的分子数上限。必须是 0。
+///
+/// # 这一条是补上的一个洞
+///
+/// 对称分子的 Gram 矩阵有重特征值,等价原子会拿到逐位相同的坐标 ——
+/// 而完全重合的两个原子**梯度恰好为零**,优化器永远分不开。坐标照样返回,
+/// 只是废的:**静默的错**。
+///
+/// 实测(破对称落地之前):`large.smi` 44 个分子(0.50%)、`hard.smi` 8 个(11.8%)。
+/// 0.50% 已经与 RDKit 的整体失败率同量级。
+///
+/// **先前没有任何判据看得见它。** 端到端判官跑的是带手性中心的分子,
+/// 而手性中心本身就破了对称 —— 判据的输入分布系统性地排除了要测的那一档。
+/// 所以这一条放在**全语料**这边,它的样本里有的是对称分子。
+const MAX_COINCIDENT: u64 = 0;
+
+/// 坐标里有非有限数的分子数上限。必须是 0 —— NaN 一路淌下去,查起来极贵。
+const MAX_NONFINITE: u64 = 0;
+
 fn main() {
     let path = std::env::args()
         .nth(1)
@@ -53,6 +72,8 @@ fn main() {
 
     let (mut n, mut n_parse_fail, mut n_empty, mut n_infeasible) = (0u64, 0u64, 0u64, 0u64);
     let (mut n13_conflict, mut n14_degenerate) = (0u64, 0u64);
+    let (mut n_conf, mut n_spread, mut n_coincident, mut n_nonfinite) = (0u64, 0u64, 0u64, 0u64);
+    let mut coincident_cases: Vec<String> = Vec::new();
     let mut empty_cases: Vec<String> = Vec::new();
     let mut infeasible_cases: Vec<String> = Vec::new();
 
@@ -109,6 +130,40 @@ fn main() {
             if infeasible_cases.len() < 8 {
                 infeasible_cases.push(smi.to_string());
             }
+            continue;
+        }
+
+        // ---- 跑完整条流水线,查两条**硬**不变量 ----
+        //
+        // 光有"界自洽"是不够的:界自洽的分子照样可能吐出一组废坐标
+        // (原子完全重合、或者 NaN)。这两条必须逐分子成立,不是统计。
+        let centers: Vec<chiral::Center> = chiral::centers(&mol);
+        let Ok(conf) = pipeline::conformer(&mol, &centers) else {
+            continue;
+        };
+        n_conf += 1;
+        n_spread += u64::from(conf.spread > 0);
+        if conf.coords.iter().any(|p| p.iter().any(|v| !v.is_finite())) {
+            n_nonfinite += 1;
+            continue;
+        }
+        let na = conf.coords.len();
+        let mut coincident = false;
+        for i in 0..na {
+            for j in (i + 1)..na {
+                let d2: f64 = (0..3)
+                    .map(|t| (conf.coords[i][t] - conf.coords[j][t]).powi(2))
+                    .sum();
+                if d2 <= 1e-12 {
+                    coincident = true;
+                }
+            }
+        }
+        if coincident {
+            n_coincident += 1;
+            if coincident_cases.len() < 6 {
+                coincident_cases.push(smi.to_string());
+            }
         }
     }
 
@@ -128,6 +183,12 @@ fn main() {
         println!("  不可行的例子:{}", infeasible_cases.join("  "));
     }
     println!("  1-3 两条估计交空退并集 {n13_conflict} 次;1-4 几何退化丢约束 {n14_degenerate} 次");
+    println!("  ── 整条流水线跑完的硬不变量(逐分子,不是统计)──");
+    println!("    出了构型的分子 {n_conf};破对称动过的 {n_spread}");
+    println!("    **原子完全重合**的 {n_coincident}(上限 {MAX_COINCIDENT});坐标含非有限数的 {n_nonfinite}(上限 {MAX_NONFINITE})");
+    if !coincident_cases.is_empty() {
+        println!("    重合的例子:{}", coincident_cases.join("  "));
+    }
 
     let mut fatal = false;
     if n == 0 {
@@ -148,8 +209,19 @@ fn main() {
         );
         fatal = true;
     }
+    if n_coincident > MAX_COINCIDENT {
+        eprintln!(
+            "\n有 {n_coincident} 个分子的坐标里原子完全重合 —— 那里梯度恰好为零,\
+             优化器永远分不开,坐标是废的。破对称那一步(crate::spread)可能没接上"
+        );
+        fatal = true;
+    }
+    if n_nonfinite > MAX_NONFINITE {
+        eprintln!("\n有 {n_nonfinite} 个分子的坐标含非有限数");
+        fatal = true;
+    }
     if fatal {
         std::process::exit(1);
     }
-    println!("\n两条都过。");
+    println!("\n四条都过。");
 }
