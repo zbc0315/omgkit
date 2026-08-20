@@ -17,26 +17,54 @@
 //! ```
 
 use omgkit_conf::chiral::Center;
-use omgkit_conf::{bounds, chiral, embed, pipeline, smooth, threading};
+use omgkit_conf::{bounds, chiral, embed, pipeline, smooth, spread, threading};
 use omgkit_core::{BondOrder, ChiralTag, MolBuilder};
 
 /// 精修之后,**键长**(1-2)越界超过这个数的对占比上限。
 ///
 /// 键是最硬的一档:参数表给的区间宽只有 `2×DIST12_TOL = 0.02 Å`,
 /// 而精修的误差函数罚**相对**越界,键上最贵 —— 压不下去说明优化器没干活。
-const MAX_BOND_VIOL_FRAC: f64 = 0.02;
+///
+/// 先前是 **2%**,而实测早已是 **0.0%**(4202 对里 0 对)—— 那不是闸,是橡皮图章:
+/// 84 根键推到越界都拦不住。收到 0.2%(约 9 对),贴着现值的棘轮。
+/// 全语料那一档的同名闸在 `feasibility` 里,设在 0.15%。
+const MAX_BOND_VIOL_FRAC: f64 = 0.002;
 
 /// 精修之后仍有环穿刺的分子占比上限(小样本给下限,同 `threading_oracle`)。
+///
+/// **这里保留余量是有理由的**:环穿刺用质心扇形三角化 + `.any()`,
+/// 非凸环上偶数次相交会假阳性(见 `threading` 模块文档)。在检测器改成数交点奇偶
+/// 之前,不把它收成 0。
 const MAX_PIERCE_FRAC: f64 = 0.05;
 const MIN_PIERCE_ALLOWANCE: u64 = 2;
 
+/// 精修之后仍有**键交叉**的分子数上限。
+///
+/// 先前这个数只 `println!`,fatal 段**只判环穿刺** —— 于是"键交叉 1731 → 0"
+/// 这行漂亮数字底下一个闸都没有,1731 处一处不减也照样打印"判据全过"。
+/// 键交叉与环穿刺不同,已经按拓扑距离排掉了刚性假阳性(见 `threading::RIGID_TOPO`),
+/// 所以这一条按硬不变量设成 **0**。
+const MAX_CROSS_MOL: u64 = 0;
+
 /// 精修之后手性号正确的比例下限。
 ///
-/// 嵌入 + 全局反射之后是 86.2%,剩下 13.8% 是个别中心错 ——
-/// **那一档正是三维精修该救回来的**,所以这条闸要比 86.2% 高。
-const MIN_CHIRAL_OK: f64 = 0.90;
+/// 立体化学错了分子就是错的,不是"差一点",所以这是**硬不变量:1.0**。
+/// 先前设 0.90,而实测早已是 100.0% —— 247 个中心里 24 个翻号都拦不住。
+///
+/// # 但要清楚这一条量的是什么
+///
+/// `conf.chiral_ok` 是拿**驱动 `Field` 的那同一份 `centers`** 数出来的,
+/// 所以它答的是"优化器有没有打中自己的靶",**不是**"立体化学对不对" ——
+/// `chiral::centers` 若系统性地抽错,这里照样 100%。
+/// 真值判据在 `chiral_oracle`(真值取自真实构象),两条要一起看。
+const MIN_CHIRAL_OK: f64 = 1.0;
 
 /// 逐档统计越界:`[1-2, 1-3, 1-4, 长程]` 的 `(越界数, 总数)`。
+///
+/// **`d` 是 NaN 时记成越界。** `f64::max` 按 IEEE 忽略 NaN,先前这里写的是
+/// `(lo-d).max(d-hi).max(0.0)` —— NaN 算出 `over = 0`,于是一组 NaN 坐标
+/// 四档越界全报 0.0%,拿到的是**最好看的分数**;自穿也报 0,没有手性中心的分子
+/// 连那条闸都碰不到。方向是反的:坏输入 → 满分。
 fn viol_by_class(coords: &[[f64; 3]], b: &smooth::Bounds, topo: &[u8]) -> [(u64, u64); 5] {
     let n = b.len();
     let mut out = [(0u64, 0u64); 5];
@@ -46,10 +74,14 @@ fn viol_by_class(coords: &[[f64; 3]], b: &smooth::Bounds, topo: &[u8]) -> [(u64,
                 + (coords[i][1] - coords[j][1]).powi(2)
                 + (coords[i][2] - coords[j][2]).powi(2))
             .sqrt();
-            let over = (b.lower(i, j) - d).max(d - b.upper(i, j)).max(0.0);
             let c = topo[i * n + j] as usize;
             out[c].1 += 1;
-            if over > 0.1 {
+            let bad = if d.is_finite() {
+                (b.lower(i, j) - d).max(d - b.upper(i, j)) > 0.1
+            } else {
+                true
+            };
+            if bad {
                 out[c].0 += 1;
             }
         }
@@ -180,6 +212,10 @@ fn main() {
             continue;
         };
         let mut pre = emb.coords;
+        // **破对称也要跑** —— 否则"精修前"量的是流水线里根本不存在的中间态。
+        // 而且漏掉它会让 `needs_reflection` 偏:重合配体的有符号体积恒为 0,
+        // 那些中心一律计成"号不对"。
+        spread::break_coincidence(&mut pre);
         if chiral::needs_reflection(&pre, &centers) {
             chiral::reflect(&mut pre);
         }
@@ -279,6 +315,13 @@ fn main() {
     let allowed = ((n_mol as f64 * MAX_PIERCE_FRAC).ceil() as u64).max(MIN_PIERCE_ALLOWANCE);
     if pierce_mol_a > allowed {
         eprintln!("\n精修之后仍有 {pierce_mol_a} 个分子环穿刺 > 允许的 {allowed} 个");
+        fatal = true;
+    }
+    if cross_a > MAX_CROSS_MOL {
+        eprintln!(
+            "\n精修之后还有 {cross_a} 处键交叉(上限 {MAX_CROSS_MOL})—— \
+             距离判据看不见自穿,穿过去时每一对距离都可以合法"
+        );
         fatal = true;
     }
     if chi_total > 0 && pct(chi_after, chi_total) / 100.0 < MIN_CHIRAL_OK {

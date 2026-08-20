@@ -12,7 +12,69 @@
 //! cargo run -p omgkit-conf --release --example feasibility -- harness/corpus/large.smi
 //! ```
 
-use omgkit_conf::{bounds, chiral, pipeline, smooth::triangle_smooth};
+use omgkit_conf::smooth::triangle_smooth;
+use omgkit_conf::{bounds, chiral, pipeline, smooth, threading};
+use omgkit_core::MolBuilder;
+
+/// 拓扑距离,封顶 4。`topo[i*n+j]` ∈ {0,1,2,3,4},4 表示"≥4 或不连通"。
+fn topo_dist(mol: &MolBuilder, n: usize) -> Vec<u8> {
+    let mut topo = vec![4u8; n * n];
+    for start in 0..n {
+        let mut d = vec![u8::MAX; n];
+        d[start] = 0;
+        let mut q = std::collections::VecDeque::from([start]);
+        while let Some(x) = q.pop_front() {
+            if d[x] >= 3 {
+                continue;
+            }
+            let Ok(xu) = u32::try_from(x) else { continue };
+            for (y, _) in mol.neighbors(xu) {
+                let y = y as usize;
+                if y < n && d[y] == u8::MAX {
+                    d[y] = d[x] + 1;
+                    q.push_back(y);
+                }
+            }
+        }
+        for j in 0..n {
+            topo[start * n + j] = d[j].min(4);
+        }
+    }
+    topo
+}
+
+/// 逐档统计越界:下标 1..=4 分别是 1-2 键 / 1-3 角 / 1-4 扭转 / 长程,
+/// 每档 `(越界 >0.1 Å 的对数, 总对数)`。返回的第 0 档恒为空(拓扑距离 0 是自己)。
+///
+/// **`d` 是 NaN 时记成越界。** `f64::max` 按 IEEE 忽略 NaN,写成
+/// `(lo-d).max(d-hi).max(0.0)` 会让 NaN 算出 `over = 0`,于是一组 NaN 坐标
+/// 在这张表上拿满分 —— 那是**最好看的分数**。
+///
+/// 在**这个**判官里这一支够不着(调用方在它之前就把含非有限数的分子 `continue`
+/// 掉了),留着是给别的调用方的:同一个坑在 `conformer_oracle` 里是活的。
+fn viol_by_class(coords: &[[f64; 3]], b: &smooth::Bounds, topo: &[u8]) -> [(u64, u64); 5] {
+    let n = b.len();
+    let mut out = [(0u64, 0u64); 5];
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let d = ((coords[i][0] - coords[j][0]).powi(2)
+                + (coords[i][1] - coords[j][1]).powi(2)
+                + (coords[i][2] - coords[j][2]).powi(2))
+            .sqrt();
+            let c = topo[i * n + j] as usize;
+            out[c].1 += 1;
+            let bad = if d.is_finite() {
+                (b.lower(i, j) - d).max(d - b.upper(i, j)) > 0.1
+            } else {
+                true
+            };
+            if bad {
+                out[c].0 += 1;
+            }
+        }
+    }
+    out
+}
 
 /// 建界之后就有区间是空的(下限 > 上限)——**上限 0,一个都不许有**。
 ///
@@ -61,6 +123,74 @@ const MAX_COINCIDENT: u64 = 0;
 /// 坐标里有非有限数的分子数上限。必须是 0 —— NaN 一路淌下去,查起来极贵。
 const MAX_NONFINITE: u64 = 0;
 
+/// **1-2 键**越界 >0.1 Å 的对占比上限。键是最硬的一档:参数表给的区间宽只有
+/// `2×DIST12_TOL = 0.02 Å`,压不下去说明产物在化学上就是错的。
+///
+/// # 这一条为什么现在才有
+///
+/// 先前**唯一**守几何的是 `conformer_oracle`,而 CI 只喂它
+/// `smoke.chirality.jsonl`(150 个药物样分子);跑全语料的正是这个判官,
+/// 而它一条几何都不查。**闸有(那边 2%)、会让它红的数据也有(`hard.smi`),
+/// 两者从没见过面。** 接上之后当场实测:
+///
+/// | | 1-2 键越界 | 至少断一根键的分子 |
+/// |---|---|---|
+/// | `smoke.chirality`(那边跑的) | 0.000% | 0 |
+/// | `large.smi` | **0.439%** | **273(3.09%)** |
+/// | `hard.smi` | **4.670%** | **13(19.1%)** |
+///
+/// 根因是环外 1-4 扭转被按环内的值钉死(见 `bounds::ring_path_torsion`),
+/// 修掉之后是 0.026% / 0.074%,断键分子 30(0.34%)/ 1(1.47%)。
+const MAX_BOND_VIOL_FRAC: f64 = 0.0015;
+
+/// **1-3 角**越界 >0.1 Å 的对占比上限。修根因前是 2.185% / 9.366%,现在 0.148% / 0.818%。
+const MAX_ANGLE_VIOL_FRAC: f64 = 0.015;
+
+/// **至少断一根键的分子**占比上限,外加一个绝对下限(小语料上一个分子就是几个百分点,
+/// 按比例设闸会被量化噪声抖红)。
+///
+/// 现值 `large` 30 个(0.34%)、`hard` 1 个(1.47%)。**这不是终点**:真实构象能满足
+/// 全部界(拿 RDKit 构象回量,越界 0 对),所以全局极小是 0,剩下的是优化器停在了
+/// **简并驻点**。二苯醚是标本:C–O 两根都压到 1.211、C···C 撑到 2.421,夹角 176.4° ——
+/// **醚氧被拉成直线**,而三点共线时把氧侧向挪 `h` 只让键长变 `h²/2a`,弯折方向的梯度
+/// 是二阶零。与重合原子(`crate::spread`)是同一类陷阱。从产物原地再起一次 L-BFGS,
+/// 能量一步不动,证实是真极小而不是没跑够。
+///
+/// 这一档归**确定性重试阶梯**清,清完这条闸应当能压到 0。
+const MAX_BROKEN_MOL_FRAC: f64 = 0.006;
+const MIN_BROKEN_ALLOWANCE: u64 = 3;
+
+/// 有**键交叉**的分子占比上限,外加绝对下限。
+///
+/// 先前 `conformer_oracle` 把"键交叉 + 环穿刺"列为四件硬事之一、也打印了这个数,
+/// 但它的 fatal 段**只判环穿刺** —— 键交叉一处都没人拦。
+///
+/// # 环穿刺这里**故意没有闸**,这是记在账上的,不是漏了
+///
+/// `threading::detect` 的环穿刺用**质心扇形三角化 + `.any()`**,在非凸环上
+/// 会假阳性:相交次数是偶数(mod-2 环绕数为 0,拓扑上没穿过去)时 `.any()`
+/// 照样报真。已复现:18 元月牙环,链从凹口外竖直穿过,与两个扇形面相交 2 次,
+/// 报 `pierces = 1`。给一个已知会假阳性的量装硬闸,红起来查的是判据不是产物。
+/// 先修检测器(改成数交点奇偶),再上闸。
+///
+/// 键交叉那一条先前有一例假阳性(四面体烷 `C12C3C1C23` 的三对**对棱**几何上
+/// 就相距 `a/√2 = 1.066 Å`,低于 `CROSS_TOL`,而它们被环系锁死无法互穿)。
+/// 已经在 `threading::detect` 里按拓扑距离排除掉,所以这里的下限可以取 1。
+const MAX_CROSS_MOL_FRAC: f64 = 0.001;
+const MIN_CROSS_ALLOWANCE: u64 = 1;
+
+/// **该出构型却没出**的分子数上限。必须是 0。
+///
+/// # 这一条堵的是"分母静默归零"
+///
+/// 上面那几条几何闸读的计数器,全都在 `pipeline::conformer` 成功之后才累加。
+/// 先前那一步失败是裸 `continue` —— 不计数、不报告、没有闸。于是**任何让构型
+/// 生成失败率上升的回归,都会让几何闸变得更好看**:极限情形下每个分子都失败,
+/// 四条几何闸读的是 `0/0`,判官照样打印"都过"并退出 0(变异验证过)。
+///
+/// 只让判据变绿的东西必须配一道上限闸,否则没人拦得住它。
+const MAX_NO_CONFORMER: u64 = 0;
+
 fn main() {
     let path = std::env::args()
         .nth(1)
@@ -76,6 +206,15 @@ fn main() {
     let mut coincident_cases: Vec<String> = Vec::new();
     let mut empty_cases: Vec<String> = Vec::new();
     let mut infeasible_cases: Vec<String> = Vec::new();
+    // ---- 几何:先前**只有 150 个分子的判官在看**,全语料这边一条都没有 ----
+    let mut viol = [(0u64, 0u64); 5];
+    let (mut n_broken_bond, mut n_cross_mol, mut n_pierce_mol) = (0u64, 0u64, 0u64);
+    let (mut n_cross, mut worst_over) = (0u64, 0.0f64);
+    let mut broken_cases: Vec<String> = Vec::new();
+    let mut thread_cases: Vec<String> = Vec::new();
+    let mut no_conf_cases: Vec<String> = Vec::new();
+    let mut worst_case = String::new();
+    let mut n_no_conf = 0u64;
 
     for line in text.lines() {
         // 语料格式:`SMILES<TAB>名字`,**`#` 开头是注释、空行忽略**
@@ -138,8 +277,17 @@ fn main() {
         // 光有"界自洽"是不够的:界自洽的分子照样可能吐出一组废坐标
         // (原子完全重合、或者 NaN)。这两条必须逐分子成立,不是统计。
         let centers: Vec<chiral::Center> = chiral::centers(&mol);
-        let Ok(conf) = pipeline::conformer(&mol, &centers) else {
-            continue;
+        // **失败必须计数。** 后面几条几何闸读的计数器都在这一行之后才累加,
+        // 裸 `continue` 会让"生成失败"变成"几何更好看"。见 `MAX_NO_CONFORMER`。
+        let conf = match pipeline::conformer(&mol, &centers) {
+            Ok(c) => c,
+            Err(e) => {
+                n_no_conf += 1;
+                if no_conf_cases.len() < 6 {
+                    no_conf_cases.push(format!("{smi}({e:?})"));
+                }
+                continue;
+            }
         };
         n_conf += 1;
         n_spread += u64::from(conf.spread > 0);
@@ -165,6 +313,44 @@ fn main() {
                 coincident_cases.push(smi.to_string());
             }
         }
+
+        // ---- 几何:界是"能不能摆",这里量的是"摆得对不对" ----
+        //
+        // 这两件事**不是一回事**,而先前只有 `conformer_oracle` 在看后者,
+        // 它跑的是 150 个药物样分子 —— 闸有(2%)、会让它红的数据也有(hard.smi),
+        // 两者从没见过面。
+        let topo = topo_dist(&mol, na);
+        let v = viol_by_class(&conf.coords, &b, &topo);
+        for (k, (bad, tot)) in v.iter().enumerate() {
+            viol[k].0 += bad;
+            viol[k].1 += tot;
+        }
+        if v[1].0 > 0 {
+            n_broken_bond += 1;
+            if broken_cases.len() < 6 {
+                broken_cases.push(smi.to_string());
+            }
+        }
+        for i in 0..na {
+            for j in (i + 1)..na {
+                let d = ((conf.coords[i][0] - conf.coords[j][0]).powi(2)
+                    + (conf.coords[i][1] - conf.coords[j][1]).powi(2)
+                    + (conf.coords[i][2] - conf.coords[j][2]).powi(2))
+                .sqrt();
+                let over = (b.lower(i, j) - d).max(d - b.upper(i, j));
+                if over > worst_over {
+                    worst_over = over;
+                    worst_case = smi.to_string();
+                }
+            }
+        }
+        let t = threading::detect(&mol, &conf.coords);
+        n_cross += t.crossings as u64;
+        n_cross_mol += u64::from(t.crossings > 0);
+        n_pierce_mol += u64::from(t.pierces > 0);
+        if (t.crossings > 0 || t.pierces > 0) && thread_cases.len() < 6 {
+            thread_cases.push(format!("{smi}(交叉{} 穿刺{})", t.crossings, t.pierces));
+        }
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -184,10 +370,43 @@ fn main() {
     }
     println!("  1-3 两条估计交空退并集 {n13_conflict} 次;1-4 几何退化丢约束 {n14_degenerate} 次");
     println!("  ── 整条流水线跑完的硬不变量(逐分子,不是统计)──");
-    println!("    出了构型的分子 {n_conf};破对称动过的 {n_spread}");
+    println!(
+        "    出了构型的分子 {n_conf};**该出没出**的 {n_no_conf}(上限 {MAX_NO_CONFORMER});\
+         破对称动过的 {n_spread}"
+    );
+    if !no_conf_cases.is_empty() {
+        println!("    没出构型的例子:{}", no_conf_cases.join("  "));
+    }
     println!("    **原子完全重合**的 {n_coincident}(上限 {MAX_COINCIDENT});坐标含非有限数的 {n_nonfinite}(上限 {MAX_NONFINITE})");
     if !coincident_cases.is_empty() {
         println!("    重合的例子:{}", coincident_cases.join("  "));
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let pct = |a: u64, b: u64| 100.0 * a as f64 / b.max(1) as f64;
+    println!("  ── 几何:出厂坐标越界 >0.1 Å 的对,按拓扑档 ──");
+    for (c, name) in [
+        (1usize, "1-2 键"),
+        (2, "1-3 角"),
+        (3, "1-4 扭转"),
+        (4, "长程"),
+    ] {
+        println!(
+            "    {name:8} {:9} 对中 {:7} 越界  {:6.3}%",
+            viol[c].1,
+            viol[c].0,
+            pct(viol[c].0, viol[c].1)
+        );
+    }
+    println!(
+        "    **至少断一根键**的分子 {n_broken_bond}({:.2}%);最坏越界 {worst_over:.2} Å  {worst_case}",
+        pct(n_broken_bond, n_conf)
+    );
+    if !broken_cases.is_empty() {
+        println!("    断键的例子:{}", broken_cases.join("  "));
+    }
+    println!("    键交叉 {n_cross} 处,分布在 {n_cross_mol} 个分子;有环穿刺的分子 {n_pierce_mol}");
+    if !thread_cases.is_empty() {
+        println!("    自穿的例子:{}", thread_cases.join("  "));
     }
 
     let mut fatal = false;
@@ -220,8 +439,61 @@ fn main() {
         eprintln!("\n有 {n_nonfinite} 个分子的坐标含非有限数");
         fatal = true;
     }
+    if n_no_conf > MAX_NO_CONFORMER {
+        eprintln!(
+            "\n有 {n_no_conf} 个分子界可行却没出构型(上限 {MAX_NO_CONFORMER})—— \
+             下面几条几何闸的分母全在这一步之后累加,放着不管等于给它们开后门"
+        );
+        fatal = true;
+    }
+    // ---- 几何:先前全语料这边一条都没有 ----
+    let bond_frac = pct(viol[1].0, viol[1].1) / 100.0;
+    if bond_frac > MAX_BOND_VIOL_FRAC {
+        eprintln!(
+            "\n1-2 键越界 {:.3}% > {:.3}% —— 最硬的一档,产物在化学上就是错的",
+            100.0 * bond_frac,
+            100.0 * MAX_BOND_VIOL_FRAC
+        );
+        fatal = true;
+    }
+    let angle_frac = pct(viol[2].0, viol[2].1) / 100.0;
+    if angle_frac > MAX_ANGLE_VIOL_FRAC {
+        eprintln!(
+            "\n1-3 角越界 {:.3}% > {:.3}%",
+            100.0 * angle_frac,
+            100.0 * MAX_ANGLE_VIOL_FRAC
+        );
+        fatal = true;
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let allow = |frac: f64, floor: u64| ((n_conf as f64 * frac).ceil() as u64).max(floor);
+    let broken_allowed = allow(MAX_BROKEN_MOL_FRAC, MIN_BROKEN_ALLOWANCE);
+    if n_broken_bond > broken_allowed {
+        eprintln!(
+            "\n有 {n_broken_bond} 个分子至少断一根键 > 允许的 {broken_allowed} 个\
+             (共 {n_conf};上限 {:.1}%)",
+            100.0 * MAX_BROKEN_MOL_FRAC
+        );
+        fatal = true;
+    }
+    let cross_allowed = allow(MAX_CROSS_MOL_FRAC, MIN_CROSS_ALLOWANCE);
+    if n_cross_mol > cross_allowed {
+        eprintln!(
+            "\n有 {n_cross_mol} 个分子出现键交叉 > 允许的 {cross_allowed} 个 —— \
+             距离判据看不见自穿,穿过去时每一对距离都可以合法"
+        );
+        fatal = true;
+    }
     if fatal {
         std::process::exit(1);
     }
-    println!("\n四条都过。");
+    // 逐条点名,别只报个数 —— 加了闸忘了改数,或者改了数没加闸,都是这么来的。
+    println!(
+        "\n九条都过:空区间 / 界不可行 / 原子重合 / 非有限数 / 该出没出 / \
+         1-2 键 / 1-3 角 / 断键分子 / 键交叉分子。"
+    );
 }
