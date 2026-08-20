@@ -179,6 +179,31 @@ const MIN_BROKEN_ALLOWANCE: u64 = 3;
 const MAX_CROSS_MOL_FRAC: f64 = 0.001;
 const MIN_CROSS_ALLOWANCE: u64 = 1;
 
+/// **漏了把 `/` `\` 折算成 `BondStereo` 的分子数**上限。必须是 0。
+///
+/// 这是一条**前置条件闸**:折算那一步(`omgkit_io::stereo::perceive_bond_stereo`)
+/// 在 `omgkit-io` 里,构型流水线管不着它,只能靠调用方记得调。
+/// 而"靠记得"实测就是不行 —— 整条流水线先前压根没调,于是
+/// `bounds::stereo_path_torsion` 一次都没发力,双键顺反整档退回
+/// "顺式到反式的全程",外部判据上 `large.smi` 里 10 个分子交付的几何站错了边。
+///
+/// SMILES 层的 `harness/check_ez.py` 一直全绿 —— 它跑的是 `parse → write`,
+/// **不经过这条流水线**。判据的输入分布又一次排除了要测的那一档。
+///
+/// 谓词用 `omgkit-io` 那个(与感知**由构造保证一致**),**不在这边自己判** ——
+/// "该不该折算"要用规范秩分辨等价取代基,写第二份实现两边迟早分岔。
+const MAX_UNPERCEIVED_STEREO: u64 = 0;
+
+/// **拿到了 `BondStereo` 的双键数下限** —— 语料里有方向键时必须 > 0。
+///
+/// 上面那条只看得见"调用方漏了调",看不见"折算这件事整体失效":
+/// 变异验证过 —— 把 SMILES 解析器改成丢掉所有 `/` `\`,那条闸读 0、全绿退出 0,
+/// 而断键分子当场退回修复前的数。**只让判据变绿的东西必须配一道反向闸。**
+///
+/// 判的是条件式:语料里**一根方向键都没有**时(`hard.smi` 就是这样)这条不生效,
+/// 但两个数都会打印出来 —— 恒 0/0 的闸看着在守,实际什么都没守。
+const MIN_PERCEIVED_STEREO: u64 = 1;
+
 /// **该出构型却没出**的分子数上限。必须是 0。
 ///
 /// # 这一条堵的是"分母静默归零"
@@ -202,6 +227,7 @@ fn main() {
 
     let (mut n, mut n_parse_fail, mut n_empty, mut n_infeasible) = (0u64, 0u64, 0u64, 0u64);
     let (mut n13_conflict, mut n14_degenerate) = (0u64, 0u64);
+    let (mut n_unperceived, mut n_perceived, mut n_directional) = (0u64, 0u64, 0u64);
     let (mut n_conf, mut n_spread, mut n_coincident, mut n_nonfinite) = (0u64, 0u64, 0u64, 0u64);
     let mut coincident_cases: Vec<String> = Vec::new();
     let mut empty_cases: Vec<String> = Vec::new();
@@ -238,6 +264,24 @@ fn main() {
             n_parse_fail += 1;
             continue;
         }
+        // **把 `/` `\` 折算成双键自己的 `BondStereo`。** SMILES 里顺反记在相邻单键的
+        // `direction` 上,不经这一步的话 `bounds::stereo_path_torsion` 一次都不发力,
+        // 而它是 1-4 扭转最硬的那条来源。整条流水线先前少的就是这一环。
+        // 折算**之前**先记一笔:有几根方向键。这是纯拓扑事实,
+        // 用来判断下面那条反向闸该不该生效。
+        n_directional += mol
+            .bonds()
+            .iter()
+            .filter(|b| b.direction != omgkit_core::BondDirection::None)
+            .count() as u64;
+        omgkit_io::stereo::perceive_bond_stereo(&mut mol);
+        n_perceived += mol
+            .bonds()
+            .iter()
+            .filter(|b| b.stereo != omgkit_core::BondStereo::None)
+            .count() as u64;
+        // 谓词与感知由构造保证一致,所以感知跑过之后它必须闭嘴
+        n_unperceived += u64::from(omgkit_io::stereo::directions_not_perceived(&mol));
         // 补氢要给一个与写法无关的秩;这里只关心界可不可行,用恒等秩即可
         let order: Vec<u32> = (0..mol.num_atoms() as u32).collect();
         omgkit_chem::explicit_hs::add_explicit_hs(&mut mol, &order);
@@ -248,6 +292,7 @@ fn main() {
         // 只写不读的计数器等于没有,而这两件事都只会让界更松、判据更容易绿。
         n13_conflict += stats.n13_conflict as u64;
         n14_degenerate += stats.n14_degenerate as u64;
+
         // 建完界先看有没有区间当场就空 —— 那是**表自相矛盾**,与几何无关
         let nat = b.len();
         let mut empty = false;
@@ -369,6 +414,11 @@ fn main() {
         println!("  不可行的例子:{}", infeasible_cases.join("  "));
     }
     println!("  1-3 两条估计交空退并集 {n13_conflict} 次;1-4 几何退化丢约束 {n14_degenerate} 次");
+    println!(
+        "  顺反:方向键 {n_directional} 根 → 折算出 {n_perceived} 根双键立体\
+         (下限 {MIN_PERCEIVED_STEREO},仅当方向键 > 0 时生效);\
+         **折算完谓词还在报**的分子 {n_unperceived} 个(上限 {MAX_UNPERCEIVED_STEREO})"
+    );
     println!("  ── 整条流水线跑完的硬不变量(逐分子,不是统计)──");
     println!(
         "    出了构型的分子 {n_conf};**该出没出**的 {n_no_conf}(上限 {MAX_NO_CONFORMER});\
@@ -439,6 +489,23 @@ fn main() {
         eprintln!("\n有 {n_nonfinite} 个分子的坐标含非有限数");
         fatal = true;
     }
+    if n_unperceived > MAX_UNPERCEIVED_STEREO {
+        eprintln!(
+            "\n有 {n_unperceived} 个分子折算完谓词还在报漏 —— \
+             要么调用方漏了 `omgkit_io::stereo::perceive_bond_stereo`,\
+             要么谓词与感知分岔了。这一档的 1-4 扭转会退回顺式到反式的全程,\
+             交付的几何有一半站错边"
+        );
+        fatal = true;
+    }
+    if n_directional > 0 && n_perceived < MIN_PERCEIVED_STEREO {
+        eprintln!(
+            "\n语料里有 {n_directional} 根方向键,却一根双键立体都没折算出来 —— \
+             折算这件事整体失效了。上面那条闸看不见这种失败(它只看得见\
+             '调用方漏了调'),所以必须有这条反向闸"
+        );
+        fatal = true;
+    }
     if n_no_conf > MAX_NO_CONFORMER {
         eprintln!(
             "\n有 {n_no_conf} 个分子界可行却没出构型(上限 {MAX_NO_CONFORMER})—— \
@@ -493,7 +560,7 @@ fn main() {
     }
     // 逐条点名,别只报个数 —— 加了闸忘了改数,或者改了数没加闸,都是这么来的。
     println!(
-        "\n九条都过:空区间 / 界不可行 / 原子重合 / 非有限数 / 该出没出 / \
+        "\n十条都过:空区间 / 界不可行 / 顺反没折算 / 原子重合 / 非有限数 / 该出没出 / \
          1-2 键 / 1-3 角 / 断键分子 / 键交叉分子。"
     );
 }

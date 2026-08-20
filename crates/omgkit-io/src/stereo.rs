@@ -139,21 +139,64 @@ pub fn raw_cis_trans(mol: &MolBuilder, bond: u32) -> Option<(BondStereo, [u32; 2
 /// 拿它当场拦住。**返回 `false` 不等于分子有顺反** —— 根本没写方向键的分子
 /// 也返回 `false`,那是对的:没写就没什么可丢的。
 ///
-/// # 为什么这样判不会误报
+/// # 它与 [`perceive_bond_stereo`] **由构造保证一致**
 ///
-/// 光看"有方向键却没有顺反"是不够的:一条孤零零的 `/` 本就说明不了任何事,
-/// 感知跑过也照样什么都不会留下 —— 那样判会把正常分子报成错。
+/// 两者走同一个 `would_annotate`。这不是洁癖:先前这里判的是
+/// "[`raw_cis_trans`] 给得出结果",而那一条**少了 [`informative_directions`] 那道过滤** ——
+/// 于是"感知有意不标"的分子被报成"感知没跑过"。
 ///
-/// [`raw_cis_trans`] 只在双键**两端的方向成对**时才给出结果,而那正是感知会
-/// 留下顺反的条件。所以"它有值、`stereo` 却是 `None`"只有一种解释:感知没跑过。
+/// 实测三条合法 SMILES 会误报,而且**再调一次感知也不会变绿**(它本来就不该标):
+///
+/// | SMILES | 感知标了几根 | 旧谓词 |
+/// |---|---|---|
+/// | `F/C=C(\F)F` | 0 | **报错** |
+/// | `Cl/C=C(\Cl)Cl` | 0 | **报错** |
+/// | `CC(/C=C/C)=C(\C)C` | 1 | **报错** |
+///
+/// 第三条尤其现实:一根真顺反 + 一根冗余方向,公共库 SMILES 的常见写法。
+/// 后果不是"多数一个" —— `omgkit-depict` 的 `generate` 与 `omgkit-match`
+/// 的重定基都拿它做 `debug_assert!`,于是 debug 下画这三个分子**直接 panic**。
+///
+/// 光看"有方向键却没有顺反"本来就不够:一条孤零零的 `/` 说明不了任何事,
+/// 一端挂着两个等价取代基时方向同样是噪声(见 [`informative_directions`] 的表)。
+/// 判据必须与感知问同一个问题,否则它守的是另一件事。
 #[must_use]
 pub fn directions_not_perceived(mol: &MolBuilder) -> bool {
-    (0..mol.num_bonds())
-        .filter(|&i| {
-            let b = mol.bonds()[i];
-            b.order == BondOrder::Double && b.stereo == BondStereo::None
-        })
-        .any(|i| raw_cis_trans(mol, u32::try_from(i).unwrap_or(u32::MAX)).is_some())
+    let informative = informative_directions(mol);
+    if !informative.iter().any(|&x| x) {
+        return false;
+    }
+    (0..mol.num_bonds()).any(|i| {
+        mol.bonds()[i].stereo == BondStereo::None && would_annotate(mol, i, &informative).is_some()
+    })
+}
+
+/// **感知会不会给这根键留下顺反?** —— [`perceive_bond_stereo`] 与
+/// [`directions_not_perceived`] 共用的那一条判断。
+///
+/// 抽出来是为了让"会不会标"与"标成什么"只有一份实现:两处各写一遍的话,
+/// 迟早在某个过滤条件上分岔,而分岔的表现是判据报一件代码没做的事。
+fn would_annotate(
+    mol: &MolBuilder,
+    di: usize,
+    informative: &[bool],
+) -> Option<(BondStereo, [u32; 2])> {
+    let db = *mol.bonds().get(di)?;
+    if db.order != BondOrder::Double || db.flags.contains(BondFlags::AROMATIC) {
+        return None;
+    }
+    // 已经带着有效标注的不重算,见 `perceive_bond_stereo` 的文档
+    if stereo_atoms_are_valid(mol, u32::try_from(di).ok()?) {
+        return None;
+    }
+    let (ref_b, dir_b) = outward_direction(mol, db.begin, db.end, informative)?;
+    let (ref_e, dir_e) = outward_direction(mol, db.end, db.begin, informative)?;
+    let stereo = if dir_b == dir_e {
+        BondStereo::Cis
+    } else {
+        BondStereo::Trans
+    };
+    Some((stereo, [ref_b, ref_e]))
 }
 
 /// `end` 那一侧带方向的邻居,方向换算到"从 `end` 向外"。
@@ -318,27 +361,13 @@ pub fn perceive_bond_stereo(mol: &mut MolBuilder) -> usize {
         return 0;
     }
 
+    // **判断哪些键该标,与 [`directions_not_perceived`] 共用 [`would_annotate`]** ——
+    // 两处各写一遍的话迟早在某个过滤条件上分岔,而那正是先前发生过的事。
     let mut found: Vec<(u32, BondStereo, [u32; 2])> = Vec::new();
-    for (di, db) in mol.bonds().iter().enumerate() {
-        if db.order != BondOrder::Double || db.flags.contains(BondFlags::AROMATIC) {
-            continue;
+    for di in 0..mol.num_bonds() {
+        if let Some((stereo, atoms)) = would_annotate(mol, di, &informative) {
+            found.push((u32::try_from(di).unwrap_or(u32::MAX), stereo, atoms));
         }
-        // 已经带着有效标注的不重算,见本函数文档
-        if stereo_atoms_are_valid(mol, u32::try_from(di).unwrap_or(u32::MAX)) {
-            continue;
-        }
-        let Some((ref_b, dir_b)) = outward_direction(mol, db.begin, db.end, &informative) else {
-            continue;
-        };
-        let Some((ref_e, dir_e)) = outward_direction(mol, db.end, db.begin, &informative) else {
-            continue;
-        };
-        let stereo = if dir_b == dir_e {
-            BondStereo::Cis
-        } else {
-            BondStereo::Trans
-        };
-        found.push((di as u32, stereo, [ref_b, ref_e]));
     }
 
     let n = found.len();
@@ -804,6 +833,50 @@ mod tests {
             !directions_not_perceived(&lone),
             "只有一侧写了方向,几何本就定不下来 —— 没感知过也不该报"
         );
+    }
+
+    #[test]
+    fn 谓词与感知问的是同一个问题() {
+        // **每一条都断言"感知标了几根"与"谓词说没说漏"是一致的。**
+        //
+        // 先前 `directions_not_perceived` 走的是 `raw_cis_trans`,少了
+        // `informative_directions` 那道过滤,于是下面第 3~5 条(方向是噪声、
+        // 感知有意不标)被报成"漏了调感知"—— 而再调一次也不会变绿。
+        // `omgkit-depict` 与 `omgkit-match` 拿这个谓词做 `debug_assert!`,
+        // 那三条合法 SMILES 在 debug 下会直接 panic。
+        for smi in [
+            "F/C=C/F",            // 正常:两侧都有信息
+            "F/C=C\\F",           // 同上,另一侧
+            "F/C=C(\\F)F",        // 一端两个相同取代基 —— 方向是噪声
+            "Cl/C=C(\\Cl)Cl",     // 同上
+            "CC(/C=C/C)=C(\\C)C", // 一根真顺反 + 一根冗余方向(公共库常见写法)
+            "F/C=CF",             // 只有一侧有方向,说明不了相对位置
+            "C/1CCCCC1",          // 根本没有双键
+            "CCO",                // 一根方向键都没有
+        ] {
+            let mut m = crate::smiles::parse(smi).expect("解析");
+            omgkit_chem::pipeline::sanitize(&mut m).expect("净化");
+            // 感知之**前**:谓词说"漏了"当且仅当感知真的会标出东西
+            let will_annotate = {
+                let informative = informative_directions(&m);
+                (0..m.num_bonds())
+                    .filter(|&i| m.bonds()[i].stereo == BondStereo::None)
+                    .filter(|&i| would_annotate(&m, i, &informative).is_some())
+                    .count()
+            };
+            assert_eq!(
+                directions_not_perceived(&m),
+                will_annotate > 0,
+                "{smi}:谓词与感知不一致(感知会标 {will_annotate} 根)"
+            );
+            let n = perceive_bond_stereo(&mut m);
+            assert_eq!(n, will_annotate, "{smi}:实际标的根数与预判不符");
+            // 感知之**后**:谓词必须闭嘴,否则调用方无论如何都修不绿
+            assert!(
+                !directions_not_perceived(&m),
+                "{smi}:感知跑过了谓词还在报 —— 这种红没有任何修法"
+            );
+        }
     }
 
     fn perceive(smi: &str) -> Vec<(u32, u32, BondStereo, [u32; 2])> {

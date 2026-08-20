@@ -38,8 +38,12 @@ fn main() {
             continue;
         }
         let smi = line.split('\t').next().unwrap_or("").trim();
-        // 只看带立体标记的分子
-        if !smi.contains('@') {
+        // 只看带立体标记的分子。
+        //
+        // **别只收带 `@` 的。** 语料里 331 个分子有 `/` `\` 却没有 `@`,
+        // 只收 `@` 的话双键顺反那一档从来进不了外部判据 —— 而那正是这次修的一档。
+        // 判据的输入分布排除掉要测的那一档,是这个仓库反复踩的同一个坑。
+        if !smi.contains('@') && !smi.contains('/') && !smi.contains('\\') {
             continue;
         }
         let Ok(mut mol) = omgkit_io::smiles::parse(smi) else {
@@ -48,10 +52,19 @@ fn main() {
         if omgkit_chem::pipeline::sanitize(&mut mol).is_err() {
             continue;
         }
+        // 不折算的话双键顺反整档丢掉,见 `pipeline::conformer` 的前置条件那一节
+        omgkit_io::stereo::perceive_bond_stereo(&mut mol);
         let r = omgkit_io::canon::classed_ranks(&mol);
         omgkit_chem::add_explicit_hs(&mut mol, &r);
         let centers = omgkit_conf::chiral::centers(&mol);
-        if centers.is_empty() {
+        // **有手性中心 or 有双键顺反,两者之一就收。** 先前这里只看 `centers`,
+        // 于是上面刚放宽的那 331 个"只有 `/` `\`"的分子又在这儿被滤掉了 ——
+        // 放宽一道闸而下一道还卡着,等于没放宽。
+        let has_ez = mol
+            .bonds()
+            .iter()
+            .any(|b| b.stereo != omgkit_core::BondStereo::None);
+        if centers.is_empty() && !has_ez {
             continue;
         }
         let Ok(conf) = omgkit_conf::pipeline::conformer(&mol, &centers) else {
