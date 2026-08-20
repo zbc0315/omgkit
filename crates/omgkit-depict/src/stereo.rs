@@ -288,8 +288,11 @@ fn candidate_bonds(
 ///
 /// 带正电的不算:季铵、锍盐上没有孤对,四个配体全在,走 `(4, 0)` 那一支。
 fn has_lone_pair(mol: &MolBuilder, a: u32) -> bool {
+    // **表在 `omgkit-core`,这里不再自己写一份。** `omgkit-conf` 抽手性中心时
+    // 要问同一个问题(三个邻居也算数),两处各写一份迟早分岔,
+    // 而分岔的表现是一半的中心画对了、另一半摆错了。
     let at = mol.atoms()[a as usize];
-    at.formal_charge <= 0 && matches!(at.atomic_num, 15 | 16 | 33 | 34 | 52)
+    omgkit_core::element::has_stereogenic_lone_pair(at.atomic_num, at.formal_charge)
 }
 
 /// 三个画出来的邻居张不出这么大的体积,就判"这张图定不出手性"。

@@ -246,6 +246,111 @@ mod tests {
     }
 
     #[test]
+    fn 三配位立体中心抽得出来且两个对映体互为镜像() {
+        // 亚砜/亚磺酰胺的 S、膦的 P:三根键 + 一对孤对,构型照样确定。
+        // 先前 `centers()` 凑不够四个邻居就整个丢掉 —— 语料 13 个分子、16 个中心
+        // 的构型因此是掷硬币。
+        // 每一对都必须是**真的对映体**。头一版里 `C[S@](=O)C`(DMSO,两个甲基一样)
+        // 与 `c1ccc(cc1)[P@@]2CCCCC2`(环两臂等价)**根本不是立体中心** ——
+        // RDKit 直接把标记清掉。拿它们当夹具的话,"号必须相反"是由
+        // `sign = match chiral_tag` 直接保证的恒真式,测了个寂寞。
+        // 下面每一条都用 RDKit 规范化确认过标记不会被清掉。
+        for (a, b) in [
+            ("C[S@](=O)CC", "C[S@@](=O)CC"),
+            ("C[S@](=O)c1ccccc1", "C[S@@](=O)c1ccccc1"),
+            (
+                "C[C@@H]1CO[S@@](=O)N1c2ccccc2",
+                "C[C@@H]1CO[S@](=O)N1c2ccccc2",
+            ),
+            ("C[P@H]CC", "C[P@@H]CC"),
+            ("CC[P@](C)c1ccccc1", "CC[P@@](C)c1ccccc1"),
+            ("C[C@@H]1CC[P@](c2ccccc2)C1", "C[C@@H]1CC[P@@](c2ccccc2)C1"),
+        ] {
+            let (ma, mb) = (prep(a), prep(b));
+            let (ca, cb) = (chiral::centers(&ma), chiral::centers(&mb));
+            // 抽得出来,而且确实是三配位那一档
+            let three_a = ca.iter().filter(|c| c.is_three_coordinate()).count();
+            assert!(three_a > 0, "{a}:一个三配位中心都没抽出来");
+            assert_eq!(
+                three_a,
+                cb.iter().filter(|c| c.is_three_coordinate()).count()
+            );
+            // **只比三配位那些中心** —— 上面几对里有的只翻了 S / P,
+            // 分子里别的手性中心两边一样,号本来就该相同。
+            // (这条断言的第一版没分,当场被 `C[C@@H]1CO[S@@]…` 那一对打红,
+            //  它的碳在两边完全一致。)
+            //
+            // 断的是"两个对映体给出相反的号"。它抓不住"整批号取反"
+            // (那种错法两边一起翻,仍然相反),但抓得住"根本没读标记"
+            // —— 那时两边会给同一个号。绝对约定由外部判据 `verify_stereo.py` 守,
+            // 而三配位 **P** 那一档判官够不着(RDKit 自己都读不回),
+            // 所以 P 的绝对号目前只有这条必要条件钉着,别当成已验证。
+            for (x, y) in ca.iter().zip(cb.iter()) {
+                assert_eq!(x.atom, y.atom);
+                if !x.is_three_coordinate() {
+                    continue;
+                }
+                assert_eq!(
+                    x.sign, -y.sign,
+                    "{a} / {b}:对映体在 {} 号上应当相反,实得 {} vs {}",
+                    x.atom, x.sign, y.sign
+                );
+            }
+            // 交付的坐标要真的照着摆:两边的号都得对上自己的目标
+            let (fa, fb) = (
+                conformer(&ma, &ca).unwrap_or_else(|e| panic!("{a}:{e:?}")),
+                conformer(&mb, &cb).unwrap_or_else(|e| panic!("{b}:{e:?}")),
+            );
+            assert_eq!(fa.chiral_ok, fa.chiral_total, "{a}:交付的号不对");
+            assert_eq!(fb.chiral_ok, fb.chiral_total, "{b}:交付的号不对");
+            // 而且两边的**中心基点体积**必须反号 —— 这才说明几何真的镜像了,
+            // 不是两边都朝同一个方向摆然后判据也跟着错。
+            for (x, y) in ca.iter().zip(cb.iter()) {
+                if !x.is_three_coordinate() {
+                    continue;
+                }
+                let (va, vb) = (
+                    chiral::center_volume(&fa.coords, x),
+                    chiral::center_volume(&fb.coords, y),
+                );
+                assert!(
+                    va * vb < 0.0,
+                    "{a} / {b}:中心 {} 的体积没反号({va:+.3} vs {vb:+.3})",
+                    x.atom
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn 三配位但没有孤对的不算立体中心() {
+        // `[S+]` 三配位是平面的,`[N+]`/`[C]` 三配位是 sp² —— 都不是四面体中心。
+        // 这条守的是"别把任何凑不够四邻居的带标记原子都当成三配位中心"。
+        for smi in ["C[S+](C)C", "C[N+](C)C"] {
+            let mut m = omgkit_io::smiles::parse(smi).expect("解析");
+            omgkit_chem::pipeline::sanitize(&mut m).expect("净化");
+            // 强行按四面体标记,看 `centers` 会不会上钩
+            for i in 0..m.num_atoms() as u32 {
+                let z = m.atoms()[i as usize].atomic_num;
+                if z == 16 || z == 7 {
+                    if let Some(a) = m.atom_mut(i) {
+                        a.chiral_tag = omgkit_core::ChiralTag::Ccw;
+                    }
+                }
+            }
+            let r = omgkit_io::canon::classed_ranks(&m);
+            omgkit_chem::add_explicit_hs(&mut m, &r);
+            for c in chiral::centers(&m) {
+                assert!(
+                    !c.is_three_coordinate(),
+                    "{smi}:原子 {} 不该被当成三配位立体中心",
+                    c.atom
+                );
+            }
+        }
+    }
+
+    #[test]
     fn 漏了顺反折算会被谓词看见() {
         // `directions_not_perceived` 是把"前置条件"变成机器可查的那一条。
         // 它一旦恒为 false,`feasibility` 那道闸就什么都没守住。

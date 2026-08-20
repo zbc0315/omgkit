@@ -22,15 +22,15 @@ set -eo pipefail
 cd "$(dirname "$0")/.."
 
 
-echo "== 1/13 fmt"
+echo "== 1/14 fmt"
 cargo fmt --all --check
-echo "== 2/13 clippy(警告即失败)"
+echo "== 2/14 clippy(警告即失败)"
 cargo clippy -q --workspace --all-targets -- -D warnings
-echo "== 3/13 测试(release)"
+echo "== 3/14 测试(release)"
 cargo test -q --release
-echo "== 4/13 测试(debug —— 让 debug_assert 真的跑到)"
+echo "== 4/14 测试(debug —— 让 debug_assert 真的跑到)"
 cargo test -q --workspace
-echo "== 5/13 文档"
+echo "== 5/14 文档"
 cargo doc -q --workspace --no-deps --document-private-items
 
 # ---- 三个外部判官 ----
@@ -48,17 +48,17 @@ cargo doc -q --workspace --no-deps --document-private-items
 # (光滑化要逐位相同、特征值要对上 LAPACK、真实构象要精确回嵌),
 # 那两条在 27 个分子上照样抓得住错。
 SMOKE=harness/baseline/smoke.bounds.jsonl
-echo "== 6/13 判官:三角光滑化 vs RDKit"
+echo "== 6/14 判官:三角光滑化 vs RDKit"
 cargo run -q -p omgkit-conf --release --example smooth_oracle -- "$SMOKE"
-echo "== 7/13 判官:界矩阵(三条)"
+echo "== 7/14 判官:界矩阵(三条)"
 cargo run -q -p omgkit-conf --release --example bounds_oracle -- "$SMOKE"
-echo "== 8/13 判官:特征分解 vs LAPACK + 精确回嵌"
+echo "== 8/14 判官:特征分解 vs LAPACK + 精确回嵌"
 cargo run -q -p omgkit-conf --release --example eigen_oracle -- "$SMOKE" harness/baseline/smoke.gram_eigs.jsonl
 
 # 头号指标:界不可行的分子占比。跑**全语料 8831 个**,不跑冒烟档 ——
 # 400 个样本上真实率 0.34% 只对应 1.4 个分子,泊松噪声足以让闸随机红绿。
 # 语料随仓库入库(342 K),全程 0.7 秒。
-echo "== 9/13 判官:全语料界可行率(头号指标)"
+echo "== 9/14 判官:全语料界可行率(头号指标)"
 cargo run -q -p omgkit-conf --release --example feasibility -- harness/corpus/large.smi
 
 # **通用性难例语料。** large.smi 是药物样分子,在它上面全绿只说明"对药物样分子成立"。
@@ -71,19 +71,29 @@ cargo run -q -p omgkit-conf --release --example feasibility -- harness/corpus/la
 # 闸有、会让它红的数据也有,两者从没见过面。
 # "该出没出"那条堵的是分母:几何四条的计数器都在构型生成成功之后才累加,
 # 不给它配闸,任何让生成失败率上升的回归都会让几何闸变得更好看。
-echo "== 10/13 判官:难例语料(通用性 + 硬不变量)"
+echo "== 10/14 判官:难例语料(通用性 + 硬不变量)"
 cargo run -q -p omgkit-conf --release --example feasibility -- harness/corpus/hard.smi
 # 自穿:先拿真实构象校准检测器(必须报 0),再量我们自己的。
 # 反过来做是自证 —— 检测器要是根本报不出东西,那个 0 只说明它没在看。
-echo "== 11/13 判官:自穿(先校准检测器,再量自己)"
+echo "== 11/14 判官:自穿(先校准检测器,再量自己)"
 cargo run -q -p omgkit-conf --release --example threading_oracle -- "$SMOKE"
-echo "== 12/13 判官:手性中心(真值取自真实构象)"
+echo "== 12/14 判官:手性中心(真值取自真实构象)"
 cargo run -q -p omgkit-conf --release --example chiral_oracle -- harness/baseline/smoke.chirality.jsonl
 
 # **端到端。** 前面各条守一段,这一条守产物:分子进去、坐标出来,那组坐标满不满足化学。
 # 精修前后各量一遍 —— 只报"之后"看不出精修有没有在干活。
-echo "== 13/13 判官:端到端构型(产物好不好)"
+echo "== 13/14 判官:端到端构型(产物好不好)"
 cargo run -q -p omgkit-conf --release --example conformer_oracle -- harness/baseline/smoke.chirality.jsonl
 
+# **三配位立体中心**(亚砜/亚磺酰胺的 S、膦的 P:三根键 + 一对孤对)。
+# 单独一条,因为上面那份基准里**一个这样的中心都没有** —— 于是这一档的
+# 槽位约定在 CI 里从来没被验过:变异验证过,把三配位的槽位前两个对调
+# (= 交付全部三配位中心的对映体),上面那条闸与全部单元测试**照样全绿**。
+#
+# 真值取自 RDKit 的**嵌入器**(它的 `AssignStereochemistryFrom3D` 读不回三配位 P,
+# 但嵌入器认),号跨 seed 不稳的中心不进基准。
+echo "== 14/14 判官:三配位立体中心(孤对那一档)"
+cargo run -q -p omgkit-conf --release --example conformer_oracle -- harness/baseline/smoke.lonepair.jsonl
+
 echo
-echo "十三道闸全过。"
+echo "十四道闸全过。"

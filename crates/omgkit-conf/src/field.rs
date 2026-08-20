@@ -183,7 +183,7 @@ impl Field {
                 "手性中心的中心原子下标 {} 越界(原子数 {n})",
                 c.atom
             );
-            for &l in &c.ligands {
+            for &l in c.real_ligands() {
                 assert!(
                     (l as usize) < n,
                     "手性中心 {} 的配体下标 {l} 越界(原子数 {n})",
@@ -267,7 +267,7 @@ impl Field {
         let mut e = 0.0;
         for c in &self.centers {
             let p: Vec<[f64; 3]> = c
-                .ligands
+                .real_ligands()
                 .iter()
                 .map(|&a| {
                     let a = a as usize;
@@ -331,28 +331,35 @@ impl Field {
             };
 
             // ---- 一、四配体项:管"整体定向"与"别压平" ----
-            // 这一项与 RDKit 的 `ChiralViolationContrib` 同形,几何代价最低
-            // (实测端到端 1-3 角越界 0.1%)。但它**完全不看中心原子在哪**。
-            let (a, b, cc) = (sub(p[1], p[0]), sub(p[2], p[0]), sub(p[3], p[0]));
-            let idx = [
-                c.ligands[1] as usize,
-                c.ligands[2] as usize,
-                c.ligands[3] as usize,
-            ];
-            // `Center::sign` 是按**中心基点**标定的,而这一项算的是四配体行列式,
-            // 两者反号(正四面体上 `V_配体 = −4·V_中心`)—— 所以目标号取 `−sign`。
-            e += term(
-                a,
-                b,
-                cc,
-                idx,
-                c.ligands[0] as usize,
-                -c.sign,
-                VOL_LO,
-                VOL_HI,
-                self.weight_chiral,
-                g,
-            );
+            //
+            // **三配位中心走不到这一项** —— 第四个"配体"是孤对电子,没有坐标。
+            // 那一档只剩中心基点项,而它本来就只用三个配体,够用:
+            // 号由它定,"别压平"也由它的 `UMBRELLA_LO` 兜着
+            // (中心落到三个配体所在平面上时 `V → 0`,正是要挡的那件事)。
+            if !c.is_three_coordinate() {
+                // 这一项与 RDKit 的 `ChiralViolationContrib` 同形,几何代价最低
+                // (实测端到端 1-3 角越界 0.1%)。但它**完全不看中心原子在哪**。
+                let (a, b, cc) = (sub(p[1], p[0]), sub(p[2], p[0]), sub(p[3], p[0]));
+                let idx = [
+                    c.ligands[1] as usize,
+                    c.ligands[2] as usize,
+                    c.ligands[3] as usize,
+                ];
+                // `Center::sign` 是按**中心基点**标定的,而这一项算的是四配体行列式,
+                // 两者反号(正四面体上 `V_配体 = −4·V_中心`)—— 所以目标号取 `−sign`。
+                e += term(
+                    a,
+                    b,
+                    cc,
+                    idx,
+                    c.ligands[0] as usize,
+                    -c.sign,
+                    VOL_LO,
+                    VOL_HI,
+                    self.weight_chiral,
+                    g,
+                );
+            }
 
             // ---- 二、中心基点项:只管"别翻伞" ----
             // 中心原子被挤到配体四面体**外面**时,四配体行列式号不变而真实立体

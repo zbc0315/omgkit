@@ -110,9 +110,63 @@ pub fn can_be_aromatic_lowercase(atomic_num: u8) -> bool {
     matches!(atomic_num, 5 | 6 | 7 | 8 | 15 | 16 | 33 | 34 | 52) // b c n o p s as se te
 }
 
+/// 这个原子在**三配位**状态下,第四个"取代基"是一对孤对电子 ——
+/// 于是它照样可以是四面体立体中心。
+///
+/// 亚砜、亚磺酰胺、亚砜亚胺的 S,膦、膦氧化物的 P,以及同族的 As / Se / Te。
+///
+/// # 带正电的**目前**不算 —— 这是个已知的保守缺口,不是化学结论
+///
+/// 头一版这里写着"`[S+]` 三配位是平面的",那是**假话**:锍盐 R₃S⁺ 恰恰是
+/// 三配体 + 一对孤对,构型稳定、可以拆分。真正没有孤对、四配体全在的是季铵 R₄N⁺。
+///
+/// 现在仍然排除带正电的,理由是**没有验证依据**:语料里带手性标记的三配位
+/// 阳离子中心 0 个,RDKit 2022.09.5 也把 `C[S@+](C)CC` 的标记清成
+/// `CHI_UNSPECIFIED` —— 外部判据看不见这一档,放开就是无据可依的改动。
+/// 这条约定继承自 `omgkit-depict`(那边经 `check_wedge_readback.py` 验过)。
+/// 要放开的话得先有能判它的判据。
+///
+/// # 为什么这条要放在 core
+///
+/// 它不是算法,是一张化学事实表,而**两个 crate 都要问同一个问题**:
+/// `omgkit-depict` 从楔形反读构型时要知道"三根键也能定构型",
+/// `omgkit-conf` 抽手性中心时要知道"三个邻居也算数"。
+/// 各写一份的话迟早分岔,而分岔的表现是一半的中心画对了、另一半摆错了。
+///
+/// (实测:`omgkit-conf` 先前根本不认这一档 —— `<[u32; 4]>::try_from` 凑不够
+/// 四个邻居就整个 `continue`,于是语料里 13 个分子、16 个中心的构型是掷硬币。)
+#[must_use]
+pub fn has_stereogenic_lone_pair(atomic_num: u8, formal_charge: i8) -> bool {
+    formal_charge <= 0 && matches!(atomic_num, 15 | 16 | 33 | 34 | 52) // P S As Se Te
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 孤对立体中心只认那五个元素() {
+        for (z, chg, want) in [
+            (16u8, 0i8, true), // S:亚砜
+            (15, 0, true),     // P:膦
+            (33, 0, true),     // As
+            (34, 0, true),     // Se
+            (52, 0, true),     // Te
+            // 下面两条锁的是**当前的保守取舍**,不是化学结论:
+            // 锍盐 R₃S⁺ 其实有孤对、构型稳定,只是外部判据看不见这一档。
+            (16, 1, false), // [S+]:已知缺口,见函数文档
+            (15, 1, false), // [P+]:四配位的鏻盐不走这一支
+            (7, 0, false),  // N:孤对翻转太快,不当立体中心
+            (6, 0, false),  // C:三配位是 sp²
+            (8, 0, false),  // O:三配位是 [O+]
+        ] {
+            assert_eq!(
+                has_stereogenic_lone_pair(z, chg),
+                want,
+                "元素 {z} 电荷 {chg}"
+            );
+        }
+    }
 
     #[test]
     fn table_is_indexed_by_atomic_number() {

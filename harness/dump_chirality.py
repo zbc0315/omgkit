@@ -59,6 +59,19 @@ RDLogger.DisableLog("rdApp.*")
 SEED = 0xF00D
 TETRA = (Chem.ChiralType.CHI_TETRAHEDRAL_CW, Chem.ChiralType.CHI_TETRAHEDRAL_CCW)
 
+# **三配位立体中心**:三根键 + 一对孤对(亚砜/亚磺酰胺的 S、膦的 P……)。
+# 与 `omgkit_core::element::has_stereogenic_lone_pair` 同一张表。
+LONE_PAIR = {15, 16, 33, 34, 52}  # P S As Se Te
+
+# 三配位那一档的真值要**跨 seed 稳定**才算数。
+#
+# RDKit 的 `AssignStereochemistryFrom3D` 不读三配位 P,但它的**嵌入器**认 ——
+# 所以真值只能从嵌出来的构象上算。可嵌入器不是每次都摆对:实测
+# `Cc1ccc(cc1)[S@@](=O)C2=CCCO2` 的 S 在 5 个 seed 下号是 [-1,+1,-1,-1,-1],
+# 有一个 seed 摆反了。号不稳的中心**不进基准** —— 拿一个自己都摇摆的数当真值,
+# 判据红了也不知道该信谁。
+STABILITY_SEEDS = (0xF00D, 0xC0FFEE, 0xBEEF, 1, 7)
+
 
 def det3(a, b, c):
     return (
@@ -97,6 +110,31 @@ def ligand_volume(coords, nbrs):
     return det3(d(nbrs[1]), d(nbrs[2]), d(nbrs[3]))
 
 
+def stable_sign(smi, atom_idx):
+    """这个三配位中心的号,在几个 seed 下是不是稳定的?
+
+    不稳就说明 RDKit 的嵌入器自己都没把这个标记摆稳,拿它当真值没有意义。
+    """
+    seen = set()
+    for seed in STABILITY_SEEDS:
+        m = Chem.AddHs(Chem.MolFromSmiles(smi))
+        p = rdDistGeom.ETKDGv3()
+        p.randomSeed = seed
+        if rdDistGeom.EmbedMolecule(m, p) < 0:
+            continue
+        AllChem.MMFFOptimizeMolecule(m, maxIters=2000)
+        cf = m.GetConformer()
+        pts = [
+            [cf.GetAtomPosition(i).x, cf.GetAtomPosition(i).y, cf.GetAtomPosition(i).z]
+            for i in range(m.GetNumAtoms())
+        ]
+        nb = [x.GetIdx() for x in m.GetAtomWithIdx(atom_idx).GetNeighbors()]
+        if len(nb) != 3:
+            return False
+        seen.add(1 if center_volume(pts, atom_idx, nb) > 0 else -1)
+    return len(seen) == 1
+
+
 def main() -> int:
     if len(sys.argv) < 3:
         print(__doc__)
@@ -105,9 +143,15 @@ def main() -> int:
     limit = int(sys.argv[3]) if len(sys.argv) > 3 else 10**9
 
     n_ok = n_skip = n_centers = 0
-    n_disagree = n_same_sign = n_zero = 0
+    n_disagree = n_same_sign = n_zero = n_unstable = n_three = 0
     with open(out, "w", encoding="utf-8") as fh:
         for line in open(corpus, encoding="utf-8"):
+            # 语料格式:`SMILES<TAB>名字`,**`#` 开头是注释、空行忽略**。
+            # 先前这里没认注释,把它们当 SMILES 解析 —— "跳过"那个数里因此
+            # 混着注释行,报出来的数是错的(同一个坑在 `feasibility.rs` 里修过一次)。
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
             smi = line.split("\t")[0].strip()
             if not smi or n_ok >= limit:
                 continue
@@ -141,10 +185,19 @@ def main() -> int:
                 if t not in TETRA:
                     continue
                 nb = [x.GetIdx() for x in a.GetNeighbors()]
-                if len(nb) != 4:
+                three = (
+                    len(nb) == 3
+                    and a.GetAtomicNum() in LONE_PAIR
+                    and a.GetFormalCharge() <= 0
+                )
+                if len(nb) != 4 and not three:
+                    continue
+                if three and not stable_sign(smi, a.GetIdx()):
+                    n_unstable += 1
                     continue
                 v = center_volume(coords, a.GetIdx(), nb)
-                vl = ligand_volume(coords, nb)
+                # 四配体行列式要四个配体 —— 三配位那一档没有,记 0 并跳过反号自检
+                vl = ligand_volume(coords, nb) if len(nb) == 4 else 0.0
                 # 真值取**真实构象算出来的号**,不取标记推的号 ——
                 # 标记推的那个正是待验的东西,拿它当真值就成了自证。
                 # `v == 0` 时 `actual` 会静默取 +1 —— 那是掷硬币,必须计数
@@ -157,12 +210,13 @@ def main() -> int:
                 expected = 1 if t == Chem.ChiralType.CHI_TETRAHEDRAL_CCW else -1
                 if actual != expected:
                     n_disagree += 1
-                if v * vl > 0:
+                if len(nb) == 4 and v * vl > 0:
                     n_same_sign += 1
                 centers.append(
                     {
                         "atom": a.GetIdx(),
                         "nbrs": nb,
+                        "three_coordinate": three,
                         "tag": 2 if t == Chem.ChiralType.CHI_TETRAHEDRAL_CCW else 1,
                         "sign": actual,
                         "vol": v,
@@ -172,6 +226,7 @@ def main() -> int:
             if not centers:
                 continue
             n_centers += len(centers)
+            n_three += sum(1 for c in centers if c["three_coordinate"])
 
             bonds = []
             for b in mol.GetBonds():
@@ -209,6 +264,7 @@ def main() -> int:
     # 而下游所有手性判据都以这份基准为真值。
     print(f"  中心基点与四配体行列式**同号**的中心:{n_same_sign}(真实构象上应当是 0)")
     print(f"  中心基点体积恰好为 0 的中心:{n_zero}(必须是 0 —— 号是掷硬币)")
+    print(f"  其中**三配位**(孤对)中心:{n_three};号跨 seed 不稳而被剔除的:{n_unstable}")
     return 1 if (n_disagree or n_same_sign or n_zero) else 0
 
 

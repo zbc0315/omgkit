@@ -1,0 +1,28 @@
+# **三配位立体中心** —— 三根键 + 一对孤对,构型照样确定。
+#
+# `omgkit-conf` 先前用 `<[u32;4]>::try_from` 凑四个邻居,凑不够就整个丢掉,
+# 于是这一档的构型是掷硬币。语料 8833 个分子里 13 个带这种中心(S 13、P 3)。
+#
+# 这一份是**真值基准的语料**:`harness/dump_chirality.py` 从它生成
+# `harness/baseline/smoke.lonepair.jsonl`,真值取自 RDKit 嵌入器给的构象
+# (它的 `AssignStereochemistryFrom3D` 读不回三配位 P,但嵌入器认)。
+# 号跨 seed 不稳的中心不进基准。
+#
+# 语料里现成的 13 个
+C[C@@H]1CO[S@@](=O)N1c2ccccc2
+C[P@H]C[P@@H]CS(=O)(=O)[O-]
+C[S@@](=O)CC1=NC(=N)N=C1C[S@@](=O)C
+C1C(=C(S[S@@]1=O)Cl)Cl
+c1ccc(cc1)[P@@]2CCC(=C(C2)C#N)[NH3+]
+c1ccc2c(c1)-c3ccc(c4c3c(ccc4)C2=O)[S@@](=O)CC(=O)[O-]
+Cc1ccc(cc1)[S@@](=O)C2=CCCO2
+# 外加成对的对映体 —— **整批号取反**这种错法只有成对才现得出形
+C[S@](=O)CC
+C[S@@](=O)CC
+C[S@](=O)c1ccccc1
+C[S@@](=O)c1ccccc1
+CC[P@](C)c1ccccc1
+CC[P@@](C)c1ccccc1
+C[C@@H]1CC[P@](c2ccccc2)C1
+C[C@@H]1CC[P@@](c2ccccc2)C1
+C[C@@H]1CO[S@](=O)N1c2ccccc2

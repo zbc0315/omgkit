@@ -76,13 +76,16 @@
 //!
 //! | 语料 | 一致 |
 //! |---|---|
-//! | `harness/corpus/large.smi` 里 301 个带立体标记的分子 | 290 / 301 |
+//! | `harness/corpus/large.smi` 里 **642** 个带立体标记的分子 | **640 / 640** |
 //! | `harness/corpus/stereo_edge.smi`(专挑槽位边界) | **21 / 21** |
 //!
 //! `stereo_edge.smi` 那一份是为这条专门造的:手性原子写在**片段开头**
 //! (隐式氢排书写序第一)、写在中间、四个显式配体、以及带环闭合数的,
-//! 每档都给出同一分子的两种写法。大语料那 11 个失配与四面体手性无关
-//! (10 个是环上双键 E/Z、1 个是三配位硫)。
+//! 每档都给出同一分子的两种写法。
+//!
+//! 另有 2 个分子**判官够不着**(三配位磷,RDKit 的 `AssignStereochemistryFrom3D`
+//! 不给它赋手性,连 RDKit 自己嵌出来的构象都读不回)—— 那一档单独计数、
+//! 单独设上限闸,不混进失配。
 //!
 //! 按一张四配位齐全的连接表建分子则天然满足这两条(判官走的正是那条路)。
 
@@ -100,6 +103,30 @@ pub struct Center {
     /// 四配体口径,与代码相反;照它手写 `Center` 会拿到对映体,而所有判据
     /// 都会报"号对"。
     pub sign: f64,
+}
+
+impl Center {
+    /// 槽位上是**一对孤对电子**(或隐式氢),没有对应的原子。
+    ///
+    /// 只会出现在 `ligands[3]`:三配位中心按约定把孤对存在最后一格,
+    /// 见 [`centers`] 里那段推导。
+    pub const IMPLICIT: u32 = u32::MAX;
+
+    /// 这是个**三配位**中心(第四个"取代基"是孤对电子)。
+    #[must_use]
+    pub fn is_three_coordinate(&self) -> bool {
+        self.ligands[3] == Self::IMPLICIT
+    }
+
+    /// 真正落在原子上的配体 —— 三配位时只有三个。
+    #[must_use]
+    pub fn real_ligands(&self) -> &[u32] {
+        if self.is_three_coordinate() {
+            &self.ligands[..3]
+        } else {
+            &self.ligands
+        }
+    }
 }
 
 /// 从分子里抽出四面体手性中心。
@@ -136,8 +163,26 @@ pub fn centers(mol: &omgkit_core::MolBuilder) -> Vec<Center> {
         };
         let Ok(id) = u32::try_from(idx) else { continue };
         let nb: Vec<u32> = mol.neighbors(id).map(|(y, _)| y).collect();
-        let Ok(ligands) = <[u32; 4]>::try_from(nb.as_slice()) else {
-            continue; // 不是四配位:氢没补、或者根本不是四面体中心
+        let ligands = match nb.len() {
+            4 => [nb[0], nb[1], nb[2], nb[3]],
+            // **三配位 + 一对孤对**:亚砜/亚磺酰胺的 S、膦的 P …… 构型照样确定。
+            // 先前这里 `<[u32; 4]>::try_from` 凑不够四个就整个 `continue`,
+            // 于是这些中心的构型是掷硬币 —— 语料 13 个分子、16 个中心。
+            //
+            // 孤对按约定占**槽位 1**(与 `omgkit-depict::read_chirality` 同一条),
+            // 所以四元组是 `[n₀, 孤对, n₁, n₂]`。这里存成 `[n₀, n₁, n₂, IMPLICIT]`:
+            // 把孤对从槽位 1 挪到槽位 3 是个 **3-轮换,偶置换,号不变**,
+            // 于是 `center_volume` 用前三个槽位算出来的号与四配位那一档**同一个约定**。
+            //
+            // (另一条等价的算法:四配体里省掉第 `k` 个,行列式的号正比于
+            //  `(−1)^(k+1)` —— 正四面体上省 0/1/2/3 实测号是 **− / + / − / +**,交替。
+            //  省掉槽位 1 与省掉槽位 3 同号,与上面的结论一致。
+            //  头一版这里写的是"+4 / +4 / −4 / −4",与同一句的 `(−1)^(k+1)`
+            //  自相矛盾 —— 结论对,四个数是错的,独立审核复现时拆穿的。)
+            3 if omgkit_core::element::has_stereogenic_lone_pair(a.atomic_num, a.formal_charge) => {
+                [nb[0], nb[1], nb[2], Center::IMPLICIT]
+            }
+            _ => continue, // 氢没补、或者根本不是四面体中心
         };
         out.push(Center {
             atom: id,

@@ -119,6 +119,13 @@ jobs:
       - name: 判官:端到端构型(产物好不好)
         run: cargo run -p omgkit-conf --release --example conformer_oracle -- harness/baseline/smoke.chirality.jsonl
 
+      # **三配位立体中心**(亚砜/亚磺酰胺的 S、膦的 P:三根键 + 一对孤对)。
+      # 单独一条,因为上面那份基准里一个这样的中心都没有 —— 变异验证过:
+      # 把三配位的槽位前两个对调(= 交付全部三配位中心的对映体),
+      # 上面那条闸与全部单元测试照样全绿,只有这一条红。
+      - name: 判官:三配位立体中心(孤对那一档)
+        run: cargo run -p omgkit-conf --release --example conformer_oracle -- harness/baseline/smoke.lonepair.jsonl
+
       # 手性:槽位约定排错的话**错法整批一致**,正确率不是 0% 就是 100% ——
       # 这种错只能拿真值比,推不出来。真值是真实构象上量出来的有符号体积。
       - name: 判官:手性中心(真值取自真实构象)
