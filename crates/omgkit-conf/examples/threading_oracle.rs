@@ -44,6 +44,29 @@ const MAX_PIERCE_FRAC: f64 = 0.05;
 /// 这不是放水 —— 全量档上 5% 等于 20 个,这个下限只在小样本上起作用。
 const MIN_PIERCE_ALLOWANCE: u64 = 2;
 
+/// 基准里允许有几行**没进比对**、有几个分子**嵌不出来**、有几个分子**没有真实坐标**。
+///
+/// # 这三条堵的是分母,而这条判官先前可以整条空转
+///
+/// 变异实测:
+///
+/// - 让 `embed` 恒返回 `Err` → "建得出来 27 个(**嵌出来 0 个**)"、
+///   "键交叉 0、环穿刺 0"、"自穿判据全过",**退 0** —— 第二段(量我们自己的
+///   坐标)一个分子都没量;
+/// - 把基准里的 `coords` 全删掉 → 第一段整段跳过,`real_cross`/`real_pierce`
+///   恒 0 白过 `MAX_FALSE_POSITIVE`,而 `real_gaps` 为空使 `CROSS_TOL` 的校准
+///   **根本没跑**,输出"最近距离:最小 NaN",照样退 0。
+///
+/// 两段合起来:这条判官可以 100% 空转而全绿 —— 而它的模块文档正说着
+/// "先校准检测器再量自己,反过来做是自证"。校准段没跑,那个 0 只说明它没在看。
+///
+/// 实测冒烟档三个数都是 0,所以都钉死 0。
+const MAX_UNREAD: u64 = 0;
+/// 见 [`MAX_UNREAD`]。
+const MAX_EMBED_FAIL: u64 = 0;
+/// 见 [`MAX_UNREAD`]。
+const MAX_NO_COORDS: u64 = 0;
+
 fn floats3(v: &serde_json::Value) -> Vec<[f64; 3]> {
     v.as_array()
         .map(|a| {
@@ -79,7 +102,7 @@ fn main() {
         std::process::exit(1);
     });
 
-    let (mut n_mol, mut n_emb) = (0u64, 0u64);
+    let (mut n_lines, mut n_mol, mut n_emb, mut n_coords) = (0u64, 0u64, 0u64, 0u64);
     // 真实构象上的
     let (mut real_cross, mut real_pierce) = (0u64, 0u64);
     let mut real_gaps: Vec<f64> = Vec::new();
@@ -89,6 +112,14 @@ fn main() {
     let mut worst: Vec<String> = Vec::new();
 
     for line in text.lines() {
+        // **行计数排在解析之前。** 排在之后的话,一行非法 JSON 既不进 `n_lines`
+        // 也不进任何一档 —— 判官与 `tests/baseline_sizes.rs` 的行数契约会**同时**
+        // 失明(那条契约数的是非空行,非法行照样算一行)。放在这里,非法行会
+        // 落进 `unread`,被分母闸抓住。
+        if line.trim().is_empty() {
+            continue;
+        }
+        n_lines += 1;
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
@@ -148,6 +179,7 @@ fn main() {
 
         // ---- 一、真实构象:检测器的校准 ----
         if coords.len() == nat {
+            n_coords += 1;
             let t = threading::detect(&m, &coords);
             real_cross += t.crossings as u64;
             real_pierce += t.pierces as u64;
@@ -184,7 +216,13 @@ fn main() {
     #[allow(clippy::cast_precision_loss)]
     let pierce_frac = our_pierce_mol as f64 / n_emb.max(1) as f64;
 
-    println!("判官:自穿,分子 {n_mol} 个(嵌出来 {n_emb} 个)");
+    let unread = n_lines.saturating_sub(n_mol);
+    let embed_fail = n_mol.saturating_sub(n_emb);
+    let no_coords = n_mol.saturating_sub(n_coords);
+    println!(
+        "判官:自穿,基准 {n_lines} 行,建得出来 {n_mol} 个(嵌出来 {n_emb} 个,\
+         带真实坐标 {n_coords} 个,没读进来 {unread})"
+    );
     println!("  ── 一、真实构象(检测器的校准)──");
     println!("    键交叉 {real_cross}、环穿刺 {real_pierce}(都必须是 {MAX_FALSE_POSITIVE})");
     println!(
@@ -208,6 +246,28 @@ fn main() {
     }
 
     let mut fatal = false;
+    // **三条分母闸,排在其它闸之前。** 见 `MAX_UNREAD`:这条判官先前可以整条空转。
+    if unread > MAX_UNREAD {
+        eprintln!(
+            "\n基准里有 {unread} 行没进比对(上限 {MAX_UNREAD})—— 分母核不上,\n\
+             下面每一个数都是在剩下那些分子上算的"
+        );
+        std::process::exit(1);
+    }
+    if embed_fail > MAX_EMBED_FAIL {
+        eprintln!(
+            "\n{embed_fail} 个分子嵌不出来(上限 {MAX_EMBED_FAIL})—— 第二段是在\n\
+             剩下那些分子上算的,嵌不出来的越多,'我们自己的坐标'那几个数越好看"
+        );
+        std::process::exit(1);
+    }
+    if no_coords > MAX_NO_COORDS {
+        eprintln!(
+            "\n{no_coords} 个分子没有真实坐标(上限 {MAX_NO_COORDS})—— 第一段是\n\
+             **检测器的校准**,它没跑的话,下面报的 0 只说明检测器没在看"
+        );
+        std::process::exit(1);
+    }
     if n_mol == 0 {
         eprintln!("\n一个分子都没读到");
         fatal = true;

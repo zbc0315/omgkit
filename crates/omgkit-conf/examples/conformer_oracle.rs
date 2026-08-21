@@ -46,6 +46,35 @@ const MIN_PIERCE_ALLOWANCE: u64 = 2;
 /// 所以这一条按硬不变量设成 **0**。
 const MAX_CROSS_MOL: u64 = 0;
 
+/// 基准里允许有几个分子**根本没量到**。
+///
+/// # 这一条堵的是分母
+///
+/// 上面每一个计数器(键长越界、环穿刺、键交叉、手性真值)都在三处
+/// `n_fail += 1; continue;` **之后**才累加,而 `n_fail` 先前只被 `println!`,
+/// 一道闸都没有 —— 唯一的下限是 `n_mol == 0`。
+///
+/// 变异实测(让 `pipeline::conformer` 对超过 25 个原子的分子直接失败):
+///
+/// ```text
+/// 判官:端到端构型,分子 66 个(失败 84)     ← 基准 150 行
+/// 端到端判据全过。                          ← 退出码 0
+/// ```
+///
+/// 孤对那一档更狠:15 → 11 个,照样退 0 —— 而 CI 里那一步存在的**全部理由**
+/// 就是"上面那份基准里一个三配位中心都没有",它的分母没有任何反向闸。
+///
+/// 与 `feasibility` 的 `MAX_NO_CONFORMER = 0` 是同一条:几何判据的计数器都在
+/// 生成成功之后才累加,不给它配闸,任何让失败率上升的回归都会让判据变好看。
+/// 实测两份基准都是 0 个失败,所以钉死 0。
+const MAX_FAIL: u64 = 0;
+
+/// 基准里允许有几行**没进比对**(解析失败、字段缺失等)。
+///
+/// `n_mol + n_fail` 应当等于基准的行数;差额是在读入阶段被 `continue` 掉的。
+/// 实测两份基准都是 0,所以同样钉死 0。
+const MAX_UNREAD: u64 = 0;
+
 /// 精修之后手性号正确的比例下限。
 ///
 /// 立体化学错了分子就是错的,不是"差一点",所以这是**硬不变量:1.0**。
@@ -125,7 +154,8 @@ fn main() {
         std::process::exit(1);
     });
 
-    let (mut n_mol, mut n_fail) = (0u64, 0u64);
+    // `n_lines` 是基准行数(分母),`n_mol` 是真正量到的,`n_fail` 是生成失败的。
+    let (mut n_lines, mut n_mol, mut n_fail) = (0u64, 0u64, 0u64);
     let mut before = [(0u64, 0u64); 5];
     let mut after = [(0u64, 0u64); 5];
     let (mut cross_b, mut cross_a) = (0u64, 0u64);
@@ -137,6 +167,14 @@ fn main() {
     let start = std::time::Instant::now();
 
     for line in text.lines() {
+        // **行计数排在解析之前。** 排在之后的话,一行非法 JSON 既不进 `n_lines`
+        // 也不进任何一档 —— 判官与 `tests/baseline_sizes.rs` 的行数契约会**同时**
+        // 失明(那条契约数的是非空行,非法行照样算一行)。放在这里,非法行会
+        // 落进 `unread`,被分母闸抓住。
+        if line.trim().is_empty() {
+            continue;
+        }
+        n_lines += 1;
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
@@ -305,7 +343,10 @@ fn main() {
 
     #[allow(clippy::cast_precision_loss)]
     let pct = |a: u64, b: u64| 100.0 * a as f64 / b.max(1) as f64;
-    println!("判官:端到端构型,分子 {n_mol} 个(失败 {n_fail})");
+    let unread = n_lines.saturating_sub(n_mol + n_fail);
+    println!(
+        "判官:端到端构型,基准 {n_lines} 行,真正量到 {n_mol} 个(生成失败 {n_fail},没读进来 {unread})"
+    );
     println!(
         "  精修:平均 {} 步;误差 {:.3e} → {:.3e}(降 {:.1}%)",
         iters / n_mol.max(1),
@@ -350,6 +391,21 @@ fn main() {
     );
 
     let mut fatal = false;
+    // **分母闸,排在其它闸之前。** 少量到几个分子,下面每一个比例都会变好看。
+    if n_fail > MAX_FAIL {
+        eprintln!(
+            "\n{n_fail} 个分子没能生成构型(上限 {MAX_FAIL})—— 下面每一条几何判据的\n\
+             计数器都在生成成功之后才累加,失败率一涨,那些数就会**变好看**"
+        );
+        std::process::exit(1);
+    }
+    if unread > MAX_UNREAD {
+        eprintln!(
+            "\n基准里有 {unread} 行没进比对(上限 {MAX_UNREAD})—— 分母核不上,\n\
+             这条判据算出来的比例没有意义"
+        );
+        std::process::exit(1);
+    }
     if n_mol == 0 {
         eprintln!("\n一个分子都没跑成");
         fatal = true;

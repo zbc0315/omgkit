@@ -47,6 +47,31 @@ const MAX_MISSED: u64 = 0;
 /// 这个数会掉回 0.53 附近,当场就红。
 const MIN_CHIRAL_AFTER_REFLECT: f64 = 0.80;
 
+/// 基准里允许有几行**没进比对**,以及有几个分子**建不出来**。
+///
+/// # 这两条堵的是分母
+///
+/// 读入阶段的每一个 `continue` 都会让一个分子悄悄消失,而下面所有的比例都是
+/// 在剩下那些分子上算的。同一个洞在 `conformer_oracle` 上栽过:让构型生成对
+/// 大于 25 个原子的分子失败,150 个分子掉到 66 个,判据照样"全过"退 0。
+///
+/// **`n_build_fail` 先前是白名单不是闸**:`unread = n_lines − (n_mol + n_build_fail)`,
+/// 建不出来的越多、`unread` 越小。变异实测(把 150 行里 100 行的第一根键指向
+/// 越界原子,`add_bond` 失败):"量到 50 个(建不出来 100)"、"真值里的中心
+/// 75 个;我们抽出 75 个,漏 0",**退 0**。
+///
+/// 实测冒烟档两个数都是 0,所以都钉死 0。
+const MAX_UNREAD: u64 = 0;
+/// 见 [`MAX_UNREAD`]。
+const MAX_BUILD_FAIL: u64 = 0;
+/// 基准里**声明**的中心数与真正比到的中心数之差的上限。
+///
+/// 光有"漏 0"是不够的:那是拿**我们抽出来的**去比**读进来的真值**,而真值本身
+/// 可能在读入阶段就少了。变异实测(删掉一行的 `sign` 字段):真值里的中心从
+/// 247 变成 243,漏 0、错 0,**退 0**。`conformer_oracle` 已经有这条对账
+/// (`truth_declared`),这里补齐。
+const MAX_TRUTH_LOST: u64 = 0;
+
 fn floats3(v: &serde_json::Value) -> Vec<[f64; 3]> {
     v.as_array()
         .map(|a| {
@@ -76,8 +101,9 @@ fn main() {
         std::process::exit(1);
     });
 
-    let (mut n_mol, mut n_build_fail) = (0u64, 0u64);
-    let (mut n_truth, mut n_found, mut n_wrong, mut n_missed) = (0u64, 0u64, 0u64, 0u64);
+    let (mut n_lines, mut n_mol, mut n_build_fail) = (0u64, 0u64, 0u64);
+    let (mut n_truth, mut n_declared, mut n_found, mut n_wrong, mut n_missed) =
+        (0u64, 0u64, 0u64, 0u64, 0u64);
     let (mut n_vol_bad, mut worst_vol) = (0u64, 0.0f64);
     // 嵌入之后手性对不对 —— 这一组数决定"要不要上四维"
     let (mut n_emb_total, mut n_emb_before, mut n_emb_after) = (0u64, 0u64, 0u64);
@@ -85,6 +111,14 @@ fn main() {
     let mut wrong_cases: Vec<String> = Vec::new();
 
     for line in text.lines() {
+        // **行计数排在解析之前。** 排在之后的话,一行非法 JSON 既不进 `n_lines`
+        // 也不进任何一档 —— 判官与 `tests/baseline_sizes.rs` 的行数契约会**同时**
+        // 失明(那条契约数的是非空行,非法行照样算一行)。放在这里,非法行会
+        // 落进 `unread`,被分母闸抓住。
+        if line.trim().is_empty() {
+            continue;
+        }
+        n_lines += 1;
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
@@ -144,6 +178,10 @@ fn main() {
             n_build_fail += 1;
             continue;
         }
+        // 基准里**声明**了几个中心 —— 不看字段全不全,待会儿对账。
+        // 少了这一步,`filter_map` 丢掉的中心(字段缺失或改名)会静默消失,
+        // 而"漏 0、错 0"照样绿。见 `MAX_TRUTH_LOST`。
+        let declared = v["centers"].as_array().map_or(0, Vec::len) as u64;
         // 立体标记按真值给(RDKit 的 tag:1 = Cw/@@、2 = Ccw/@)
         let truth: Vec<(u32, i64, i64)> = v["centers"]
             .as_array()
@@ -170,6 +208,7 @@ fn main() {
         }
         n_mol += 1;
         n_truth += truth.len() as u64;
+        n_declared += declared;
 
         let got = chiral::centers(&m);
         n_found += got.len() as u64;
@@ -223,8 +262,13 @@ fn main() {
         }
     }
 
-    println!("判官:手性中心,分子 {n_mol} 个(建不出来 {n_build_fail})");
-    println!("  真值里的中心 {n_truth} 个;我们抽出 {n_found} 个,漏 {n_missed}(上限 {MAX_MISSED})");
+    let unread = n_lines.saturating_sub(n_mol + n_build_fail);
+    println!("判官:手性中心,基准 {n_lines} 行,量到 {n_mol} 个(建不出来 {n_build_fail},没读进来 {unread})");
+    let truth_lost = n_declared.saturating_sub(n_truth);
+    println!(
+        "  真值里的中心 {n_truth} 个(基准声明 {n_declared},读丢 {truth_lost});\
+         我们抽出 {n_found} 个,漏 {n_missed}(上限 {MAX_MISSED})"
+    );
     println!("  符号预测错 {n_wrong} 个(上限 {MAX_WRONG})");
     println!("  拿真实坐标复算体积、号对不上的 {n_vol_bad} 个");
     #[allow(clippy::cast_precision_loss)]
@@ -271,6 +315,28 @@ fn main() {
     }
     if n_vol_bad > 0 {
         eprintln!("\n拿真实坐标复算,{n_vol_bad} 个中心的号对不上 —— 几何那一层就错了");
+        fatal = true;
+    }
+    // **分母闸。** 见 `MAX_UNREAD`:少量到几个分子,上面每一个比例都会变好看。
+    if truth_lost > MAX_TRUTH_LOST {
+        eprintln!(
+            "\n基准声明了 {n_declared} 个中心,只读进来 {n_truth} 个(丢 {truth_lost},\n\
+             上限 {MAX_TRUTH_LOST})—— 真值本身少了,'漏 0、错 0' 就没有意义"
+        );
+        fatal = true;
+    }
+    if n_build_fail > MAX_BUILD_FAIL {
+        eprintln!(
+            "\n{n_build_fail} 个分子建不出来(上限 {MAX_BUILD_FAIL})—— 下面每一个\n\
+             比例都是在剩下那些分子上算的"
+        );
+        fatal = true;
+    }
+    if unread > MAX_UNREAD {
+        eprintln!(
+            "\n基准里有 {unread} 行没进比对(上限 {MAX_UNREAD})—— 分母核不上,\n\
+             这条判据算出来的比例没有意义"
+        );
         fatal = true;
     }
     if fatal {

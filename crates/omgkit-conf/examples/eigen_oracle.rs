@@ -115,8 +115,24 @@ fn main() {
     let bounds_text = read(&bounds_path);
     let eig_text = read(&eig_path);
 
+    // **`zip` 会静默截断。** 它已经防了**错位**(下面 `smiles` 对不上就计
+    // `n_missing`,上限 0),但防不了**截断**:`zip` 取短的那个,而 zip 出来的
+    // 每一对都是对齐的,所以永远配不出不匹配的对。变异实测:把
+    // `smoke.gram_eigs.jsonl` 从 27 行截成 1 行,判据打印"分子 1 个"、
+    // "两条判据都过",**退 0**。
+    //
+    // 两个文件是同一批分子导的,行数必须相等 —— 这一条在 `zip` 之前先判。
+    let (nb, ne) = (bounds_text.lines().count(), eig_text.lines().count());
+    if nb != ne {
+        eprintln!("两个基准的行数对不上:{bounds_path} 有 {nb} 行,{eig_path} 有 {ne} 行。");
+        eprintln!("它们必须是同一批分子导出来的 —— 行数不等时 zip 会静默截断,");
+        eprintln!("判据照样'跑得通',只是在比更少的分子。");
+        std::process::exit(1);
+    }
+
     let mut n = 0u64;
     let mut n_missing = 0u64;
+    let mut n_no_coords = 0u64;
     // 判据一
     let mut dev_u: Vec<f64> = Vec::new();
     let mut dev_x: Vec<f64> = Vec::new();
@@ -187,7 +203,17 @@ fn main() {
                     .collect()
             })
             .unwrap_or_default();
+        // **判据二可以整条变空,而先前没人看得见。** 这个 `continue` 排在
+        // `n += 1` 之后,而且**不计 `n_missing`** —— 与上面 U 那一支不对称。
+        // 变异实测(把基准里的 `coords` 全删掉):
+        //
+        //     判官:特征分解与嵌入,分子 27 个(对不上 0 个)
+        //         真实构象 Gram 中位 NaN  最大 0.00e0  (样本 0)
+        //     两条判据都过。                              ← 退出码 0
+        //
+        // 而模块文档说判据二"把两个公式完全钉死 —— 任何一项写错都会当场红"。
         if coords.len() != nat {
+            n_no_coords += 1;
             continue;
         }
         let dx = distances(&coords);
@@ -238,6 +264,13 @@ fn main() {
     );
 
     let mut bad = false;
+    // **分母闸。** 判据二只在有真实坐标的分子上算;没坐标的分子越多,
+    // 它的样本越少,而"最大偏差"会跟着变好看 —— 极端情形是样本 0、
+    // 打印 NaN 然后退 0。实测冒烟档一个都不少,所以钉死 0。
+    if n_no_coords > 0 {
+        println!("\n【判据二红】{n_no_coords} 个分子没有真实坐标,判据二是在剩下那些上算的");
+        bad = true;
+    }
     if n_missing > MAX_MISSING {
         println!("\n【判据红】对不上的分子 {n_missing} 个,上限 {MAX_MISSING}");
         bad = true;
