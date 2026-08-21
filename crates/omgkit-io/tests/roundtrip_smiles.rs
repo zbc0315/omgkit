@@ -339,8 +339,7 @@ fn report(bad: &[Failure], limit: usize) -> String {
 /// 实测冒烟语料 141 条里只有 **3 条**带顺反、共 **4 根**顺反键,而且全是
 /// 单键方向、两端都单取代。于是 `compare_bond_stereo` 在 CI 里几乎没本钱:
 /// 变异实测,**只翻芳香键的方向**或**丢掉环闭合上的方向**,冒烟档都抓不住
-/// (大语料档能抓住,但 `roundtrip_large` 标着 `#[ignore]`,CI 从不跑
-/// `--ignored` —— 见任务清单)。
+/// (大语料档能抓住 —— `roundtrip_large` 现在也在 CI 里跑了。)
 ///
 /// 不往 `harness/corpus/smoke.smi` 里加:那份语料的 149 行被 `smoke.l1/l2-*`
 /// 十来份入库基准逐行钉着,加一行要重导全部基准。手工列在这里更便宜。
@@ -436,23 +435,50 @@ fn roundtrip_smoke() {
 
 /// 大语料(~8800 条)。这一档跑得起量,是写出正确性的主力判据。
 #[test]
-#[ignore = "语料大,用 cargo test -- --ignored 运行"]
+// **不再 `#[ignore]`。** 实测**百毫秒量级** —— 而它的文档
+// 自称"写出正确性的主力判据"。8839 条分子,含环 7540、含芳香 933、
+// 多片段 144、方括号 2786,冒烟档那 141 条盖不到的形状全在这里。
 fn roundtrip_large() {
     let (stats, bad) = roundtrip_corpus(&corpus("large.smi"));
     assert!(bad.is_empty(), "{}", report(&bad, 20));
     assert!(stats.parsed > 8000, "语料只解析出 {} 条", stats.parsed);
     assert_eq!(stats.round_tripped, stats.parsed);
+    // **覆盖断言,与冒烟档同一套。** 冒烟档断了六条分母,这一档先前一条都没有 ——
+    // 而它现在进了 CI,分母敞着就等于"全绿"可能只说明语料没喂进来。
+    // 现值:含环 7540、含芳香 933、多片段 144、方括号 2786、带顺反 366。
+    assert!(stats.with_rings > 7000, "含环只有 {}", stats.with_rings);
+    assert!(
+        stats.with_aromatic > 800,
+        "含芳香只有 {}",
+        stats.with_aromatic
+    );
+    assert!(
+        stats.with_fragments > 100,
+        "多片段只有 {}",
+        stats.with_fragments
+    );
+    assert!(
+        stats.with_brackets > 2500,
+        "方括号只有 {}",
+        stats.with_brackets
+    );
+    assert!(
+        stats.with_bond_stereo > 300,
+        "带双键顺反的只有 {} —— compare_bond_stereo 在这一档几乎没比东西",
+        stats.with_bond_stereo
+    );
     // 语料里同时打开的环从不超过 9 个(标号闭合即回收),所以 `%NN` 分支在
     // 这一档是走不到的。它由 [`ring_labels_beyond_nine`] 专门守着。
 
     println!(
         "写出往返(大语料):{} 条全部往返成功;含环 {},含芳香 {},多片段 {},\
-         方括号 {},%NN 标号 {}",
+         方括号 {},带顺反 {},%NN 标号 {}",
         stats.round_tripped,
         stats.with_rings,
         stats.with_aromatic,
         stats.with_fragments,
         stats.with_brackets,
+        stats.with_bond_stereo,
         stats.with_high_ring_labels
     );
 }

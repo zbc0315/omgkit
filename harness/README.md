@@ -605,13 +605,40 @@ dump 那边可以只跑前 N 个 —— 两个数对不上时,第 N 个之后的
 一部分输入的判据,首行都写 `#mols<TAB>N`,判官读不到就直接报错。当前
 `dump_reactions` 与 `oracle_matches.py` 两处都带这个首行。
 
+### `harness/baseline/matches.tsv` 入库了,以及它的两个已知限制
+
+`matches_large` 解禁进 CI 之后,默认 `cargo test` 会读这份基准,所以它必须入库
+(164 651 字节)。生成命令:
+
+```bash
+.venv/bin/python harness/oracle_matches.py \
+    --mols harness/corpus/large.smi --pats harness/corpus/smarts.txt \
+    --limit-mols 2000 --out harness/baseline/matches.tsv
+```
+
+**两个限制,都得写在脸上:**
+
+1. **只覆盖前 2000 条**(语料 8839 条,22.6%)。测试的输出现在会把这个数打出来
+   ——先前它叫 `matches_large`、读 `large.smi`、打印"大语料",而 2000 这个数
+   一处都没露过面。
+2. **它是 RDKit 2022.09.5 导的**,而 `harness/requirements.lock` 钉的是 2025.09.2。
+   前 2000 条上两版逐字节相同(实测),所以眼下不咬人;但全语料上两版有差异,
+   而这份文件里没有任何版本记录。**重导时用 lock 里钉的那个版本**,并且
+   把这一段一起更新。
+
+独立审核用 2025.09.2 重导了全量基准(8839 条,678 kB),报出 6 条本实现命中而
+RDKit 不命中的方向键模式(同一个分子上,小环内的 C=C)。**那一条我没能自己复核**
+(复现要重导全量),已记进任务清单 —— 扩到全量要连着处理它。
+
 ## 注释里的数字也要有闸门
 
 源码注释里写"实测 N 条"的地方,由
 `crates/omgkit-chem/tests/documented_measurements.rs` 重新量,对不上就红。
 
 ```bash
-cargo test -p omgkit-chem --release --test documented_measurements -- --ignored
+cargo test -p omgkit-chem --release --test documented_measurements
+# (先前这里写着 `-- --ignored`。那条测试解禁之后,`--ignored` 会把它**过滤掉**,
+#  打印 `running 0 tests` 然后**退 0** —— 照着跑的人看到绿,而一个测试都没跑。)
 ```
 
 这类数字**不会报错,只会静静变成假话**,而且往往是被**别处的**改动带偏的:

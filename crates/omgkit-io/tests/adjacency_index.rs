@@ -109,7 +109,9 @@ fn adjacency_index_matches_brute_force_on_smoke() {
 }
 
 #[test]
-#[ignore = "大语料较慢;用 cargo test -- --ignored 运行"]
+// **不再 `#[ignore]`。** 实测**几十毫秒量级** —— "大语料较慢"
+// 这条理由早就不成立了,而标着 `#[ignore]` 的判据在 CI 与 `gates.sh` 里
+// **一次都不跑**(两边都只有 `cargo test`,不带 `--ignored`)。
 fn adjacency_index_matches_brute_force_on_large() {
     let (mols, atoms, bad) = check_corpus("large.smi");
     assert!(mols > 1000, "语料不完整:只解析成功 {mols} 条");

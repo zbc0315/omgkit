@@ -128,12 +128,17 @@ struct Report {
     skipped_molecules: BTreeSet<String>,
 }
 
-fn run(mol_corpus: &str, baseline_name: &str) -> (Report, Vec<String>, Vec<String>) {
+/// 返回 (报告, 分子串, 模式串, **基准覆盖到的分子数**, **语料总条数**)。
+///
+/// 后两个是**分母**:基准可以只覆盖语料的一段,而那一段有多大必须报出来 ——
+/// 见 `matches_large` 的说明(它读的基准只覆盖 8839 条里的前 2000 条)。
+fn run(mol_corpus: &str, baseline_name: &str) -> (Report, Vec<String>, Vec<String>, usize, usize) {
     let pats_raw = read_corpus(&corpus("smarts.txt"));
     let base = read_baseline(&baseline(baseline_name));
     let expect = base.hits;
     // 只比基准覆盖到的那一段
     let mut smis = read_corpus(&corpus(mol_corpus));
+    let total_mols = smis.len();
     assert!(
         smis.len() >= base.n_mols,
         "基准覆盖 {} 个分子,而语料只有 {} 个 —— 语料对不上",
@@ -223,7 +228,7 @@ fn run(mol_corpus: &str, baseline_name: &str) -> (Report, Vec<String>, Vec<Strin
             rep.only_ours.push(*k);
         }
     }
-    (rep, smis, pats_raw)
+    (rep, smis, pats_raw, base.n_mols, total_mols)
 }
 
 fn describe(rep: &Report, smis: &[String], pats: &[String], limit: usize) -> String {
@@ -259,24 +264,50 @@ fn assert_clean(rep: &Report, smis: &[String], pats: &[String]) {
 
 #[test]
 fn matches_smoke() {
-    let (rep, smis, pats) = run("smoke.smi", "smoke.matches.tsv");
+    let (rep, smis, pats, base_mols, total_mols) = run("smoke.smi", "smoke.matches.tsv");
     assert_clean(&rep, &smis, &pats);
     assert!(rep.agreed > 20, "只对上了 {} 条,语料太弱", rep.agreed);
     println!(
-        "匹配差分(冒烟)通过:一致 {} 条;跳过(已登记){} 条分子",
+        "匹配差分(冒烟):基准覆盖语料前 {base_mols} 条(语料共 {total_mols} 条),\
+         一致 {} 条;跳过(已登记){} 条分子",
         rep.agreed,
         rep.skipped_molecules.len()
     );
 }
 
 #[test]
-#[ignore = "语料大,用 cargo test -- --ignored 运行"]
+// **不再 `#[ignore]`。** 它读的 `harness/baseline/matches.tsv` 先前没有入库,
+// 所以这一条连本地 `--ignored` 都要先手工生成基准 —— 现在那份基准跟着入库了
+// (164 651 字节),理由见 `.gitignore`:默认 `cargo test` 会跑到的基准必须入库。
+//
+// # 名字叫 `large`,实际只覆盖前 2000 条 —— 这一点必须写在脸上
+//
+// `matches.tsv` 首行是 `#mols 2000`,而 `large.smi` 有 8839 条 —— **覆盖 22.6%**。
+// 独立审核指出:测试名叫 `matches_large`、读的是 `large.smi`、打印"大语料",
+// 而 2000 这个数**一处都没露过面**。所以下面把 `base.n_mols` 打出来。
+//
+// 审核还用锁里钉的 RDKit 2025.09.2 重导了**全量**基准(8839 条,678 kB),
+// 报出 6 条本实现命中而 RDKit 不命中的方向键模式(都在同一个分子上,小环内的
+// C=C 被我们给了方向语义)。**那一条我没能自己复核**(复现要重导全量基准),
+// 已按原样记进任务,不当作已确证的结论。
+//
+// 也就是说:**这不只是"覆盖率数字不好看",截断很可能挡住了活的分歧。**
+// 扩到全量是另一件事(要连着处理那 6 条),见任务清单。
 fn matches_large() {
-    let (rep, smis, pats) = run("large.smi", "matches.tsv");
+    let (rep, smis, pats, base_mols, total_mols) = run("large.smi", "matches.tsv");
     assert_clean(&rep, &smis, &pats);
     assert!(rep.agreed > 10_000, "只对上了 {} 条", rep.agreed);
+    // **跳过的分子要有上限。** 先前只印不判 —— 那是这个仓库刚清过一批的
+    // "单向过滤器":它只会把分歧变成不计数。实测现值 0。
+    assert!(
+        rep.skipped_molecules.len() <= 5,
+        "跳过了 {} 个分子(上限 5)—— 跳过的越多,上面那个'一致 N 条'越不说明问题",
+        rep.skipped_molecules.len()
+    );
     println!(
-        "匹配差分(大语料)通过:一致 {} 条;跳过(已登记){} 条分子",
+        "匹配差分:基准覆盖语料前 {} 条(语料共 {} 条),一致 {} 条;跳过(已登记){} 条分子",
+        base_mols,
+        total_mols,
         rep.agreed,
         rep.skipped_molecules.len()
     );

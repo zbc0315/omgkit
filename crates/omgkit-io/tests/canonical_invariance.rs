@@ -244,11 +244,21 @@ fn canonical_smiles_is_invariant_under_renumbering_smoke() {
 }
 
 #[test]
-#[ignore = "语料大,用 cargo test -- --ignored 运行"]
+// **不再 `#[ignore]`。** 实测**几秒量级**(不同机器/负载下 2~8 s 都量到过 ——
+// 墙钟值别写成单点,见 `omgkit-match/tests/scaling.rs` 的同一条)。见 `adjacency_index.rs`
+// 里同一处说明:标着 `#[ignore]` 等于这条判据从来没在 CI 里跑过。
 fn canonical_smiles_is_invariant_under_renumbering_corpus() {
     let (stats, bad) = check_corpus(&corpus("large.smi"), 5, 0x243F_6A88_85A3_08D3);
     assert!(bad.is_empty(), "{}", report(&bad, 15));
     assert!(stats.molecules > 8000, "只测到 {} 条分子", stats.molecules);
+    // **覆盖断言,与冒烟档同一套。** 冒烟档断了 `needed_tie_breaking > 0`,
+    // 这一档先前一条都没有 —— 而它现在进了 CI:分母敞着的话,"全部恒等"
+    // 可能只说明打破对称那条路根本没走到。现值 8717 条。
+    assert!(
+        stats.needed_tie_breaking > 8000,
+        "只有 {} 条分子含等价原子 —— 打破对称那条路几乎没走到",
+        stats.needed_tie_breaking
+    );
     println!(
         "规范化重排不变(大语料):{} 条分子 × 5 次重排全部恒等;其中含等价原子 {} 条",
         stats.molecules, stats.needed_tie_breaking

@@ -65,7 +65,18 @@ fn expect(name: &str, got: usize, want: usize, where_: &str) {
 }
 
 #[test]
-#[ignore = "要跑全量语料;用 cargo test -- --ignored 运行"]
+// **不再 `#[ignore]`。** 秒级(release 与测试档都是个位数秒)。
+//
+// **它守的到底是什么,要说准。** 独立审核实测:把 `sssr.rs` / `canon.rs` /
+// `organometallics.rs` 那三处注释里的数字全改坏,这条测试**照样绿** ——
+// 它比的是上面那三个**常量**(注释是抄在常量的文档里的),不读源码注释文本。
+//
+// 所以它是一条**实现回归闸**:实现算出来的数一变就红(实测把
+// `cleanup_organometallics` 改成提前返回 0,当场红),而注释单独漂移它看不见。
+// 这个区别不是抠字眼:改实现的人会被拦住,只改注释的人不会。
+//
+// 覆盖面也要说准:源码里"8839 条语料里 N 条"这类声明**至少 8 处**,这里只盖 3 处
+// (`builder.rs` 两处、`pipeline.rs`、`write.rs` 两处、`stereo.rs` 一处都没有闸)。
 fn documented_numbers_still_hold() {
     let smis = corpus();
     assert_eq!(smis.len(), CORPUS_TOTAL, "语料条数变了,下面的数都要重量");
