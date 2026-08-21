@@ -19,7 +19,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use omgkit_core::{AtomFlags, BondOrder, MolBuilder};
+use omgkit_core::{AtomFlags, BondOrder, BondStereo, MolBuilder};
 use omgkit_io::smiles;
 
 fn corpus(name: &str) -> PathBuf {
@@ -47,6 +47,11 @@ struct Stats {
     with_fragments: usize,
     with_brackets: usize,
     with_dative: usize,
+    /// **带双键顺反的分子数** —— `compare_bond_stereo` 的分母。
+    ///
+    /// 少了它,那条判据在一个顺反键都没有的语料上“全过”是恒真的。
+    /// 同一个文件里其余每一档语法特性都配了这样一个计数,唯独顺反先前没有。
+    with_bond_stereo: usize,
     /// 需要 `%NN` 形式环标号的分子数
     with_high_ring_labels: usize,
 }
@@ -71,6 +76,92 @@ fn compare_atoms(before: &MolBuilder, after: &MolBuilder, order: &[u32]) -> Opti
                 "原子 {i}(原下标 {orig}):写出前 {a:?}\n            写出后 {b:?}"
             ));
         }
+    }
+    None
+}
+
+/// 双键顺反比对:两边各自**感知**一遍,再逐键比 `BondStereo`。
+///
+/// # 为什么不直接比 `direction`
+///
+/// `BondData::direction` 存的是"沿着这根键从 `begin` 走向 `end` 时符号朝哪边",
+/// 而写出会按生成树的遍历顺序决定从哪一端写起 —— 遍历方向反过来,存下来的
+/// 方向符号就跟着翻(`write.rs` 的 `direction_from` 干的就是这件事)。
+/// 直接比 `direction` 会把"从另一头写的"报成"写反了"。
+///
+/// 顺反(`BondStereo`)是与遍历方向无关的**语义**,所以两边各感知一遍再比它。
+///
+/// # 少了这条会怎样 —— 比我原先以为的轻,如实记下来
+///
+/// `compare_bonds` 只比 `(端点, 键级)`,`BondData` 的 `direction` / `stereo` /
+/// `stereo_atoms` **三个字段一个都不比**。但"顺反写反了没人管"这句话是**错的**:
+///
+/// 变异实测(把 `smiles/write.rs` 里**单键**的方向符号一律写成 `/`,
+/// 即把全部顺式写成反式),在**加这条判据之前**的树上跑 `cargo test --release`:
+///
+/// ```text
+/// stereo.rs  perceived_stereo_regenerates_directions        FAILED
+/// stereo.rs  conjugated_chain_directions_stay_consistent    FAILED
+/// omgkit-match/tests/reaction.rs
+///            bond_stereo_survives_losing_its_reference_atom FAILED
+/// ```
+///
+/// 也就是说这一档**本来就有三条测试守着**,只是那四个 io 集成测试
+/// (`roundtrip_smiles` / `canonical_invariance` / `differential_l1` /
+/// `roundtrip_smarts`)看不见它。我先前把"四个集成测试全绿"读成了
+/// "全仓库没人守",而当时那次"实测全绿"用的是**芳香键**那处的变异 ——
+/// `write.rs` 里 `UpRight => "/"` 有两处(芳香一处、单键一处),
+/// 而冒烟语料的顺反分子用的是单键,**变异根本没打中被测代码**。
+///
+/// 所以这条判据的定位是**在往返这一层再钉一道**,不是补一个无人区。
+/// 它现在能抓住的、别处抓不住的,是"标签对而参照原子指错了"那一档
+/// (见下面 `stereo_atoms` 的注释)。
+///
+fn compare_bond_stereo(before: &MolBuilder, after: &MolBuilder, order: &[u32]) -> Option<String> {
+    let mut to_out = vec![u32::MAX; before.num_atoms()];
+    for (i, &orig) in order.iter().enumerate() {
+        to_out[orig as usize] = i as u32;
+    }
+    // 端点归一成 (小, 大) —— 与 `compare_bonds` 同一套,便于按键配对
+    let key = |x: u32, y: u32| if x <= y { (x, y) } else { (y, x) };
+
+    let mut a = before.clone();
+    let mut b = after.clone();
+    omgkit_io::stereo::perceive_bond_stereo(&mut a);
+    omgkit_io::stereo::perceive_bond_stereo(&mut b);
+
+    // **要连 `stereo_atoms` 一起比。** `BondStereo` 只是个标签,它的含义依赖
+    // "以哪两个取代基为参照" —— 光比标签定不了几何:
+    //
+    //     C/C(F)=C/C   与   F/C(C)=C/C   都是 {(1,2): Trans}
+    //
+    // 而它们是**两个不同的分子**(E/Z 2-氟-2-丁烯)。变异实测:把写出器里
+    // 同一端两根取代基键的方向符号对调,大语料上 217 条 `BondStereo` 就变了、
+    // 另有 **20 条标签相同而 `stereo_atoms` 指到了别的取代基** —— 只比标签的话
+    // 那 20 条一声不吭。加严是免费的:未变异时两份语料的 `stereo_atoms` 差异都是 0。
+    let mut want = std::collections::BTreeMap::new();
+    for bd in a.bonds() {
+        if bd.stereo != BondStereo::None {
+            let sa = bd.stereo_atoms.map(|x| to_out[x as usize]);
+            want.insert(
+                key(to_out[bd.begin as usize], to_out[bd.end as usize]),
+                (bd.stereo, sa),
+            );
+        }
+    }
+    let mut got = std::collections::BTreeMap::new();
+    for bd in b.bonds() {
+        if bd.stereo != BondStereo::None {
+            got.insert(key(bd.begin, bd.end), (bd.stereo, bd.stereo_atoms));
+        }
+    }
+    if want != got {
+        return Some(format!(
+            "双键顺反变了:写出前 {} 根带顺反 {want:?}
+            写出后 {} 根 {got:?}",
+            want.len(),
+            got.len()
+        ));
     }
     None
 }
@@ -154,6 +245,14 @@ fn roundtrip_corpus(path: &Path) -> (Stats, Vec<Failure>) {
             stats.with_dative += 1;
         }
 
+        {
+            let mut probe = before.clone();
+            omgkit_io::stereo::perceive_bond_stereo(&mut probe);
+            if probe.bonds().iter().any(|b| b.stereo != BondStereo::None) {
+                stats.with_bond_stereo += 1;
+            }
+        }
+
         let w = smiles::write(&before);
         if w.smiles.contains('.') {
             stats.with_fragments += 1;
@@ -211,6 +310,10 @@ fn roundtrip_corpus(path: &Path) -> (Stats, Vec<Failure>) {
             fail(why);
             continue;
         }
+        if let Some(why) = compare_bond_stereo(&before, &after, &w.atom_order) {
+            fail(why);
+            continue;
+        }
         stats.round_tripped += 1;
     }
 
@@ -231,6 +334,73 @@ fn report(bad: &[Failure], limit: usize) -> String {
     out
 }
 
+/// 手工的顺反语料 —— **冒烟档在这一档上太薄**。
+///
+/// 实测冒烟语料 141 条里只有 **3 条**带顺反、共 **4 根**顺反键,而且全是
+/// 单键方向、两端都单取代。于是 `compare_bond_stereo` 在 CI 里几乎没本钱:
+/// 变异实测,**只翻芳香键的方向**或**丢掉环闭合上的方向**,冒烟档都抓不住
+/// (大语料档能抓住,但 `roundtrip_large` 标着 `#[ignore]`,CI 从不跑
+/// `--ignored` —— 见任务清单)。
+///
+/// 不往 `harness/corpus/smoke.smi` 里加:那份语料的 149 行被 `smoke.l1/l2-*`
+/// 十来份入库基准逐行钉着,加一行要重导全部基准。手工列在这里更便宜。
+///
+/// 每一条都写成"某一类方向信息丢了就会变"的形状:
+const HANDMADE_STEREO: &[&str] = &[
+    // 两端都二取代 —— 只有这种形状分得出 `stereo_atoms` 指向哪个取代基
+    r"C/C(F)=C/C",
+    r"F/C(C)=C/C",
+    r"C/C(F)=C(\C)F",
+    // 环上的方向键(环闭合那条路)
+    r"C/1=C\CCCC1",
+    r"C/1=C/CCCC1",
+    // 环外双键 —— 环碳两侧要**不等价**才是立体键。
+    // (`F/C=C1\CCCCC1` 的环己叉两支等价,`perceive_bond_stereo` 如实不给它顺反;
+    //  下面那条分母断言当场把它揪出来了 —— 判据自己先证明了自己不空。)
+    r"F/C=C1\CCCC(F)C1",
+    r"O=C1CCC/C1=C/F",
+    // 双键一端挂在芳香环上,方向由**单键**携带
+    r"C(=C/c1ccccc1)\C",
+    r"c1ccc(cc1)/C=C/c1ccccc1",
+    // **方向由环上的芳香键携带** —— 写出器里那一档是单独的分支
+    // (`BondOrder::Aromatic` 那一支)。上面几条一条都走不到它:
+    // 它们的方向键是 C–c **单键**。
+    //
+    // 挑这两条时先量过:遍历 `large.smi`,找 `directions_for_writing` 真的把
+    // 方向落在**芳香键**上的分子 —— 形状是 `c/1\`(方向在环闭合的芳香键上),
+    // 而不是我一开始猜的 `c\1/`(那种方向仍落在单键上,加进来一点用没有)。
+    //
+    // 变异实测:只翻芳香键的方向符号 —— 没有这两条时冒烟档与手工档**双双全绿**,
+    // 有了之后 `手工顺反语料也要往返` 当场红。
+    r"[H]/[O+]=c/1\c(c(c1=O)[NH3+])N",
+    r"[H]/N=c/1\[nH]c-2c(s1)CSc3c2cccc3",
+    // 共轭链,多根顺反键互相牵制
+    r"C/C=C/C=C\C",
+    r"F/C=C/C=C/C=C\F",
+];
+
+/// 手工顺反语料的往返。判据与冒烟档同一套(见 [`roundtrip_corpus`])。
+#[test]
+fn 手工顺反语料也要往返() {
+    let dir = std::env::temp_dir().join("omgkit_roundtrip_stereo.smi");
+    std::fs::write(&dir, HANDMADE_STEREO.join("\n")).expect("写得了临时语料");
+    let (stats, bad) = roundtrip_corpus(&dir);
+    let _ = std::fs::remove_file(&dir);
+    assert!(bad.is_empty(), "{}", report(&bad, 15));
+    assert_eq!(
+        stats.parsed,
+        HANDMADE_STEREO.len(),
+        "手工语料有条目没解析出来"
+    );
+    assert_eq!(stats.round_tripped, stats.parsed);
+    // **分母**:这份语料存在的唯一理由就是带顺反,一条都没有就说明写错了
+    assert_eq!(
+        stats.with_bond_stereo,
+        HANDMADE_STEREO.len(),
+        "手工语料里有条目不带顺反 —— 那一条什么也没测"
+    );
+}
+
 /// 冒烟语料。含各种语法陷阱:多片段、方括号、配位键、大环标号、非四面体立体。
 #[test]
 fn roundtrip_smoke() {
@@ -245,6 +415,11 @@ fn roundtrip_smoke() {
     assert!(stats.with_fragments > 0, "语料里没有多片段分子");
     assert!(stats.with_brackets > 0, "语料里没有方括号原子");
     assert!(stats.with_dative > 0, "语料里没有配位键");
+    // **`compare_bond_stereo` 的分母。** 一个顺反键都没有的话,那条判据恒真。
+    assert!(
+        stats.with_bond_stereo > 0,
+        "语料里没有带双键顺反的分子 —— compare_bond_stereo 什么也没比"
+    );
 
     println!(
         "写出往返(冒烟):{} 条全部往返成功;含环 {},含芳香 {},多片段 {},\

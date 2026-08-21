@@ -84,6 +84,7 @@ pub fn sanitize(mol: &mut MolBuilder) -> Result<(), SanitizeError> {
 
 #[cfg(test)]
 mod tests {
+    use omgkit_core::ChiralTag;
     use omgkit_io::smiles;
 
     use super::*;
@@ -102,6 +103,60 @@ mod tests {
         sanitize(&mut m).expect("应能净化");
         assert_eq!(total_hs(&m, 3), 1, "吡咯氮上的氢");
         assert_eq!(m.atoms()[3].num_explicit_hs, 1, "且记在显式那一侧");
+    }
+
+    /// **第 11 步(剔除几何上不成立的立体标记)必须真的接在管线里。**
+    ///
+    /// `cleanup_chirality` 自己那 5 条单元测试是**直接调函数**的,所以把
+    /// `sanitize()` 里那一行整个删掉,`cargo test --release` 与
+    /// `cargo test --workspace` **照样全绿** —— 实测过。而它的触发面很窄
+    /// (`smoke.smi` 5 个分子 5 个原子、`large.smi` 1 个),别的判据也看不见:
+    /// L2 差分基准**不比 `chiral_tag` 那一列**,`canonical_smiles` 走自己的立体
+    /// 预处理,`roundtrip_smiles` 跑的是**未净化**的分子。
+    ///
+    /// 所以这条测试走的是 `sanitize()`,不是 `cleanup_chirality()`。
+    #[test]
+    fn 净化会剔除几何上不成立的立体标记() {
+        // (SMILES, 原子下标, 为什么该被清掉)
+        let cleared = [
+            ("[Pt@SP1](Cl)(Cl)(N)(N)Cl", 0, "平面四方标记而配位数是 5"),
+            ("[Pt@SP1]Cl", 0, "平面四方标记而配位数是 1"),
+            ("[Fe@TB1]Cl", 0, "三角双锥标记而配位数是 1"),
+            ("[Fe@OH1]Cl", 0, "八面体标记而配位数是 1"),
+            (
+                "CC1[C@@-]2[C@@H](N=C[NH+]=C2O)N=C1C",
+                2,
+                "四面体标记而该原子不是 sp³",
+            ),
+        ];
+        for (smi, idx, why) in cleared {
+            let mut m = smiles::parse(smi).unwrap_or_else(|e| panic!("{smi}: {e}"));
+            assert_ne!(
+                m.atoms()[idx].chiral_tag,
+                ChiralTag::Unspecified,
+                "{smi}:解析出来就该带标记,否则这条用例什么也没测"
+            );
+            sanitize(&mut m).unwrap_or_else(|e| panic!("{smi}: {e}"));
+            assert_eq!(
+                m.atoms()[idx].chiral_tag,
+                ChiralTag::Unspecified,
+                "{smi} 的原子 {idx}({why})的标记该在第 11 步被清掉"
+            );
+        }
+
+        // **反过来:几何成立的标记不许动。** 少了这一组,"把所有标记一律清光"
+        // 的实现也能让上面几条通过。
+        for (smi, idx) in [("C[C@H](N)O", 1), ("[C@@H](F)(Cl)Br", 0)] {
+            let mut m = smiles::parse(smi).unwrap_or_else(|e| panic!("{smi}: {e}"));
+            let want = m.atoms()[idx].chiral_tag;
+            assert_ne!(want, ChiralTag::Unspecified, "{smi}:用例本身要带标记");
+            sanitize(&mut m).unwrap_or_else(|e| panic!("{smi}: {e}"));
+            assert_eq!(
+                m.atoms()[idx].chiral_tag,
+                want,
+                "{smi} 的原子 {idx} 几何成立,标记不该被动"
+            );
+        }
     }
 
     /// 常见分子跑得通,且总氢数对。
