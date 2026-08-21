@@ -141,19 +141,28 @@ cargo run -q -p omgkit-depict --release --example dump_molblock -- harness/corpu
 "$PY" harness/check_wedge_readback.py "$WORK/blocks.txt" harness/corpus/large.smi
 
 # 交付的三维坐标满不满足输入 SMILES 指定的每一处立体。完全绕开我们自己的任何公式。
+# 第二个参数照例是语料,判据拿它核分母(实测空文件进去,先前那版打印
+# "0/0 一致(0.00%)"并退 0)。
 step "判官:交付坐标的立体化学(RDKit 从三维坐标读回)"
 cargo run -q -p omgkit-conf --release --example dump_conformers -- harness/corpus/large.smi >"$WORK/ours.jsonl"
-"$PY" harness/verify_stereo.py "$WORK/ours.jsonl"
+"$PY" harness/verify_stereo.py "$WORK/ours.jsonl" harness/corpus/large.smi
 
 # 写出的外部裁判。**两个方向都跑** —— 规范那一条先前红了很久没人知道
 # (规范写出丢掉超价原子的方括号,`Cl[I]Cl` → `ClICl`,外部读者补氢读成另一个分子),
 # 而按存储顺序那一条一直是绿的:两个方向走不同分支,只跑一个等于只守一半。
-step "判官:SMILES 写出(按存储顺序)"
+#
+# **`--strict` 是必须的。** 不加的话,判据会把"尚未写出的立体信息"分桶豁免,
+# 而那个桶是**两侧一起抹掉**再比的 —— 于是"没写出 E/Z"和"E/Z 写反了"混成一档,
+# 而且那个桶没有上限。独立审核实测:把写出器的单键方向符号一律写成 `/`
+# (把全部顺式写成反式),判据打印"仅 双键立体 不同 149 条"然后**退 0**;
+# 同样手法翻四面体手性则报 300 条分歧、退 1 —— 是这一档的洞,不是判官坏了。
+# 大语料上两个豁免桶现值都是 0,所以 `--strict` 现在就能开(实测两个方向都退 0)。
+step "判官:SMILES 写出(按存储顺序,严格)"
 cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/large.smi >"$WORK/written.tsv"
-"$PY" harness/check_write.py "$WORK/written.tsv" harness/corpus/large.smi
-step "判官:SMILES 写出(规范)"
+"$PY" harness/check_write.py "$WORK/written.tsv" harness/corpus/large.smi --strict
+step "判官:SMILES 写出(规范,严格)"
 cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/large.smi --canonical >"$WORK/canon.tsv"
-"$PY" harness/check_write.py "$WORK/canon.tsv" harness/corpus/large.smi
+"$PY" harness/check_write.py "$WORK/canon.tsv" harness/corpus/large.smi --strict
 
 # **自查。** 加了闸门忘了改 `TOTAL` 的话,这里红 —— 上面那些 `N/TOTAL`
 # 就不会悄悄变成假数。

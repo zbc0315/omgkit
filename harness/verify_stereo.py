@@ -50,10 +50,22 @@
 
 **这条判据本身仍然看不见 P** —— 所以那 2 个继续记在"够不着"里,别把它读成"我们错了"。
 
+# 分母也要有闸
+
+这条判据的分母是上游喂的:`dump_conformers` 只导出**带立体信息**的分子,而且
+解析失败/净化失败/构型生成失败的都直接跳过。判据只数一致率、不数"该数到多少"
+—— 实测**喂一个空文件进去,它打印 `0/0 一致(0.00%)` 并退 0**;把构型生成
+改成对 >25 原子的分子直接失败(全语料一半掉出去),它照样打印 100%、退 0。
+
+它的两个兄弟(`check_wedge_readback.py`、`check_write.py`)都为此收了第二个参数
+(同一份语料)来核分母,这一条先前没有。现在也收:拿 RDKit 独立算一遍
+"哪些分子带四面体标记**或**双键立体",逐条核对 dump 有没有覆盖。
+实测 `large.smi`:两边都是 **642** 个分子,不多不少。
+
 用法:
 
     cargo run -p omgkit-conf --release --example dump_conformers -- harness/corpus/large.smi > /tmp/ours.jsonl
-    .venv/bin/python harness/verify_stereo.py /tmp/ours.jsonl
+    .venv/bin/python harness/verify_stereo.py /tmp/ours.jsonl harness/corpus/large.smi
 """
 import json
 import sys
@@ -77,6 +89,37 @@ BT = {1: Chem.BondType.SINGLE, 2: Chem.BondType.DOUBLE,
 # 现值 2(都是三配位 P,RDKit 的 `AssignStereochemistryFrom3D` 不给它赋手性)。
 # 设 5 是给多试几个 seed 之后的余量;涨上去要当场查,不是调大它。
 MAX_BLIND = 5
+
+#: 语料里"该出现在 dump 中却没有"的分子数上限。见模块文档"分母也要有闸"。
+#: 实测 `large.smi` 上是 0 —— 口径与 `dump_conformers` 的过滤条件逐个吻合,
+#: 所以这里钉死 0,而不是留余量。
+MAX_MISSING = 0
+
+
+def expected_smiles(path):
+    """语料里**该**出现在 dump 中的 SMILES。
+
+    口径:RDKit 认为分子带至少一个四面体标记,**或**至少一根双键带顺反。
+    实测这个集合与 `dump_conformers` 实际导出的 642 个分子逐个相同。
+    """
+    params = Chem.SmilesParserParams()
+    params.removeHs = False
+    want = set()
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            fields = line.split()
+            if not fields or fields[0].startswith("#"):
+                continue
+            m = Chem.MolFromSmiles(fields[0], params)
+            if m is None:
+                continue
+            has_center = any(
+                a.GetChiralTag() != Chem.ChiralType.CHI_UNSPECIFIED for a in m.GetAtoms()
+            )
+            has_bond = any(b.GetStereo() != Chem.BondStereo.STEREONONE for b in m.GetBonds())
+            if has_center or has_bond:
+                want.add(fields[0])
+    return want
 
 # 自校准要试几个 seed。**一个 seed 不够** —— 嵌入失败与"读不回"是两回事,
 # 前者说明这次没试出来,后者才说明判官够不着。审核实测:642 个分子里有 2 个
@@ -112,12 +155,18 @@ def rdkit_can_read_itself(smi):
 # 但"哪个版本给出的这个数"不该靠记。
 print(f"外部实现:RDKit {rdkit.__version__}")
 
+if len(sys.argv) < 3:
+    print("用法:verify_stereo.py <dump_conformers 的 jsonl> <同一份语料.smi>")
+    sys.exit(2)
+
 n_ok = n_bad = n_skip = n_blind = 0
 bad = []
 blind = []
+seen = set()
 for line in open(sys.argv[1], encoding="utf-8"):
     r = json.loads(line)
     smi = r["smiles"]
+    seen.add(smi)
     ref = Chem.MolFromSmiles(smi)
     if ref is None:
         n_skip += 1
@@ -171,6 +220,9 @@ for line in open(sys.argv[1], encoding="utf-8"):
         if len(bad) < 10:
             bad.append(f"{smi}\n      读回 {got}\n      期望 {want}")
 
+# **分母闸。** 见模块文档:dump 少喂几个分子,一致率会跟着变好看。
+missing = sorted(expected_smiles(sys.argv[2]) - seen)
+
 tot = n_ok + n_bad
 print(f"RDKit 从我们的坐标读回立体化学:{n_ok}/{tot} 一致"
       f"({100.0 * n_ok / max(tot, 1):.2f}%);跳过 {n_skip}")
@@ -185,4 +237,10 @@ if n_blind > MAX_BLIND:
     print(f"\n判官够不着的分子涨到 {n_blind} > {MAX_BLIND} —— "
           "自校准是单向过滤器,它只会把失配变成不计数。"
           "涨上去要当场查是哪一档看不见了,不是调大这个数")
-sys.exit(1 if (n_bad or n_blind > MAX_BLIND) else 0)
+print(f"  该出现在 dump 里却没有的分子:{len(missing)}(上限 {MAX_MISSING})")
+for smi in missing[:10]:
+    print(f"    {smi}")
+if len(missing) > MAX_MISSING:
+    print(f"\n语料里有 {len(missing)} 个带立体信息的分子没进 dump —— "
+          "一致率是分子,覆盖面是分母。少喂几个分子,上面那个百分比会跟着变好看")
+sys.exit(1 if (n_bad or n_blind > MAX_BLIND or len(missing) > MAX_MISSING) else 0)

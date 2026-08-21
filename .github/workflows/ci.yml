@@ -213,7 +213,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo run -q -p omgkit-conf --release --example dump_conformers -- harness/corpus/large.smi > "$RUNNER_TEMP/ours.jsonl"
-          python harness/verify_stereo.py "$RUNNER_TEMP/ours.jsonl"
+          python harness/verify_stereo.py "$RUNNER_TEMP/ours.jsonl" harness/corpus/large.smi
 
       # 写出的外部裁判:两边各自规范化再比串,与本实现无共谋。
       #
@@ -223,16 +223,20 @@ jobs:
       # 是绿的:两个方向走的是不同的分支,只跑一个等于只守一半。
       #
       # 第二个参数照例是语料,判据拿它核分母。
-      - name: 判官:SMILES 写出(按存储顺序)
+      # **`--strict` 是必须的。** 不加的话判据会把"尚未写出的立体信息"分桶豁免,
+      # 而那个桶是两侧一起抹掉再比的 —— "没写出 E/Z"与"E/Z 写反了"混成一档,
+      # 且没有上限。实测把写出器的单键方向符号一律写成 `/`(顺式全写成反式),
+      # 不加 `--strict` 时判据打印"仅 双键立体 不同 149 条"然后退 0。
+      - name: 判官:SMILES 写出(按存储顺序,严格)
         shell: bash
         run: |
           set -euo pipefail
           cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/large.smi > "$RUNNER_TEMP/written.tsv"
-          python harness/check_write.py "$RUNNER_TEMP/written.tsv" harness/corpus/large.smi
+          python harness/check_write.py "$RUNNER_TEMP/written.tsv" harness/corpus/large.smi --strict
 
-      - name: 判官:SMILES 写出(规范)
+      - name: 判官:SMILES 写出(规范,严格)
         shell: bash
         run: |
           set -euo pipefail
           cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/large.smi --canonical > "$RUNNER_TEMP/canon.tsv"
-          python harness/check_write.py "$RUNNER_TEMP/canon.tsv" harness/corpus/large.smi
+          python harness/check_write.py "$RUNNER_TEMP/canon.tsv" harness/corpus/large.smi --strict
