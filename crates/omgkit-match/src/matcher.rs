@@ -83,19 +83,44 @@ pub type Mapping = Vec<u32>;
 ///
 /// `props` 必须由**同一个** `mol` 算出来 —— 两者不一致时匹配结果没有意义,
 /// 而且不会报错。
+/// 一次搜索花了多少工夫。
+///
+/// # 为什么要把这个数交出来
+///
+/// 回溯搜索天然是指数的,全靠剪枝压住;剪枝失效时**结果照样全对,只是慢**。
+/// 守这件事只能量"工夫",而先前量的是**墙钟**——
+/// `crates/omgkit-match/tests/scaling.rs` 的两条增长曲线判据在 8/16/32 元模式上
+/// 测出 213 µs / 440 µs / 1374 µs,微秒级的数放在共享 CI 机器上,
+/// 2026-08-25 直接把一个**改的是别的 crate**的提交打红了(涨幅 1.61 > 阈值 1.6)。
+///
+/// `candidate_tests` 是**整数、确定、与机器无关**的:同一份输入永远同一个数。
+/// 墙钟仍然留着,但降成一道很粗的闸(常数因子崩了才拦),细的那道交给这个数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SearchStats {
+    /// 回溯时**考虑过**的候选原子次数(在 `used` / 可行性筛之前就计)。
+    ///
+    /// 剪枝失效的典型样子是候选集本身变大 —— 定序断开时某一层会退化成
+    /// 全分子扫描,这个数立刻按分子大小翻倍。
+    pub candidate_tests: u64,
+}
+
+/// 找出全部匹配,**并交出这次搜索花了多少工夫**。
+///
+/// 语义与 [`substructure_matches`] 完全一致,只是多返回一个 [`SearchStats`]。
 #[must_use]
-pub fn substructure_matches(
+pub fn substructure_matches_counted(
     query: &QueryMol,
     mol: &MolBuilder,
     props: &MolProps,
     opts: MatchOptions,
-) -> Vec<Mapping> {
+) -> (Vec<Mapping>, SearchStats) {
     if query.num_atoms() == 0 || query.num_atoms() > mol.num_atoms() {
-        return Vec::new();
+        return (Vec::new(), SearchStats::default());
     }
     let mut ctx = Ctx {
         mol,
         props,
+        candidate_tests: 0,
         recursive_cache: HashMap::new(),
     };
     let counts = candidate_counts(query, props);
@@ -116,7 +141,26 @@ pub fn substructure_matches(
         &mut seen,
         &mut out,
     );
-    out
+    (
+        out,
+        SearchStats {
+            candidate_tests: ctx.candidate_tests,
+        },
+    )
+}
+
+/// 找出查询在分子中的全部匹配。
+///
+/// `props` 必须由**同一个** `mol` 算出来 —— 两者不一致时匹配结果没有意义,
+/// 而且不会报错。
+#[must_use]
+pub fn substructure_matches(
+    query: &QueryMol,
+    mol: &MolBuilder,
+    props: &MolProps,
+    opts: MatchOptions,
+) -> Vec<Mapping> {
+    substructure_matches_counted(query, mol, props, opts).0
 }
 
 /// 查询在分子中是否至少有一个匹配,且查询原子 0 落在 `root` 上。
@@ -173,6 +217,8 @@ fn matches_rooted(query: &QueryMol, root: u32, ctx: &mut Ctx) -> bool {
 struct Ctx<'a> {
     mol: &'a MolBuilder,
     props: &'a MolProps,
+    /// 搜索工作量,见 [`SearchStats`]
+    candidate_tests: u64,
     /// (子模式指针, 目标原子) → 是否匹配。
     ///
     /// 用指针当键是安全的:子模式活在查询树里,整个搜索期间不会移动。
@@ -546,6 +592,10 @@ fn extend(
     };
 
     for t in candidates {
+        // 工作量的计量单位,见 [`SearchStats`]。放在 `used` 判断**之前** ——
+        // 剪枝失效的典型样子正是"候选集本身变大",那些候选多半立刻被 `used`
+        // 或 `atom_feasible` 挡掉,放在后面就数不到。
+        ctx.candidate_tests += 1;
         if used[t as usize] {
             continue;
         }

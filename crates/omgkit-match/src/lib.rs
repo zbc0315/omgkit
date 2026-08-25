@@ -27,6 +27,6 @@ pub mod props;
 pub mod react;
 
 pub use byproduct::{reconstruct as reconstruct_byproducts, Byproducts};
-pub use matcher::{substructure_matches, MatchOptions};
+pub use matcher::{substructure_matches, substructure_matches_counted, MatchOptions, SearchStats};
 pub use props::MolProps;
 pub use react::{run_on_substrate, run_reactants, Outcome, ProductSet};

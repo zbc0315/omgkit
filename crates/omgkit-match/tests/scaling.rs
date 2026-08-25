@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use omgkit_chem::sanitize;
 use omgkit_io::{smarts, smiles};
-use omgkit_match::{substructure_matches, MatchOptions, MolProps};
+use omgkit_match::{substructure_matches, substructure_matches_counted, MatchOptions, MolProps};
 
 /// 取多轮最小值的轮数。
 ///
@@ -43,8 +43,25 @@ use omgkit_match::{substructure_matches, MatchOptions, MolProps};
 /// 加轮数不动判据规则,只让 min-of-N 更贴近真最小值 —— 对健康值与缺陷值
 /// 同样收紧,不牺牲检出力。
 const ROUNDS: usize = 20;
-/// 每原子耗时的最大允许涨幅
+/// 每原子**耗时**的最大允许涨幅。
+///
+/// 只剩 `closing_byproducts_is_linear_in_fragment_size` 在用它 —— 那条路上
+/// 还没有确定性的工作量计数。匹配那两条已经换成数 `candidate_tests`,
+/// 理由见 [`assert_pinned`]。
 const MAX_GROWTH: f64 = 1.6;
+
+/// 每单位**工作量**的最大允许涨幅。
+///
+/// 比耗时那个紧,因为它不抖:同一份输入永远同一个数。实测健康值 1.000
+/// (分子那一维**恰好**是 1.000)与 1.105(模式那一维),取 1.25。
+const MAX_COUNT_GROWTH: f64 = 1.25;
+
+/// 每单位耗时的**粗**闸,常数因子崩了才拦。
+///
+/// 细的那道交给工作量计数。留着它是因为计数看不见"每次候选测试本身变贵"
+/// (比如 `atom_feasible` 里多了一遍 O(n) 扫描)—— 那种回归不改变计数,
+/// 只改变耗时。
+const MAX_TIME_GROWTH_COARSE: f64 = 3.0;
 
 /// N 个苯环用亚甲基串起来 —— 分子规模这一维。
 fn many_rings(n: usize) -> String {
@@ -80,37 +97,6 @@ fn cubanes(n: usize) -> String {
     "C12C3C4C1C5C4C3C25".repeat(n)
 }
 
-/// 一次测量:(规模, 每单位耗时微秒)
-fn measure<F>(sizes: &[usize], mut run: F) -> Vec<(usize, f64)>
-where
-    F: FnMut(usize) -> usize,
-{
-    // 预热:线程会先落在能效核上再迁到性能核,频率也要爬
-    for _ in 0..2 {
-        for &n in sizes {
-            run(n);
-        }
-    }
-    let mut best = vec![Duration::MAX; sizes.len()];
-    let mut units = vec![0usize; sizes.len()];
-    // 交错测量:外层轮次、内层规模,让各档经历同样的 CPU 状态轨迹
-    for _ in 0..ROUNDS {
-        for (i, &n) in sizes.iter().enumerate() {
-            let t = Instant::now();
-            units[i] = run(n);
-            best[i] = best[i].min(t.elapsed());
-        }
-    }
-    best.iter()
-        .enumerate()
-        .map(|(i, &t)| {
-            let per = t.as_secs_f64() * 1e6 / units[i] as f64;
-            println!("{:>6} 单位  {t:>12?}  {per:>7.3} µs/单位", units[i]);
-            (units[i], per)
-        })
-        .collect()
-}
-
 fn assert_flat(rows: &[(usize, f64)], what: &str) {
     let (n_min, c_min) = rows[0];
     assert!(
@@ -128,30 +114,124 @@ fn assert_flat(rows: &[(usize, f64)], what: &str) {
     }
 }
 
+/// 一次计数测量:(规模, 工作量, 每单位工作量, 每单位耗时微秒)。
+///
+/// 工作量取 [`SearchStats::candidate_tests`],**整数、确定、与机器无关** ——
+/// 实测 debug 与 release 两档逐位相同。
+fn measure_work<F>(sizes: &[usize], mut run: F) -> Vec<(usize, u64, f64, f64)>
+where
+    F: FnMut(usize) -> (usize, u64),
+{
+    for _ in 0..2 {
+        for &n in sizes {
+            run(n);
+        }
+    }
+    let mut best = vec![Duration::MAX; sizes.len()];
+    let mut units = vec![0usize; sizes.len()];
+    let mut work = vec![0u64; sizes.len()];
+    for _ in 0..ROUNDS {
+        for (i, &n) in sizes.iter().enumerate() {
+            let t = Instant::now();
+            let (u, w) = run(n);
+            best[i] = best[i].min(t.elapsed());
+            units[i] = u;
+            work[i] = w;
+        }
+    }
+    (0..sizes.len())
+        .map(|i| {
+            let per_w = work[i] as f64 / units[i] as f64;
+            let per_t = best[i].as_secs_f64() * 1e6 / units[i] as f64;
+            println!(
+                "{:>6} 单位  候选测试 {:>9}  每单位 {per_w:>9.3}  ({:>10?}, {per_t:>7.3} µs/单位)",
+                units[i], work[i], best[i]
+            );
+            (units[i], work[i], per_w, per_t)
+        })
+        .collect()
+}
+
+/// **钉死工作量,而不是量耗时的涨幅。**
+///
+/// # 为什么换掉墙钟
+///
+/// 这两条判据先前判的是"每单位**耗时**的涨幅 < 1.6"。8/16/32 元模式那一档实测
+/// 213 µs / 440 µs / 1374 µs —— 微秒级的数放在共享 CI 机器上,2026-08-25
+/// 把一个**改的是 `omgkit-conf`** 的提交打红了(`omgkit-match` 根本不依赖它),
+/// 涨幅 1.61 差一点点越过 1.6。
+///
+/// # 为什么"比值"这个形状本身也不够
+///
+/// 比值只看得见**随规模变化**的退化,看不见按比例整体变差的。实测:
+///
+/// | 变异 | 分子那一维的比值 | 模式那一维的比值 | 绝对工作量 |
+/// |---|---|---|---|
+/// | 候选生成退化成全分子扫描 | 1.0 → **4.0** 抓住 | 1.10 → 1.14 **漏** | 5377 → **777 128**(145 倍) |
+/// | 起点不按候选数挑(稀有锚点那条) | — | 1.0 → 1.0 **漏** | 316 → **9 181**(29 倍) |
+///
+/// 两个"漏"都是同一个原因:退化在每一档上按同样倍数发生,比值当然平。
+/// 所以主判据是**钉死绝对值**;比值留着,负责另一半(只在大规模上冒头的退化)。
+///
+/// # 还发现一件事:那条"模式变长"的判据不守它自称守的东西
+///
+/// 它的文档说压的是**定序**。而两种定序变异(整个倒过来、起点按下标挑)在
+/// `chain(k)` 配 `chain(300)` 上把工作量从 5377 只挪到 5351 —— 链上每个碳
+/// 都等价,任何顺序都是连通的,**这个语料对定序没有压力**。
+/// 所以另加了一条 `Br` 锚点的形状,那一条上同样的变异是 29–99 倍。
+fn assert_pinned(rows: &[(usize, u64, f64, f64)], want: &[u64], what: &str) {
+    let got: Vec<u64> = rows.iter().map(|r| r.1).collect();
+    assert_eq!(
+        got, want,
+        "{what}:搜索的工作量变了。\n\
+         这个数是确定的(debug 与 release 逐位相同),变了就是搜索行为变了。\n\
+         **变小**说明剪枝更好了 —— 把新数填进来,并在提交信息里说清为什么;\n\
+         **变大**说明剪枝退了,先查再改数。"
+    );
+    let (n_min, _, w_min, t_min) = rows[0];
+    for &(n, _, w, t) in &rows[1..] {
+        assert!(
+            w / w_min < MAX_COUNT_GROWTH,
+            "{what}:每单位工作量从 {w_min:.3}({n_min} 单位)涨到 {w:.3}({n} 单位),\
+             涨了 {:.2} 倍",
+            w / w_min
+        );
+        assert!(
+            t / t_min < MAX_TIME_GROWTH_COARSE,
+            "{what}:每单位耗时涨了 {:.2} 倍(粗闸 {MAX_TIME_GROWTH_COARSE})——\
+             工作量没涨而耗时涨了,说明每次候选测试本身变贵了",
+            t / t_min
+        );
+    }
+}
+
 /// 分子这一维:模式固定,分子越来越大。
 ///
 /// 压的是候选生成 —— 每层的候选必须来自已映射原子的邻居,而不是全分子。
+/// 变异实测:改成全分子扫描,工作量 5301 → 602 919(114 倍),比值 1.0 → 4.0。
 #[test]
-fn cost_per_atom_does_not_grow_with_molecule_size() {
+fn work_per_atom_does_not_grow_with_molecule_size() {
     println!("形状:模式固定,分子变大");
     let q = smarts::parse("c1ccccc1").expect("模式应能解析");
     let opts = MatchOptions::default();
-    let rows = measure(&[40usize, 80, 160], |n| {
+    let rows = measure_work(&[40usize, 80, 160], |n| {
         let mut m = smiles::parse(&many_rings(n)).expect("语料应能解析");
         sanitize(&mut m).expect("应能净化");
         let props = MolProps::compute(&m);
-        let hits = substructure_matches(&q, &m, &props, opts);
+        let (hits, st) = substructure_matches_counted(&q, &m, &props, opts);
         std::hint::black_box(&hits);
-        m.num_atoms()
+        (m.num_atoms(), st.candidate_tests)
     });
-    assert_flat(&rows, "分子规模");
+    assert_pinned(&rows, &[5301, 10621, 21261], "分子规模");
 }
 
 /// 模式这一维:分子固定,模式越来越长。
 ///
-/// 压的是定序 —— 新加的查询原子必须与已映射的相连,否则每层都要全分子回溯。
+/// 压的是候选生成在**深**搜索下的表现。**它压不到定序** —— 见
+/// [`assert_pinned`] 的最后一节,定序那件事由
+/// [`work_does_not_blow_up_when_the_anchor_is_rare`] 守。
 #[test]
-fn cost_per_query_atom_does_not_grow_with_pattern_size() {
+fn work_per_query_atom_does_not_grow_with_pattern_size() {
     println!("形状:分子固定,模式变长");
     let mut m = smiles::parse(&chain(300)).expect("语料应能解析");
     sanitize(&mut m).expect("应能净化");
@@ -161,13 +241,48 @@ fn cost_per_query_atom_does_not_grow_with_pattern_size() {
         uniquify: true,
         use_chirality: true,
     };
-    let rows = measure(&[8usize, 16, 32], |k| {
+    let rows = measure_work(&[8usize, 16, 32], |k| {
         let q = smarts::parse(&chain(k)).expect("模式应能解析");
-        let hits = substructure_matches(&q, &m, &props, opts);
+        let (hits, st) = substructure_matches_counted(&q, &m, &props, opts);
         std::hint::black_box(&hits);
-        k
+        (k, st.candidate_tests)
     });
-    assert_flat(&rows, "模式规模");
+    assert_pinned(&rows, &[5377, 11633, 23761], "模式规模");
+}
+
+/// 定序这一维:模式一端挂着**稀有原子**,分子里只有一个。
+///
+/// 压的是"起点挑候选最少的那个"。挑错起点时整条链的每个碳都要各试一遍 ——
+/// `search_order` 的文档举的正是 `CCCCCCCCBr` 这个例子,而先前**没有任何判据
+/// 压得到它**:`chain(k)` 配 `chain(300)` 上,把起点改成按下标挑,工作量
+/// 5377 → 5351,纹丝不动。
+///
+/// 换成这个形状之后,同一个变异是 316 → 9 181 / 332 → 18 405 / 364 → 36 085
+/// (**29 / 55 / 99 倍**)。
+#[test]
+fn work_does_not_blow_up_when_the_anchor_is_rare() {
+    println!("形状:稀有锚点,模式变长");
+    let mut m = smiles::parse(&format!("Br{}", chain(300))).expect("语料应能解析");
+    sanitize(&mut m).expect("应能净化");
+    let props = MolProps::compute(&m);
+    let opts = MatchOptions {
+        max_matches: 200,
+        uniquify: true,
+        use_chirality: true,
+    };
+    let rows = measure_work(&[8usize, 16, 32], |k| {
+        let q = smarts::parse(&format!("{}Br", chain(k))).expect("模式应能解析");
+        let (hits, st) = substructure_matches_counted(&q, &m, &props, opts);
+        assert_eq!(hits.len(), 1, "{k} 元模式该正好命中一次");
+        (k, st.candidate_tests)
+    });
+    // 这一维的每单位工作量是**下降**的(锚点钉死之后,模式越长摊得越薄),
+    // 所以只钉绝对值,不判涨幅。
+    assert_eq!(
+        rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+        vec![316u64, 332, 364],
+        "稀有锚点:工作量变了 —— 变大说明起点挑错了"
+    );
 }
 
 /// 早停必须真的截断搜索,而不是先枚举完再截断。
