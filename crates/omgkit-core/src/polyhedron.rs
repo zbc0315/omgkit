@@ -193,7 +193,8 @@ pub fn ligand_count(tag: ChiralTag) -> Option<usize> {
 ///
 /// # 返回 `None` 的情形
 ///
-/// 类别没有排列表(四面体、`@AL`、未标注)、序号不在 `1..=序号数`、
+/// 类别不在这三种配位几何之内(四面体、丙二烯轴手性、未标注 —— 前两类各有
+/// 各的机制)、序号不在 `1..=序号数`、
 /// 两侧配体数与该几何对不上、或者两侧不是同一组配体。调用方应当把这几种
 /// 都当作"这个标记表达不出来",而不是猜一个值 —— 猜出来的是另一个分子。
 #[must_use]
@@ -399,7 +400,7 @@ mod tests {
         );
         assert_eq!(renumber(ChiralTag::Cw, 1, &l, &l), None, "四面体没有排列表");
         assert_eq!(
-            renumber(ChiralTag::Other, 1, &l, &l),
+            renumber(ChiralTag::Allene, 1, &l, &l),
             None,
             "@AL 没有排列表"
         );

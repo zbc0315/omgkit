@@ -27,6 +27,21 @@
 # —— 上面那个 numpy 的坑就是这么来的。若升级会动到 `harness/baseline/`,
 # 那批基准要用新版重导一遍,并且在同一次提交里说明。
 #
+# # 为什么还有第二个工具包(Indigo)
+
+# **RDKit 完全不支持丙二烯型轴手性。** 逐条实测 2025.09.2:SMILES 读写、
+# `FindPotentialStereo`、`rdCIPLabeler`、从 3D 坐标反推、molblock 往返、
+# 带手性的子结构匹配 —— 六条路都把 `@AL1` 与 `@AL2` 当成同一个东西,连
+# `F/C=C=C=C/F` 的方向键也丢。这一档它当不了裁判,而"没有外部裁判就自己
+# 跟自己比"正是仓库一直在防的那种假绿。
+#
+# Indigo 认这个区别,而且自洽(`@AL1` ≡ `@`、从另一端起笔序号不变、
+# 读→写链上每一步都还是同一个分子)。它只服务 `harness/check_allene.py`
+# 这一条判据,不参与任何基准的导出。
+#
+# 它同样要钉版本:那条判据的一侧是**本实现**,版本一换就没得对消 ——
+# 与 `check_smarts_chirality.py` 是同一个道理。
+#
 # # maturin 也钉
 #
 # 有四条判官是**经 wheel** 看 Rust 侧行为的(`check_smarts_chirality.py` 等)。
@@ -36,3 +51,4 @@ rdkit==2025.9.2
 numpy==2.0.2
 pillow==11.3.0
 maturin==1.14.1
+epam.indigo==1.46.0

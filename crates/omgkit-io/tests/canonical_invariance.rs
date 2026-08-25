@@ -485,6 +485,85 @@ fn square_planar_with_a_ring_closure_on_the_centre() {
     }
 }
 
+/// 丙二烯型轴手性,**分组由外部实现钉住**。
+///
+/// 仓库钉的 RDKit 2025.09.2 在这一档上完全没有能力:SMILES 读写、
+/// `FindPotentialStereo`、`rdCIPLabeler`、从 3D 坐标反推、molblock 往返、
+/// 带手性的子结构匹配 —— 六条路都把 `@AL1` 与 `@AL2` 当成同一个东西。
+/// 所以这里的参照是 **Indigo 1.46.0**,它认这个区别而且自洽
+/// (`@AL1` ≡ `@`,读→写链上每一步都还是同一个分子)。
+///
+/// 下表里"第几组"全部由 Indigo 的 `exactMatch(…, "ALL")` 判定,每组还带一串
+/// **它自己写出来的**写法(把 `@` / `@@` 写在中心上的那种形式)。
+///
+/// **一族里必须放几种把配体角色拆开的写法。** 只放"同一个骨架换个序号"是不够的
+/// —— 那时参照那一侧配体的排布与我方相同,插错位置两边一起错、正好抵消。
+/// 变异实测:把端上那个氢排到该端配体的末尾(而不是"紧跟前驱原子"),
+/// 只有 `NC=[C@AL{i}]=C(O)F` 一种形状时**全绿**;加上 `[C@AL{i}](=CN)=C(O)F`
+/// (氢端从中心那边写)才红。环那一族同理,要把三元环**反着写**一遍。
+#[test]
+fn allene_stereo_matches_the_reference() {
+    for (family, cases) in [
+        (
+            "两端各两个取代基",
+            &[
+                ("NC(Br)=[C@AL1]=C(O)F", 0),
+                ("[C@AL1](=C(N)Br)=C(O)F", 0),
+                ("OC(F)=[C@AL1]=C(N)Br", 0),
+                ("BrC(N)=[C@AL2]=C(O)F", 0),
+                ("NC(=[C@@]=C(F)O)Br", 0),
+                ("BrC(N)=[C@AL1]=C(O)F", 1),
+                ("NC(Br)=[C@AL2]=C(O)F", 1),
+                ("[C@AL2](=C(N)Br)=C(O)F", 1),
+                ("OC(F)=[C@AL2]=C(N)Br", 1),
+                ("BrC(=[C@@]=C(F)O)N", 1),
+            ][..],
+        ),
+        (
+            "一端带一个氢",
+            &[
+                ("NC=[C@AL1]=C(O)F", 0),
+                ("N[CH]=[C@AL1]=C(O)F", 0),
+                ("[C@AL2](=CN)=C(O)F", 0),
+                ("NC=[C@@]=C(F)O", 0),
+                ("[C@AL1](=CN)=C(O)F", 1),
+                ("NC=[C@AL2]=C(O)F", 1),
+                ("N[CH]=[C@AL2]=C(O)F", 1),
+                ("[C@@](=C(F)O)=CN", 1),
+            ][..],
+        ),
+        (
+            "一端的配体在环里",
+            &[
+                ("C1(=[C@AL1]=C(N)Br)OC1", 0),
+                ("O1CC1=[C@AL1]=C(N)Br", 0),
+                ("C1(=[C@AL2]=C(N)Br)CO1", 0),
+                ("C1OC1=[C@AL2]=C(N)Br", 0),
+                ("C1(CO1)=[C@]=C(Br)N", 0),
+                ("C1(=[C@AL1]=C(N)Br)CO1", 1),
+                ("C1OC1=[C@AL1]=C(N)Br", 1),
+                ("C1(=[C@AL2]=C(N)Br)OC1", 1),
+                ("O1CC1=[C@AL2]=C(N)Br", 1),
+                ("C1(OC1)=[C@]=C(Br)N", 1),
+            ][..],
+        ),
+    ] {
+        let mut canonical: Vec<(String, usize)> = Vec::new();
+        for &(smi, group) in cases {
+            canonical.push((canonical_smiles(&perceived(smi)), group));
+        }
+        for (i, (a, ga)) in canonical.iter().enumerate() {
+            for (b, gb) in &canonical[i + 1..] {
+                if ga == gb {
+                    assert_eq!(a, b, "{family}:外部实现说这两条是同一个分子,规范串却不同");
+                } else {
+                    assert_ne!(a, b, "{family}:外部实现说这两条是两个分子,规范串却塌成一串");
+                }
+            }
+        }
+    }
+}
+
 /// 缺一个顶点时的序号,**标号由参照实现钉住**。
 ///
 /// 方括号里的氢、或者一个空的配位位置,也占多面体的一个顶点,而它不在键序列

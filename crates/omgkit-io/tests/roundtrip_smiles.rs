@@ -63,6 +63,102 @@ struct Stats {
 /// 按原分子的邻居顺序换算过去,再比。
 ///
 /// 少了这一步,这条判据对"序号被写错成另一个排法"完全失明:原子字段逐个相同,
+/// 丙二烯的排布序号也要经原子对应关系换算之后再比。
+///
+/// 序号相对四个配体的**存储顺序**,而往返之后存储顺序变了。这里按同一条规则
+/// 各自取一遍配体(两端按中心的键序,端内按该端的键序,氢排在该端最前),
+/// 把写出侧的原子经 `order` 映回原分子,再比宇称 —— 这是**另写一遍**规则,
+/// 与被测代码各算各的。
+fn allene_stereo_agrees(
+    before: &MolBuilder,
+    after: &MolBuilder,
+    order: &[u32],
+    orig: u32,
+    i: usize,
+) -> bool {
+    let a = before.atoms()[orig as usize];
+    if a.chiral_tag != ChiralTag::Allene {
+        return true;
+    }
+    if a.stereo_perm == 0 {
+        // 表达不出来(标记没落在丙二烯中心上,或者光秃的 `@AL`):写出侧
+        // **整个丢掉**,与配位几何同一个约定。这里要求的是"丢干净"。
+        return after.atoms()[i].chiral_tag == ChiralTag::Unspecified;
+    }
+    let b = after.atoms()[i];
+    if b.chiral_tag != ChiralTag::Allene || b.stereo_perm == 0 {
+        return false;
+    }
+    let (Some(x), Some(y)) = (
+        allene_ligand_atoms(before, orig, &|n| n),
+        allene_ligand_atoms(after, i as u32, &|n| order[n as usize]),
+    ) else {
+        return false;
+    };
+    let Some(odd) = parity(&x, &y) else {
+        return false;
+    };
+    (a.stereo_perm == b.stereo_perm) != odd
+}
+
+/// 丙二烯四个配体的**原子**标识(端上的氢记成 `u32::MAX - 该端原子`),
+/// 经 `map` 映到统一的编号空间。
+fn allene_ligand_atoms(
+    mol: &MolBuilder,
+    centre: u32,
+    map: &dyn Fn(u32) -> u32,
+) -> Option<[u32; 4]> {
+    let chain: Vec<(u32, u32)> = mol.neighbors(centre).collect();
+    if chain.len() != 2 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(4);
+    for &(end, _) in &chain {
+        let mut ligands: Vec<u32> = mol
+            .neighbors(end)
+            .filter(|&(other, _)| other != centre)
+            .map(|(other, _)| map(other))
+            .collect();
+        let at = mol.atoms()[end as usize];
+        // 解析途中 `num_implicit_hs` 还没填,裸写形式的氢数只能按价键算 ——
+        // 与被测代码取的是同一个底层原语,但"氢排在哪、宇称怎么算"是这里
+        // 另写的一遍。
+        let hs = if at.flags.contains(AtomFlags::NO_IMPLICIT) {
+            u32::from(at.num_explicit_hs)
+        } else {
+            u32::from(omgkit_core::valence::implicit_hs_for_bare_form(mol, end)?)
+        };
+        for _ in 0..hs {
+            ligands.insert(0, u32::MAX - map(end));
+        }
+        if ligands.len() != 2 {
+            return None;
+        }
+        out.extend(ligands);
+    }
+    <[u32; 4]>::try_from(out.as_slice()).ok()
+}
+
+/// `x` → `y` 置换的宇称;两者不是同一多重集时 `None`。
+fn parity(x: &[u32], y: &[u32]) -> Option<bool> {
+    let mut used = vec![false; y.len()];
+    let mut perm = Vec::with_capacity(x.len());
+    for v in x {
+        let j = y.iter().enumerate().position(|(j, w)| !used[j] && w == v)?;
+        used[j] = true;
+        perm.push(j);
+    }
+    let mut odd = false;
+    for i in 0..perm.len() {
+        for j in i + 1..perm.len() {
+            if perm[i] > perm[j] {
+                odd = !odd;
+            }
+        }
+    }
+    Some(odd)
+}
+
 /// 分子却换了个异构体。
 fn coordination_stereo_agrees(
     before: &MolBuilder,
@@ -113,9 +209,9 @@ fn compare_atoms(before: &MolBuilder, after: &MolBuilder, order: &[u32]) -> Opti
             && a.num_radical_electrons == b.num_radical_electrons
             && a.flags.contains(AtomFlags::AROMATIC) == b.flags.contains(AtomFlags::AROMATIC)
             && a.flags.contains(AtomFlags::NO_IMPLICIT) == b.flags.contains(AtomFlags::NO_IMPLICIT)
-            // 四面体手性要往返;三角双锥/八面体尚不写出,故只在能写的那类上比
             && (!a.chiral_tag.is_tetrahedral() || a.chiral_tag == b.chiral_tag)
-            && coordination_stereo_agrees(before, after, order, orig, i);
+            && coordination_stereo_agrees(before, after, order, orig, i)
+            && allene_stereo_agrees(before, after, order, orig, i);
         if !same {
             return Some(format!(
                 "原子 {i}(原下标 {orig}):写出前 {a:?}\n            写出后 {b:?}"
@@ -742,17 +838,91 @@ fn noise_direction_bonds_are_dropped() {
 /// 其实一直没有这些信息。`@SP`/`@TB`/`@OH` 先前也在这张名单上,现在都写得出来了,
 /// 见 [`coordination_stereo_round_trips`]。
 ///
-/// `@AL` 与那三类不是一回事:它的立体信息属于**一根轴**(丙二烯两端的取代基
-/// 谁在前谁在后),不是一个中心周围的配体排布,没有多面体排列表可言。
+/// 丙二烯型轴手性(`@AL`)写得出来,而且**往返之后还是同一个分子**。
+///
+/// 它与配位几何不是一回事:立体信息属于**一根轴**,四个配体来自累积双键
+/// 两端的端原子,中心自己只有两个邻居。所以拿中心那两根键算四面体宇称是错的
+/// —— 换一端起笔是两次对换(偶置换),而两根键只有一次对换。
+///
+/// 光比"往返不变"是不够的:一个把标记整个丢掉的实现也满足它(两串塌成一串,
+/// 每串都往返不变)。所以同时要求**两个序号给出两串**。
+///
+/// 标号由外部实现钉住,见
+/// `canonical_invariance.rs::allene_stereo_matches_the_reference`
+/// 与 `harness/check_allene.py`。
 #[test]
-fn axial_allene_stereo_is_not_written_yet() {
-    let smi = "N[C@AL1]=C=C(O)F";
-    let m = smiles::parse(smi).unwrap();
-    let w = smiles::write(&m).smiles;
-    assert!(
-        !w.contains('@'),
-        "{smi} 写成了 {w},但这类立体信息的写出尚未实现"
-    );
+fn allene_stereo_round_trips() {
+    for make in [
+        // 两端各两个取代基
+        (|i| format!("NC(Br)=[C@AL{i}]=C(O)F")) as fn(usize) -> String,
+        // 中心写在最前 —— 两端都没有"前驱原子"
+        |i| format!("[C@AL{i}](=C(N)Br)=C(O)F"),
+        // 一端只写一个取代基,另一个配体是那个原子上的氢
+        |i| format!("NC=[C@AL{i}]=C(O)F"),
+        // 同上,氢写在方括号里(氢数走的是另一条路)
+        |i| format!("N[CH]=[C@AL{i}]=C(O)F"),
+        // 一端的两个配体在一个三元环里
+        |i| format!("C1(=[C@AL{i}]=C(N)Br)OC1"),
+        // 环反着写 —— 环闭合的那一端从 O 换成 C
+        |i| format!("C1(=[C@AL{i}]=C(N)Br)CO1"),
+        // 把 `@` / `@@` 写在中心上是同一件事的另一种写法
+        |i| format!("NC(Br)=[C{}]=C(O)F", if i == 1 { "@" } else { "@@" }),
+    ] {
+        let mut seen = std::collections::BTreeSet::new();
+        for i in 1..=2 {
+            let smi = make(i);
+            let m = smiles::parse(&smi).unwrap_or_else(|e| panic!("{smi}: {}", e.render()));
+            let w = smiles::write(&m);
+            assert!(
+                w.smiles.contains("@AL"),
+                "{smi} 写成了 {},丢了立体",
+                w.smiles
+            );
+            let back = smiles::parse(&w.smiles)
+                .unwrap_or_else(|e| panic!("{smi} → {} 读不回来:{}", w.smiles, e.render()));
+            assert_eq!(
+                w.smiles,
+                smiles::write(&back).smiles,
+                "{smi}:写出 → 读回 → 再写出,两串不同"
+            );
+            assert!(
+                compare_atoms(&m, &back, &w.atom_order).is_none(),
+                "{smi} → {}:往返之后原子对不上",
+                w.smiles
+            );
+            seen.insert(w.smiles);
+        }
+        assert_eq!(seen.len(), 2, "{} 的两个序号塌成了一串", make(1));
+    }
+}
+
+/// 标记没落在丙二烯中心上时,写出**整个丢掉**它。
+///
+/// 四个配体要从累积双键的两端取,取不到就表达不出来。实测这几档:
+///
+/// | 写法 | 为什么取不到 | 外部实现 |
+/// |---|---|---|
+/// | `N[C@AL1]=C=C(O)F` | 标记在端碳上,它只有一根双键 | Indigo 判非法拒收 |
+/// | `NC(Br)=C=[C@AL1]=C=C(O)F` | 更长的累积双键,两侧不是端原子 | Indigo 读不了 |
+/// | `NC(Br)=[C@AL1]=C` | 一端只有氢,两个配体相同 | 不是立体中心 |
+/// | `C[C@AL1]C` | 两根都不是双键 | —— |
+///
+/// **丢掉是老实的,瞎写一个序号是撒谎。**
+#[test]
+fn allene_stereo_off_the_axis_is_dropped() {
+    for smi in [
+        "N[C@AL1]=C=C(O)F",
+        "NC(Br)=C=[C@AL1]=C=C(O)F",
+        "NC(Br)=[C@AL1]=C",
+        "C[C@AL1]C",
+    ] {
+        let m = smiles::parse(smi).unwrap_or_else(|e| panic!("{smi}: {}", e.render()));
+        let w = smiles::write(&m).smiles;
+        assert!(
+            !w.contains('@'),
+            "{smi} 写成了 {w} —— 四个配体取不到,序号表达不出来,应当整个丢掉"
+        );
+    }
 }
 
 /// 缺**两个及以上**顶点时,写出会整个丢掉这个标记。

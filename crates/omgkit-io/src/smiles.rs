@@ -169,9 +169,6 @@ struct ChiralRec {
     is_smiles_start: bool,
     /// 方括号中书写的氢数
     num_explicit_hs: u8,
-    /// 该原子上的环闭合,按在此原子处书写的先后记录开环流水号。
-    /// 开环端与闭合端都要记。
-    ring_seqs: Vec<u32>,
 }
 
 struct Parser<'a> {
@@ -187,6 +184,11 @@ struct Parser<'a> {
     pending: Option<Pending>,
     chiral: Vec<ChiralRec>,
     chiral_of: HashMap<u32, usize>,
+    /// 原子 → 该原子上的环闭合开环流水号,按在此原子处书写的先后。
+    ///
+    /// 开环端与闭合端都要记。**每个原子都记**,不只是带手性标记的那些:
+    /// 丙二烯的宇称要看两个端原子各自的书写序,而端原子自己不带标记。
+    ring_seqs_of: HashMap<u32, Vec<u32>>,
     /// 开环流水号 → 最终键下标,在环键追加后填好
     ring_bond_index: HashMap<u32, u32>,
     /// 待建环键的端点对(已归一为 `(min, max)`),供 [`Parser::bond_exists`] O(1) 查重。
@@ -219,6 +221,7 @@ impl<'a> Parser<'a> {
             ring_seq: 0,
             pending: None,
             chiral: Vec::new(),
+            ring_seqs_of: HashMap::new(),
             chiral_of: HashMap::new(),
             ring_bond_index: HashMap::new(),
             pending_ring_pairs: HashSet::new(),
@@ -618,7 +621,7 @@ impl<'a> Parser<'a> {
         let (name, max, class) = match two.as_deref() {
             Some(b"TH") => ("TH", 2, ChiralTag::Ccw),
             // 丙二烯轴手性:立体信息属于一根轴而非一个配位中心,不归入配位几何
-            Some(b"AL") => ("AL", 2, ChiralTag::Other),
+            Some(b"AL") => ("AL", 2, ChiralTag::Allene),
             Some(b"SP") => ("SP", 3, ChiralTag::SquarePlanar),
             Some(b"TB") => ("TB", 20, ChiralTag::TrigonalBipyramidal),
             Some(b"OH") => ("OH", 30, ChiralTag::Octahedral),
@@ -743,7 +746,6 @@ impl<'a> Parser<'a> {
                     tag,
                     is_smiles_start: self.prev.is_none(),
                     num_explicit_hs,
-                    ring_seqs: Vec::new(),
                 });
             }
         }
@@ -791,13 +793,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// 若 `atom` 是手性原子,记下它这里出现的一次环闭合(按书写先后)。
+    /// 记下 `atom` 这里出现的一次环闭合(按书写先后)。
     ///
     /// 开环端与闭合端都要记 —— 宇称补偿要用到两端各自的环闭合数。
     fn note_ring(&mut self, atom: u32, open_seq: u32) {
-        if let Some(&i) = self.chiral_of.get(&atom) {
-            self.chiral[i].ring_seqs.push(open_seq);
-        }
+        self.ring_seqs_of.entry(atom).or_default().push(open_seq);
     }
 
     // -- 环闭合 ------------------------------------------------------------
@@ -928,6 +928,54 @@ impl<'a> Parser<'a> {
 
     // -- 手性宇称修正 ------------------------------------------------------
 
+    /// 该原子上的环闭合键下标,按在此原子处书写的先后。
+    fn ring_bonds_of(&self, atom: u32) -> Vec<u32> {
+        self.ring_seqs_of
+            .get(&atom)
+            .map(|seqs| {
+                seqs.iter()
+                    .filter_map(|s| self.ring_bond_index.get(s).copied())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 该原子的键在**书写序**下的顺序,以及"自身位置"。
+    ///
+    /// 非环键按**邻居原子序号**排序,环闭合键整体插在"自身"所处的位置 ——
+    /// 这样能重建 SMILES 的书写顺序,因为 DFS 下前驱原子序号必小于本原子、
+    /// 后续原子序号必大于本原子。
+    ///
+    /// "自身位置"是环闭合开始写的地方,也是方括号里那个氢所在的地方
+    /// (方括号写在环闭合标号之前)。
+    fn written_bond_order(&self, atom: u32) -> (Vec<u32>, usize) {
+        let ring_bonds = self.ring_bonds_of(atom);
+        let mut entries: Vec<(u32, Option<u32>)> = vec![(atom, None)];
+        for (i, b) in self.mol.bonds().iter().enumerate() {
+            let i = i as u32;
+            if ring_bonds.contains(&i) {
+                continue;
+            }
+            if let Some(other) = b.other_end(atom) {
+                entries.push((other, Some(i)));
+            }
+        }
+        entries.sort_by_key(|e| e.0);
+
+        let mut written = Vec::with_capacity(entries.len());
+        let mut self_pos = 0;
+        for (_, bond) in entries {
+            match bond {
+                None => {
+                    self_pos = written.len();
+                    written.extend(ring_bonds.iter().copied());
+                }
+                Some(i) => written.push(i),
+            }
+        }
+        (written, self_pos)
+    }
+
     /// 把每个手性标记从"书写序"转换到"存储序"。
     ///
     /// 算法见模块文档约定二:
@@ -949,51 +997,9 @@ impl<'a> Parser<'a> {
     fn fix_chirality(&mut self) {
         for rec in &self.chiral {
             let atom = rec.atom;
-
-            // 该原子上的环闭合键下标(按在此原子处书写的先后)
-            let ring_bonds: Vec<u32> = rec
-                .ring_seqs
-                .iter()
-                .filter_map(|s| self.ring_bond_index.get(s).copied())
-                .collect();
-
-            // 存储序:按键下标递增
-            let stored: Vec<u32> = self
-                .mol
-                .bonds()
-                .iter()
-                .enumerate()
-                .filter(|(_, b)| b.other_end(atom).is_some())
-                .map(|(i, _)| i as u32)
-                .collect();
-
-            // 书写序:非环键按**邻居原子序号**排序,
-            // 环闭合键整体插在"自身"所处的位置。这样能重建 SMILES 的书写顺序,
-            // 因为 DFS 下前驱原子序号必小于本原子、后续原子序号必大于本原子。
-            let mut entries: Vec<(u32, Option<u32>)> = vec![(atom, None)];
-            for (i, b) in self.mol.bonds().iter().enumerate() {
-                let i = i as u32;
-                if ring_bonds.contains(&i) {
-                    continue;
-                }
-                if let Some(other) = b.other_end(atom) {
-                    entries.push((other, Some(i)));
-                }
-            }
-            entries.sort_by_key(|e| e.0);
-
-            let mut written = Vec::with_capacity(stored.len());
-            // "自身位置":环闭合键从这儿开始写,那个"不是键"的顶点也落在这儿
-            let mut self_pos = 0;
-            for (_, bond) in entries {
-                match bond {
-                    None => {
-                        self_pos = written.len();
-                        written.extend(ring_bonds.iter().copied());
-                    }
-                    Some(i) => written.push(i),
-                }
-            }
+            let ring_bonds = self.ring_bonds_of(atom);
+            let stored = stored_bond_order(&self.mol, atom);
+            let (written, self_pos) = self.written_bond_order(atom);
             if written.len() != stored.len() {
                 continue; // 结构异常,已在别处报错
             }
@@ -1026,10 +1032,44 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
+            // 丙二烯型轴手性:四个配体来自累积双键**两端**,中心自己只有两个
+            // 邻居。`@AL1`/`@AL2` 与把 `@`/`@@` 写在中心上说的是同一件事
+            // (实测外部实现:`@AL1` ≡ `@`),统一归到 `Allene` + 序号 1/2,
+            // 相对四个配体的存储序。
+            //
+            // **写在中心上的 `@`/`@@` 必须走这条路。** 拿中心那两根键去算四面体
+            // 宇称是错的:换一端起笔是两次对换(偶置换),而两根键只有一次对换,
+            // 于是分子被写反 —— 实测 `NC(Br)=[C@]=C(O)F` 先前写成
+            // `[C@@](=C(O)F)=C(N)Br`,外部实现说那是另一个分子。
+            let on_allene_centre = allene_ends(&self.mol, atom).is_some();
+            if rec.tag == ChiralTag::Allene || (on_allene_centre && rec.tag.is_tetrahedral()) {
+                let literal = match rec.tag {
+                    ChiralTag::Ccw => 1,
+                    ChiralTag::Cw => 2,
+                    _ => self.mol.atoms()[atom as usize].stereo_perm,
+                };
+                let perm = if on_allene_centre {
+                    allene_renumber(
+                        &self.mol,
+                        atom,
+                        literal,
+                        &|a| self.written_bond_order(a),
+                        &stored_order_at(&self.mol),
+                    )
+                    .unwrap_or(0)
+                } else {
+                    // 不是丙二烯中心的 `@AL`(比如标记写在端碳上):表达不出来,
+                    // 序号归 0,写出侧整个丢掉。丢掉是老实的。
+                    0
+                };
+                if let Some(a) = self.mol.atom_mut(atom) {
+                    a.chiral_tag = ChiralTag::Allene;
+                    a.stereo_perm = perm;
+                }
+                continue;
+            }
+
             if !rec.tag.is_tetrahedral() {
-                // 丙二烯轴手性(`@AL`)的立体信息属于一根轴而不是一个中心,
-                // 没有多面体排列表可言。这里不动它 —— 它保存的是**书写时的
-                // 字面值**,而字面值不会因为存储序变了就变错。
                 continue;
             }
 
@@ -1069,6 +1109,129 @@ fn mark_aromatic(bd: &mut BondData) {
     }
 }
 
+/// 某原子的键在**存储序**下的顺序 —— 按键下标递增。
+///
+/// 与 `MolBuilder::neighbors` 给出的顺序相同(半边表是尾插),这里显式写出来
+/// 是因为解析途中要按下标扫。
+fn stored_bond_order(mol: &MolBuilder, atom: u32) -> Vec<u32> {
+    mol.bonds()
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.other_end(atom).is_some())
+        .map(|(i, _)| i as u32)
+        .collect()
+}
+
+/// 丙二烯型轴手性的四个配体之一:一根键,或者某个端原子上的一个氢。
+///
+/// 氢要连端原子一起记 —— 两端各可能有一个,它们是**不同的**配体。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlleneLigand {
+    Bond(u32),
+    Hydrogen(u32),
+}
+
+/// `centre` 是不是丙二烯型轴手性的中心:恰好两个邻居,两根都是双键。
+///
+/// 只认这一档 —— 更长的累积双键(`C=C=[C]=C=C`)不在其内:那时两端不是端原子,
+/// 下面 [`allene_ligands`] 会因为"这一端凑不出两个配体"而返回 `None`。
+fn allene_ends(mol: &MolBuilder, centre: u32) -> Option<[u32; 2]> {
+    let bonds = stored_bond_order(mol, centre);
+    let [a, b] = <[u32; 2]>::try_from(bonds).ok()?;
+    let mut ends = [0u32; 2];
+    for (k, bond) in [a, b].into_iter().enumerate() {
+        let bd = &mol.bonds()[bond as usize];
+        if bd.order != BondOrder::Double {
+            return None;
+        }
+        ends[k] = bd.other_end(centre)?;
+    }
+    (ends[0] != ends[1]).then_some(ends)
+}
+
+/// 端原子上有几个氢。
+///
+/// **两侧用同一条规则。** 方括号原子的氢数写死在 `num_explicit_hs` 里;裸写形式
+/// 的要按价键算 —— 解析途中 `num_implicit_hs` 还没填,只能这么算,而写出侧
+/// 也走同一条(`hs_survive_without_brackets` 早就这么做了),两处才不会分家。
+/// 带电荷、自由基、同位素的原子算不出来,那时整个标记丢掉。
+fn allene_end_hydrogens(mol: &MolBuilder, end: u32) -> Option<u8> {
+    let a = mol.atoms()[end as usize];
+    if a.flags.contains(AtomFlags::NO_IMPLICIT) {
+        Some(a.num_explicit_hs)
+    } else {
+        omgkit_core::valence::implicit_hs_for_bare_form(mol, end)
+    }
+}
+
+/// 丙二烯型轴手性的四个配体,按 `order_at` 给出的那种顺序。
+///
+/// `order_at(a)` 要给出原子 `a` 的键顺序,以及"自身位置"(氢落在那儿 ——
+/// 紧跟前驱原子之后、环闭合之前,与四面体、配位几何是同一个槽)。
+/// 解析侧传书写序,写出侧传输出序,存储序两边都传按键下标递增的那个。
+/// **规则只有这一份**,两侧只是喂进不同的顺序。
+///
+/// 顺序:两端按中心的键顺序排,端内按该端自己的键顺序排(不含通往中心的
+/// 那根键)。任一端凑不出恰好两个配体时返回 `None` —— 那时要么不是丙二烯
+/// 中心,要么那一端两个配体相同(`=CH2`),都不是立体中心。
+fn allene_ligands(
+    mol: &MolBuilder,
+    centre: u32,
+    order_at: &dyn Fn(u32) -> (Vec<u32>, usize),
+) -> Option<[AlleneLigand; 4]> {
+    let ends = allene_ends(mol, centre)?;
+    let (centre_bonds, _) = order_at(centre);
+    let mut out = Vec::with_capacity(4);
+    for chain in centre_bonds {
+        let end = mol.bonds()[chain as usize].other_end(centre)?;
+        if !ends.contains(&end) {
+            return None;
+        }
+        let hs = allene_end_hydrogens(mol, end)?;
+        if hs > 1 {
+            return None; // 两个氢在同一端,那一端的两个配体相同
+        }
+        let (bonds, self_pos) = order_at(end);
+        let mut ligands: Vec<AlleneLigand> = bonds.into_iter().map(AlleneLigand::Bond).collect();
+        if hs == 1 {
+            ligands.insert(self_pos, AlleneLigand::Hydrogen(end));
+        }
+        ligands.retain(|l| *l != AlleneLigand::Bond(chain));
+        if ligands.len() != 2 {
+            return None;
+        }
+        out.extend(ligands);
+    }
+    <[AlleneLigand; 4]>::try_from(out.as_slice()).ok()
+}
+
+/// 存储序下的键顺序,给 [`allene_ligands`] 用。氢落在该端的最前
+/// (存储序里没有"前驱原子"可言,约定如此;两侧用同一份就行)。
+fn stored_order_at(mol: &MolBuilder) -> impl Fn(u32) -> (Vec<u32>, usize) + '_ {
+    |a| (stored_bond_order(mol, a), 0)
+}
+
+/// 把丙二烯的排布序号从一种配体顺序换算到另一种。
+///
+/// 序号只有 1、2 两个值,一次对换即互换 —— 与四面体同理,只是配体来自两端。
+/// 序号 0(光秃的 `@AL`)、或者配体凑不齐时返回 `None`:那表示"这个标记
+/// 表达不出来",写出侧据此整个丢掉。
+fn allene_renumber(
+    mol: &MolBuilder,
+    centre: u32,
+    perm: u8,
+    from: &dyn Fn(u32) -> (Vec<u32>, usize),
+    to: &dyn Fn(u32) -> (Vec<u32>, usize),
+) -> Option<u8> {
+    if perm != 1 && perm != 2 {
+        return None;
+    }
+    let a = allene_ligands(mol, centre, from)?;
+    let b = allene_ligands(mol, centre, to)?;
+    let odd = permutation_is_odd(&a, &b)?;
+    Some(if odd { 3 - perm } else { perm })
+}
+
 /// 配位几何里那个"不是键"的顶点在配体序列里的占位标识。
 ///
 /// 取一个不可能出现的键下标即可 —— 它只需要在同一个配体序列里唯一。
@@ -1103,7 +1266,7 @@ fn coordination_ligands(mol: &MolBuilder, atom: u32, tag: ChiralTag) -> Option<V
 /// `written` → `storage` 置换的宇称。两者不是同一多重集时返回 `None`。
 ///
 /// n ≤ 6,O(n²) 完全够用。
-pub(crate) fn permutation_is_odd(written: &[u32], storage: &[u32]) -> Option<bool> {
+pub(crate) fn permutation_is_odd<T: PartialEq>(written: &[T], storage: &[T]) -> Option<bool> {
     let n = written.len();
     if n != storage.len() {
         return None;
@@ -1459,12 +1622,29 @@ mod tests {
         }
     }
 
-    /// 丙二烯的 `@AL` 说的是一根**轴**,不是配位中心,故不归入配位几何。
+    /// 丙二烯的 `@AL` 说的是一根**轴**,不是配位中心:它归一到四个配体
+    /// (累积双键两端各两个)的存储序,不走多面体排列表那条路。
     #[test]
     fn allene_is_not_a_coordination_geometry() {
+        // 标记落在**端碳**上 —— 它只有一根双键,不是丙二烯中心,这个标记
+        // 表达不出来:类别留着,序号归 0,写出侧整个丢掉。
+        // 外部实现同样拒收(Indigo:“chirality on atom 1 makes no sense”)。
         let m = parse_ok("N[C@AL1]=C=C(O)F");
-        assert_eq!(m.atoms()[1].chiral_tag, ChiralTag::Other);
-        assert_eq!(m.atoms()[1].stereo_perm, 1);
+        assert_eq!(m.atoms()[1].chiral_tag, ChiralTag::Allene);
+        assert_eq!(m.atoms()[1].stereo_perm, 0);
+
+        // 落在中心上才成立,而且归一到**存储序**:这里书写序与存储序一致,
+        // 序号原样保留。
+        let m = parse_ok("NC(Br)=[C@AL1]=C(O)F");
+        assert_eq!(m.atoms()[3].chiral_tag, ChiralTag::Allene);
+        assert_eq!(m.atoms()[3].stereo_perm, 1);
+
+        // 把 `@` / `@@` 写在中心上说的是同一件事,归到同一个表示。
+        for (smi, want) in [("NC(Br)=[C@]=C(O)F", 1), ("NC(Br)=[C@@]=C(O)F", 2)] {
+            let m = parse_ok(smi);
+            assert_eq!(m.atoms()[3].chiral_tag, ChiralTag::Allene, "{smi}");
+            assert_eq!(m.atoms()[3].stereo_perm, want, "{smi}");
+        }
     }
 
     /// 排列序号**归一到存储序**;配体数与该几何对不上时原样保管。

@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 # 漏一处就是个不会报错的假数。CI 的头注释里记过同一个坑(那里原先写着
 # "四道闸门",而步骤早已加到八步)。这里由 `step` 计数,末尾自查:
 # 改了步骤忘了改 `TOTAL`,脚本最后一行会红。
-TOTAL=30
+TOTAL=31
 N=0
 step() {
     N=$((N + 1))
@@ -70,6 +70,16 @@ if [ "$(norm "$HAVE_RDKIT")" != "$(norm "$WANT_RDKIT")" ]; then
     echo "  对版:$PY -m pip install --force-reinstall --only-binary=:all: -r harness/requirements.lock" >&2
     echo "  (若 pip list 里同时有 rdkit 与 rdkit-pypi,先卸掉 rdkit-pypi —— 两者装进同一个包目录,后装的赢)" >&2
     echo "  只想拿别的解释器跑一遍:PY=/path/to/python bash harness/gates.sh" >&2
+    exit 1
+fi
+
+# **Indigo 也要钉。** 它只服务丙二烯轴手性那一条判据(RDKit 在那一档完全没有
+# 能力,见 `harness/requirements.lock` 里的理由),而那条判据的一侧是本实现 ——
+# 版本一换就没得对消,与上面 RDKit 同理。
+WANT_INDIGO=$(sed -n 's/^epam\.indigo==//p' harness/requirements.lock)
+HAVE_INDIGO=$("$PY" -c 'from indigo import Indigo; print(Indigo().version().split("-")[0])' 2>/dev/null || echo "(装不上)")
+if [ "$(norm "$HAVE_INDIGO")" != "$(norm "$WANT_INDIGO")" ]; then
+    echo "${PY} 的 Indigo 是 ${HAVE_INDIGO},而 harness/requirements.lock 钉的是 ${WANT_INDIGO}。" >&2
     exit 1
 fi
 
@@ -234,6 +244,12 @@ step "判官:配位几何的排列分组(与外部实现逐组比)"
 # 的匹配,而两版对同一串当 SMILES 读完全一致 —— 2022 的 SMARTS 与它自己的
 # SMILES 读法自相矛盾。仓库钉 2025.09.2;判据自己打印版本号。
 # 开发机的 .venv 若是 2022.09.5,这一条会红 48 条,那不是回归。
+# **丙二烯型轴手性的裁判是 Indigo,不是 RDKit。** 后者在这一档上完全没有能力
+# (六条路实测都把 `@AL1` 与 `@AL2` 当成同一个东西)。这条判据比的同样是
+# **分组**,而且每族都放了几种把配体角色拆开的写法 —— 变异实测见
+# `harness/README.md`:少了那几种写法,"把端上的氢排到末尾"这条变异是全绿的。
+step "判官:丙二烯轴手性的分组(与 Indigo 逐组比)"
+"$PY" harness/check_allene.py
 step "判官:SMARTS 手性的参照系(自带区分力闸)"
 "$PY" harness/check_smarts_chirality.py
 step "判官:产物侧手性的四种指令"

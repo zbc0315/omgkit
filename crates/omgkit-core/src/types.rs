@@ -77,7 +77,7 @@ impl BondOrder {
 /// | [`SquarePlanar`](Self::SquarePlanar) | 4 | 3 | `stereo_perm` |
 /// | [`TrigonalBipyramidal`](Self::TrigonalBipyramidal) | 5 | 20 | `stereo_perm` |
 /// | [`Octahedral`](Self::Octahedral) | 6 | 30 | `stereo_perm` |
-/// | [`Other`](Self::Other) | — | — | `stereo_perm` |
+/// | [`Allene`](Self::Allene) | 4(来自累积双键**两端**) | 2 | `stereo_perm` |
 ///
 /// 四面体的两种排列直接做成了两个变体,因为"邻居顺序对换一次就翻转"这条
 /// 规则只对它成立(见 [`inverted`](Self::inverted)),下游到处都在用。
@@ -99,9 +99,17 @@ pub enum ChiralTag {
     Cw = 1,
     /// 四面体,`@` —— 逆时针
     Ccw = 2,
-    /// 有立体标记但不属于下列任何一种几何。`@AL`(丙二烯轴手性)归入此类:
-    /// 它的立体信息属于**一根轴**而非一个中心,与配位几何不是一回事。
-    Other = 3,
+    /// 丙二烯型轴手性,`@AL`(等价写法是把 `@` / `@@` 写在丙二烯中心上)。
+    ///
+    /// 它的立体信息属于**一根轴**而非一个中心:四个配体来自累积双键两端的
+    /// 端原子,中心原子自己只有两个邻居。所以它不是四面体
+    /// ([`is_tetrahedral`](Self::is_tetrahedral) 为假)—— 拿中心的两根键去算
+    /// 宇称,换一端起笔就会把分子写反。
+    ///
+    /// 两种排布记在
+    /// [`AtomData::stereo_perm`](crate::AtomData::stereo_perm) 里(1 / 2),
+    /// 相对四个配体的**存储顺序**。
+    Allene = 3,
     /// 平面四方形,`@SP`
     SquarePlanar = 4,
     /// 三角双锥,`@TB`
@@ -321,7 +329,7 @@ mod tests {
             ChiralTag::Unspecified,
             ChiralTag::Cw,
             ChiralTag::Ccw,
-            ChiralTag::Other,
+            ChiralTag::Allene,
             ChiralTag::SquarePlanar,
             ChiralTag::TrigonalBipyramidal,
             ChiralTag::Octahedral,

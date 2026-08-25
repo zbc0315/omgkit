@@ -51,7 +51,7 @@ pub fn cleanup_chirality(mol: &mut MolBuilder) -> usize {
             ChiralTag::TrigonalBipyramidal => geometry_verdict(total_degree, 5, a.stereo_perm, 20),
             ChiralTag::Octahedral => geometry_verdict(total_degree, 6, a.stereo_perm, 30),
             // `@AL` 这类轴手性的几何判据不在本步骤的范围内
-            ChiralTag::Other => continue,
+            ChiralTag::Allene => continue,
         };
 
         match verdict {

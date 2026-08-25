@@ -40,8 +40,9 @@
 //! 彼此分不开,序号换算不唯一,整个丢掉那个标记(丢掉是老实的,瞎写一个
 //! 序号是撒谎)。
 //!
-//! 丙二烯的轴手性(`@AL`)**尚未写出**:它的立体信息属于一根轴而不是一个中心,
-//! 没有多面体排列表可言。
+//! 丙二烯型轴手性(`@AL`)也会写出。它的立体信息属于一根**轴**:四个配体来自
+//! 累积双键两端的端原子,中心自己只有两个邻居 —— 拿中心那两根键去算四面体
+//! 宇称是错的,换一端起笔就把分子写反。换算见 `super::allene_renumber`。
 //!
 //! # 环闭合标号
 //!
@@ -244,6 +245,21 @@ fn build_tree(mol: &MolBuilder, priority: &[u32]) -> Dfs {
     dfs
 }
 
+/// 每个原子是经哪根键被访问到的(片段根为 `None`)。
+///
+/// 丙二烯的宇称要看两个端原子各自的输出键序,而端原子在 DFS 的别处写出 ——
+/// 光有"当前这个原子的 via"不够。
+fn parent_bonds(mol: &MolBuilder, dfs: &Dfs) -> Vec<Option<u32>> {
+    let mut parents = vec![None; mol.num_atoms()];
+    for (a, kids) in dfs.children.iter().enumerate() {
+        for &bond in kids {
+            let child = other_end(mol, bond, a as u32);
+            parents[child as usize] = Some(bond);
+        }
+    }
+    parents
+}
+
 // ---------------------------------------------------------------------------
 // 第二趟:按生成树写字符串
 // ---------------------------------------------------------------------------
@@ -268,6 +284,19 @@ fn emit(mol: &MolBuilder, dfs: &Dfs, style: WriteStyle) -> Written {
     // 键下标 → 已分配的环闭合标号。有值即表示该环已开、等着闭合。
     let mut open_label: Vec<Option<u32>> = vec![None; mol.num_bonds()];
     let mut label_in_use: Vec<bool> = Vec::new();
+
+    // 任意原子的**输出键序**,以及"自身位置"(方括号里的氢落在那儿:
+    // 紧跟前驱原子之后、环闭合之前)。丙二烯要用到两个端原子的顺序,
+    // 而它们在 DFS 的别处才写出 —— 光有"当前原子的 via"不够。
+    let parents = parent_bonds(mol, dfs);
+    let order_at = |a: u32| -> (Vec<u32>, usize) {
+        let via = parents[a as usize];
+        let mut v = Vec::with_capacity(mol.degree(a));
+        v.extend(via);
+        v.extend(dfs.ring_closures[a as usize].iter().copied());
+        v.extend(dfs.children[a as usize].iter().copied());
+        (v, usize::from(via.is_some()))
+    };
 
     let mut stack: Vec<Step> = Vec::new();
     for (i, &root) in dfs.roots.iter().enumerate() {
@@ -300,10 +329,7 @@ fn emit(mol: &MolBuilder, dfs: &Dfs, style: WriteStyle) -> Written {
 
         // 该原子的邻居在输出串里出现的顺序:父键、环闭合键、子键。
         // 立体标记要相对这个顺序写,所以必须在写原子**之前**就定下来。
-        let mut written_bonds: Vec<u32> = Vec::with_capacity(mol.degree(atom));
-        written_bonds.extend(via);
-        written_bonds.extend(dfs.ring_closures[atom as usize].iter().copied());
-        written_bonds.extend(dfs.children[atom as usize].iter().copied());
+        let (written_bonds, _) = order_at(atom);
 
         let tag = output_chiral_tag(
             mol,
@@ -311,6 +337,7 @@ fn emit(mol: &MolBuilder, dfs: &Dfs, style: WriteStyle) -> Written {
             &written_bonds,
             via.is_none(),
             dfs.ring_closures[atom as usize].len(),
+            &order_at,
         );
         write_atom(&mut out, mol, atom, tag, style);
         atom_order.push(atom);
@@ -395,8 +422,27 @@ fn output_chiral_tag(
     written_bonds: &[u32],
     is_fragment_start: bool,
     ring_closures: usize,
+    order_at: &dyn Fn(u32) -> (Vec<u32>, usize),
 ) -> (ChiralTag, u8) {
     let a = mol.atoms()[atom as usize];
+
+    // 丙二烯型轴手性:四个配体来自累积双键两端,中心自己只有两个邻居。
+    // 把序号从存储序换算到本次输出的顺序 —— 规则与解析侧共用
+    // [`super::allene_renumber`],两侧只是喂进不同的键序。
+    //
+    // 换算不了(序号为 0、不是丙二烯中心、某一端凑不出两个配体、端原子带电荷
+    // 算不出氢数)时给 0,由 `write_atom` 整个略过。丢掉是老实的。
+    if a.chiral_tag == ChiralTag::Allene {
+        let perm = super::allene_renumber(
+            mol,
+            atom,
+            a.stereo_perm,
+            &super::stored_order_at(mol),
+            order_at,
+        )
+        .unwrap_or(0);
+        return (a.chiral_tag, perm);
+    }
 
     // 配位几何(`@SP`/`@TB`/`@OH`):把序号从存储序换算到本次输出的顺序。
     //
@@ -660,7 +706,11 @@ fn write_atom(
         ChiralTag::Octahedral if perm != 0 => {
             let _ = write!(out, "@OH{perm}");
         }
-        // 丙二烯轴手性(`@AL`)尚不写出,见 output_chiral_tag
+        // 丙二烯型轴手性。`@AL1` ≡ `@`、`@AL2` ≡ `@@`(实测外部实现),
+        // 这里写明确形式 —— `@` 写在两配位原子上容易被读成四面体。
+        ChiralTag::Allene if perm != 0 => {
+            let _ = write!(out, "@AL{perm}");
+        }
         _ => {}
     }
     match total_hs(&a) {

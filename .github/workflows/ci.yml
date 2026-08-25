@@ -273,6 +273,13 @@ jobs:
       - name: 判官:配位几何的排列分组(与外部实现逐组比)
         run: python harness/check_stereo_perm.py
 
+      # **丙二烯型轴手性的裁判是 Indigo,不是 RDKit。** 后者在这一档上完全没有
+      # 能力:SMILES 读写、FindPotentialStereo、rdCIPLabeler、从 3D 反推、
+      # molblock 往返、带手性的子结构匹配 —— 六条路实测都把 `@AL1` 与 `@AL2`
+      # 当成同一个东西。版本同样钉在 harness/requirements.lock 里,理由写在那儿。
+      - name: 判官:丙二烯轴手性的分组(与 Indigo 逐组比)
+        run: python harness/check_allene.py
+
       # **SMARTS 手性的参照系。** 这一档换 RDKit 版本会**翻结论**:同一批查询,
       # 2022.09.5 与 2025.09.2 给出相反的匹配(`[C@@H](C)(N)O` 在 2025 上匹配
       # `C[C@H](N)O`,在 2022 上匹配它的对映体),而两版对**同一串当 SMILES 读**
