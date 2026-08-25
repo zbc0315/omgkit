@@ -485,6 +485,140 @@ fn square_planar_with_a_ring_closure_on_the_centre() {
     }
 }
 
+/// 缺一个顶点时的序号,**标号由参照实现钉住**。
+///
+/// 方括号里的氢、或者一个空的配位位置,也占多面体的一个顶点,而它不在键序列
+/// 里。它落在哪一位是量出来的(见 `smiles.rs::coordination_ligands`):
+/// "自身位置" —— 紧跟前驱原子之后、环闭合之前。
+///
+/// 这条判据必须由**外部**给第二种写法。自家的写法钉不住标号:插错位置时
+/// 解析与写出两侧会一起错、正好抵消 —— 往返照样恒等,三个序号照样给三串。
+/// 下面每一对里,右边那串是 RDKit 2025.09.2 对左边那个分子给出的规范串,
+/// 它的配体顺序与我方不同,错位在这里就抵消不掉了。
+///
+/// 六族分别压住:空位 / 方括号里的氢、手性原子居首 / 前面有原子、
+/// 中心上有没有环闭合。
+#[test]
+fn coordination_stereo_with_a_missing_vertex_matches_the_reference() {
+    for (family, cases) in [
+        (
+            "空位·平面四方",
+            [
+                ("[Pt@SP1](Cl)(N)O", "[NH2][Pt@SP2]([OH])[Cl]"),
+                ("[Pt@SP2](Cl)(N)O", "[NH2][Pt@SP1]([OH])[Cl]"),
+                ("[Pt@SP3](Cl)(N)O", "[NH2][Pt@SP3]([OH])[Cl]"),
+            ],
+        ),
+        (
+            "空位·三角双锥",
+            [
+                ("[P@TB1](F)(Cl)(Br)I", "F[P@TB9](Cl)(Br)I"),
+                ("[P@TB5](F)(Cl)(Br)I", "F[P@TB13](Cl)(Br)I"),
+                ("[P@TB12](F)(Cl)(Br)I", "F[P@TB4](Cl)(Br)I"),
+            ],
+        ),
+        (
+            "空位·八面体",
+            [
+                (
+                    "[Co@OH1](N)(O)(S)(P)F",
+                    "[NH2][Co@OH2]([OH])([F])([PH2])[SH]",
+                ),
+                (
+                    "[Co@OH11](N)(O)(S)(P)F",
+                    "[NH2][Co@OH24]([OH])([F])([PH2])[SH]",
+                ),
+                (
+                    "[Co@OH20](N)(O)(S)(P)F",
+                    "[NH2][Co@OH12]([OH])([F])([PH2])[SH]",
+                ),
+            ],
+        ),
+        (
+            "方括号里的氢·平面四方",
+            [
+                ("[Pt@SP1H](Cl)(N)O", "[NH2][Pt@SP2H]([OH])[Cl]"),
+                ("[Pt@SP2H](Cl)(N)O", "[NH2][Pt@SP1H]([OH])[Cl]"),
+                ("[Pt@SP3H](Cl)(N)O", "[NH2][Pt@SP3H]([OH])[Cl]"),
+            ],
+        ),
+        (
+            "方括号里的氢·八面体",
+            [
+                (
+                    "[Co@OH1H](N)(O)(S)(P)F",
+                    "[NH2][Co@OH2H]([OH])([F])([PH2])[SH]",
+                ),
+                (
+                    "[Co@OH11H](N)(O)(S)(P)F",
+                    "[NH2][Co@OH24H]([OH])([F])([PH2])[SH]",
+                ),
+                (
+                    "[Co@OH20H](N)(O)(S)(P)F",
+                    "[NH2][Co@OH12H]([OH])([F])([PH2])[SH]",
+                ),
+            ],
+        ),
+        (
+            "前面有原子·八面体",
+            [
+                ("N[Co@OH1](O)(S)(P)F", "[NH2][Co@OH7]([OH])([F])([PH2])[SH]"),
+                (
+                    "N[Co@OH11](O)(S)(P)F",
+                    "[NH2][Co@OH9]([OH])([F])([PH2])[SH]",
+                ),
+                (
+                    "N[Co@OH20](O)(S)(P)F",
+                    "[NH2][Co@OH22]([OH])([F])([PH2])[SH]",
+                ),
+            ],
+        ),
+        (
+            // 环里的两个原子必须不一样。都是碳的话交换它们是这个分子的自同构,
+            // 三种排法只剩两个异构体 —— 而参照实现的规范串在这种情形下**不合并**
+            // (见 `square_planar_with_a_ring_closure_on_the_centre`),
+            // 拿它当"互不相同"的判据会判错。
+            "环闭合·平面四方",
+            [
+                ("[Pt@SP1]1(N)CO1", "[NH2][Pt@SP2]1[CH2][O]1"),
+                ("[Pt@SP2]1(N)CO1", "[NH2][Pt@SP3]1[CH2][O]1"),
+                ("[Pt@SP3]1(N)CO1", "[NH2][Pt@SP1]1[CH2][O]1"),
+            ],
+        ),
+        (
+            "环闭合·八面体",
+            [
+                (
+                    "[Co@OH1]1(N)(P)(S)CO1",
+                    "[NH2][Co@OH5]1([PH2])([SH])[CH2][O]1",
+                ),
+                (
+                    "[Co@OH11]1(N)(P)(S)CO1",
+                    "[NH2][Co@OH24]1([PH2])([SH])[CH2][O]1",
+                ),
+                (
+                    "[Co@OH20]1(N)(P)(S)CO1",
+                    "[NH2][Co@OH29]1([PH2])([SH])[CH2][O]1",
+                ),
+            ],
+        ),
+    ] {
+        let mut seen = std::collections::BTreeSet::new();
+        for (ours, reference) in cases {
+            let a = canonical_smiles(&perceived(ours));
+            assert_eq!(
+                a,
+                canonical_smiles(&perceived(reference)),
+                "{family}:{ours} 与外部实现写的 {reference} 是同一个分子,规范串却不同"
+            );
+            seen.insert(a);
+        }
+        // 少了这一条,一个把序号整个丢光的实现也能过上面那些 —— 三串会塌成一串,
+        // 而参照给的三串同样塌成一串。
+        assert_eq!(seen.len(), 3, "{family}:三种排法塌成了 {} 串", seen.len());
+    }
+}
+
 /// 三角双锥与八面体也一样:环闭合落在中心上时,**书写序 ≠ 存储序**。
 ///
 /// 与上一条同源。第二种写法同样由外部实现给出 —— 语料里只有一个这种形态的

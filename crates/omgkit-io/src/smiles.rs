@@ -943,10 +943,9 @@ impl<'a> Parser<'a> {
     ///
     /// 只有四面体能这样修:它的两种排列互为镜像,一次对换即翻转。
     ///
-    /// 平面四方另走一条路 —— 它的序号说的是"哪两对配体互为反位",换个顺序只是
-    /// 换一个配对(`omgkit_core::square_planar_renumber`),照样能归一到存储序。
-    /// 三角双锥与八面体的序号在邻居重排下按一张尚未实现的查找表变换,
-    /// 只能原样保管,处理方式见下方注释。
+    /// 配位几何(`@SP`/`@TB`/`@OH`)另走一条路:序号在邻居重排下按该多面体的
+    /// 转动群变换,由 [`omgkit_core::polyhedron::renumber`] 归一到存储序,
+    /// 见下方注释。
     fn fix_chirality(&mut self) {
         for rec in &self.chiral {
             let atom = rec.atom;
@@ -984,9 +983,14 @@ impl<'a> Parser<'a> {
             entries.sort_by_key(|e| e.0);
 
             let mut written = Vec::with_capacity(stored.len());
+            // "自身位置":环闭合键从这儿开始写,那个"不是键"的顶点也落在这儿
+            let mut self_pos = 0;
             for (_, bond) in entries {
                 match bond {
-                    None => written.extend(ring_bonds.iter().copied()),
+                    None => {
+                        self_pos = written.len();
+                        written.extend(ring_bonds.iter().copied());
+                    }
                     Some(i) => written.push(i),
                 }
             }
@@ -997,18 +1001,26 @@ impl<'a> Parser<'a> {
             // 配位几何(`@SP`/`@TB`/`@OH`):按该多面体的转动群把序号从书写序
             // 换算到存储序。
             //
-            // **换算不了就原样保管。** 方括号里的氢也占一个配位位置,而它不在
-            // `written` / `stored` 这两个键序列里 —— 配体数与该几何对不上时,
-            // 换算出来的是另一个排法。写出侧用的是同一个条件(见
-            // `write.rs::output_chiral_tag`),两侧因此对齐:换算不了的原子,
-            // 序号原样保管、也不写出去。
+            // 方括号里的氢、或者一个空的配位位置,也占多面体的一个顶点而不在
+            // `written` / `stored` 这两个键序列里。书写序里它落在"自身位置"
+            // (紧跟前驱原子之后、环闭合之前),存储序里按约定排最前 ——
+            // 见 [`coordination_ligands`]。
+            //
+            // **换算不了就原样保管、也不写出去**(缺两个及以上顶点、序号越界)。
+            // 写出侧用的是同一个条件(见 `write.rs::output_chiral_tag`),
+            // 两侧因此对齐。
             if omgkit_core::polyhedron::ligand_count(rec.tag).is_some() {
-                let literal = self.mol.atoms()[atom as usize].stereo_perm;
-                if let Some(p) =
-                    omgkit_core::polyhedron::renumber(rec.tag, literal, &written, &stored)
-                {
-                    if let Some(a) = self.mol.atom_mut(atom) {
-                        a.stereo_perm = p;
+                if let Some(to) = coordination_ligands(&self.mol, atom, rec.tag) {
+                    let mut from = written.clone();
+                    if to.len() == from.len() + 1 {
+                        from.insert(self_pos, VACANT_LIGAND);
+                    }
+                    let literal = self.mol.atoms()[atom as usize].stereo_perm;
+                    if let Some(p) = omgkit_core::polyhedron::renumber(rec.tag, literal, &from, &to)
+                    {
+                        if let Some(a) = self.mol.atom_mut(atom) {
+                            a.stereo_perm = p;
+                        }
                     }
                 }
                 continue;
@@ -1055,6 +1067,37 @@ fn mark_aromatic(bd: &mut BondData) {
     if bd.order == BondOrder::Aromatic {
         bd.flags.insert(omgkit_core::BondFlags::AROMATIC);
     }
+}
+
+/// 配位几何里那个"不是键"的顶点在配体序列里的占位标识。
+///
+/// 取一个不可能出现的键下标即可 —— 它只需要在同一个配体序列里唯一。
+const VACANT_LIGAND: u32 = u32::MAX;
+
+/// 配位几何(`@SP`/`@TB`/`@OH`)的配体序列,**存储序**,而且补上那个
+/// "不是键"的顶点。
+///
+/// 方括号里的氢、或者一个空的配位位置,也占多面体的一个顶点,而它不在键序列
+/// 里。实测 RDKit 2025.09.2:它落在**"自身位置"** —— 紧跟前驱原子之后、
+/// 环闭合之前,与四面体里隐式氢占的是同一个槽。三类几何、三种上下文
+/// (居首 / 前面有原子 / 带环闭合)量出来的都是这一条,别的插入位置全都不合。
+///
+/// 存储序里没有"前驱原子"可言,所以约定把它排在**最前**。约定本身怎么定
+/// 无所谓 —— 只要解析与写出用的是同一份,序号就换算得回来。这个函数就是
+/// 那"同一份":两侧都从这里取配体序列,想不同步都难。
+///
+/// 缺两个及以上顶点时返回 `None`。那时至少有两个顶点在 SMILES 里分不开
+/// (参照实现会把好几个序号并成同一个分子 —— `[Pt@SP1](N)O` 与
+/// `[Pt@SP3](N)O` 是同一个),序号表达不出来,只能整个丢掉标记。
+fn coordination_ligands(mol: &MolBuilder, atom: u32, tag: ChiralTag) -> Option<Vec<u32>> {
+    let n = omgkit_core::polyhedron::ligand_count(tag)?;
+    let mut ligands: Vec<u32> = mol.neighbors(atom).map(|(_, bond)| bond).collect();
+    match n.checked_sub(ligands.len())? {
+        0 => {}
+        1 => ligands.insert(0, VACANT_LIGAND),
+        _ => return None,
+    }
+    Some(ligands)
 }
 
 /// `written` → `storage` 置换的宇称。两者不是同一多重集时返回 `None`。

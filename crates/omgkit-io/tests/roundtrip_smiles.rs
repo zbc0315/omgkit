@@ -75,20 +75,25 @@ fn coordination_stereo_agrees(
     let Some(n) = omgkit_core::polyhedron::ligand_count(a.chiral_tag) else {
         return true;
     };
-    // 配体数不是 4:序号表达不出来(方括号里的氢也占一个位置,而它不在邻居里)。
-    // 这时写出**整个丢掉**这个标记 —— 丢掉是老实的,瞎写一个序号是撒谎。
-    // 所以这里要求的不是"保住",是"丢干净"。语料里两条(5 配体与 1 配体),
-    // RDKit 在这两条上同样整个丢掉;3 配体那一档它保留而我方丢,
-    // 钉在 `square_planar_with_three_ligands_is_dropped`。
-    if before.degree(orig) != n {
+    // 缺两个及以上顶点:序号表达不出来(见
+    // `coordination_stereo_with_two_vertices_missing_is_dropped`)。这时写出
+    // **整个丢掉**这个标记 —— 丢掉是老实的,瞎写一个序号是撒谎。所以这里
+    // 要求的不是"保住",是"丢干净"。
+    let Some(missing) = n.checked_sub(before.degree(orig)).filter(|&m| m <= 1) else {
         return after.atoms()[i].chiral_tag == ChiralTag::Unspecified;
-    }
+    };
     // 两侧各取邻居**原子**(不是键 —— 键下标不跨分子对应),
     // 写出侧的邻居再按 `order` 映回原分子的下标。
-    let from: Vec<u32> = before.neighbors(orig).map(|(n, _)| n).collect();
-    let to: Vec<u32> = after
-        .neighbors(i as u32)
-        .map(|(n, _)| order[n as usize])
+    //
+    // 缺的那个顶点(方括号里的氢,或一个空的配位位置)两侧都按同一个约定
+    // 排在最前 —— 与 `smiles.rs::coordination_ligands` 的存储序约定一致。
+    let phantom = std::iter::repeat(u32::MAX).take(missing);
+    let from: Vec<u32> = phantom
+        .clone()
+        .chain(before.neighbors(orig).map(|(n, _)| n))
+        .collect();
+    let to: Vec<u32> = phantom
+        .chain(after.neighbors(i as u32).map(|(n, _)| order[n as usize]))
         .collect();
     let b = after.atoms()[i];
     omgkit_core::polyhedron::renumber(a.chiral_tag, b.stereo_perm, &to, &from)
@@ -750,39 +755,52 @@ fn axial_allene_stereo_is_not_written_yet() {
     );
 }
 
-/// 配体数与该几何对不上时,写出会**整个丢掉**这个标记。
+/// 缺**两个及以上**顶点时,写出会整个丢掉这个标记。
 ///
-/// 方括号里的氢(或者一个空配位位置)也占一个顶点,而它不在邻居序列里 ——
-/// 少了它,序号换算出来的是另一个排法。所以只在配体数对得上时换算,否则丢掉
-/// 整个标记(丢掉是老实的,瞎写一个序号是撒谎)。解析侧用的是同一个条件,
-/// 两侧对齐。
+/// 多面体的顶点数比配体数多出几个,那几个顶点在 SMILES 里全都落在同一个
+/// 位置("自身位置"),彼此分不开。参照实现照样给一个序号,但那个序号是
+/// 记账的产物、不是分子的性质 —— 实测 RDKit 2025.09.2 把好几个序号并成
+/// 同一个分子:
 ///
-/// 实测 RDKit 2025.09.2:
+/// ```text
+/// [Pt@SP1](N)O  →  [NH2][Pt@SP2][OH]
+/// [Pt@SP3](N)O  →  [NH2][Pt@SP1][OH]
+/// ```
 ///
-/// | 写法 | 配体数 | RDKit 的规范串 | 我方 |
-/// |---|---|---|---|
-/// | `[Pt@SP1](Cl)(Cl)(N)(N)Cl` | 5(SP 要 4) | `[NH2][Pt]([NH2])([Cl])([Cl])[Cl]` 丢 | 丢 |
-/// | `[Pt@SP1]Cl` | 1 | `[Cl][Pt]` 丢 | 丢 |
-/// | `[Pt@SP1](Cl)(Cl)N` | 3 | `[NH2][Pt@SP1]([Cl])[Cl]` **保留** | **丢** |
-/// | `[Co@OH5](N)(O)(S)(P)C` | 5(OH 要 6) | `[CH3][Co@OH19](...)` **保留** | **丢** |
+/// 而把三个序号 × 两种列出顺序共 6 种写法交给它归类,得到的组里序号是
+/// `[1,3]`、`[1,3]`、`[2]` —— 序号 1 与 3 指的是同一个分子。这时"换算成
+/// 另一个列出顺序下的序号"不是唯一的,写出去就是撒谎,所以整个丢掉。
 ///
-/// 后两行是**已知缺口**:配体数比几何少一个时,剩下那个顶点是隐式氢或空位,
-/// 要像四面体那条 degree==3 补偿规则一样单独定位置约定。眼下没做 ——
-/// 写在这里,不假装守住了。
+/// 配体数**多于**几何顶点数时同样丢掉。参照实现在这一档写出的是不带序号的
+/// `[Pt@SP]`,而那种写法读回来是错的(读的一方不知道配体怎么排)。
+///
+/// | 写法 | 键数 | 方括号里的氢 | 顶点差 | RDKit | 我方 |
+/// |---|---|---|---|---|---|
+/// | `[Pt@SP1](N)O` | 2 | 0 | 缺 2 | `[Pt@SP2]` 保留 | 丢 |
+/// | `[Pt@SP1]Cl` | 1 | 0 | 缺 3 | `[Cl][Pt]` 丢 | 丢 |
+/// | `[Co@OH5](N)(O)(S)F` | 4 | 0 | 缺 2 | `[Co@OH4]` 保留 | 丢 |
+/// | `[Co@OH5H](N)(O)(S)P` | 4 | 1 | 缺 2 | `[Co@OH4H]` 保留 | 丢 |
+/// | `[Pt@SP1](Cl)(Cl)(N)(N)Cl` | 5 | 0 | 多 1 | `[Pt@SP]` 无序号 | 丢 |
+///
+/// 缺**一个**顶点那一档已经写得出来了,见
+/// [`coordination_stereo_round_trips`] 与
+/// `canonical_invariance.rs::coordination_stereo_with_a_missing_vertex_matches_the_reference`。
 #[test]
-fn coordination_stereo_with_a_ligand_count_mismatch_is_dropped() {
-    for (smi, ligands) in [
-        ("[Pt@SP1](Cl)(Cl)(N)(N)Cl", 5),
+fn coordination_stereo_with_two_vertices_missing_is_dropped() {
+    for (smi, bonds) in [
+        ("[Pt@SP1](N)O", 2),
         ("[Pt@SP1]Cl", 1),
-        ("[Pt@SP1](Cl)(Cl)N", 3),
-        ("[Co@OH5](N)(O)(S)(P)C", 5),
+        ("[Co@OH5](N)(O)(S)F", 4),
+        // 一个方括号里的氢 + 一个空位:两个顶点,而它们在书写里落在同一处
+        ("[Co@OH5H](N)(O)(S)P", 4),
+        ("[Pt@SP1](Cl)(Cl)(N)(N)Cl", 5),
     ] {
         let m = smiles::parse(smi).unwrap_or_else(|e| panic!("{smi}: {}", e.render()));
-        assert_eq!(m.degree(0), ligands, "{smi}:配体数与预期不符");
+        assert_eq!(m.degree(0), bonds, "{smi}:键数与预期不符");
         let w = smiles::write(&m).smiles;
         assert!(
             !w.contains('@'),
-            "{smi} 写成了 {w} —— 配体数与该几何对不上,序号换算不了,应当整个丢掉"
+            "{smi} 写成了 {w} —— 缺的顶点不止一个,序号换算不唯一,应当整个丢掉"
         );
     }
 }
@@ -797,6 +815,7 @@ fn coordination_stereo_with_a_ligand_count_mismatch_is_dropped() {
 #[test]
 fn coordination_stereo_round_trips() {
     for (tag, count, make) in [
+        // 配体数与几何相等
         (
             "SP",
             3usize,
@@ -804,6 +823,24 @@ fn coordination_stereo_round_trips() {
         ),
         ("TB", 20, |i| format!("[P@TB{i}](F)(Cl)(Br)(I)S")),
         ("OH", 30, |i| format!("[Co@OH{i}](F)(Cl)(Br)(I)(S)P")),
+        // 缺一个顶点:一个空的配位位置
+        ("SP", 3, |i| format!("[Pt@SP{i}](Cl)(Br)N")),
+        ("TB", 20, |i| format!("[P@TB{i}](F)(Cl)(Br)I")),
+        ("OH", 30, |i| format!("[Co@OH{i}](F)(Cl)(Br)(I)S")),
+        // 缺一个顶点:方括号里写了氢
+        ("SP", 3, |i| format!("[Pt@SP{i}H](Cl)(Br)N")),
+        ("TB", 20, |i| format!("[P@TB{i}H](F)(Cl)(Br)I")),
+        ("OH", 30, |i| format!("[Co@OH{i}H](F)(Cl)(Br)(I)S")),
+        // 缺一个顶点,而且中心上有环闭合 —— 那个顶点排在环闭合**之前**
+        ("SP", 3, |i| format!("[Pt@SP{i}]1(N)CC1")),
+        ("OH", 30, |i| format!("[Co@OH{i}]1(F)(Cl)(Br)CC1")),
+        // 缺一个顶点,而且**中心不是首原子** —— 那个顶点排在前驱原子之后。
+        // 忠实写出一律从原子 0 起笔,上面几族的中心恰好就是原子 0,
+        // 于是"前面有原子"那条分支一次都没跑过。变异实测:把写出侧的插入
+        // 位置一律改成 0,上面几族全绿(规范判据那边两侧一起错、正好抵消)。
+        ("SP", 3, |i| format!("N[Pt@SP{i}](Cl)Br")),
+        ("TB", 20, |i| format!("F[P@TB{i}](Cl)(Br)I")),
+        ("OH", 30, |i| format!("F[Co@OH{i}](Cl)(Br)(I)S")),
     ] {
         let mut seen = std::collections::BTreeSet::new();
         for i in 1..=count {

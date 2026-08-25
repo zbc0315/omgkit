@@ -34,8 +34,11 @@
 //!
 //! 配位几何(`@SP`/`@TB`/`@OH`)会写出。序号是相对"配体按什么顺序列出"的,
 //! 所以要按该多面体的转动群从存储序换算到本次输出的顺序 ——
-//! 见 [`omgkit_core::polyhedron::renumber`]。只在配体数与该几何对得上时换算得了,
-//! 否则整个丢掉那个标记(丢掉是老实的,瞎写一个序号是撒谎)。
+//! 见 [`omgkit_core::polyhedron::renumber`]。方括号里的氢、或者一个空的配位
+//! 位置,也占一个顶点而不在键序列里;它落在"自身位置",两侧的配体序列由
+//! `smiles::coordination_ligands` 统一补出来。缺两个及以上顶点时那几个顶点
+//! 彼此分不开,序号换算不唯一,整个丢掉那个标记(丢掉是老实的,瞎写一个
+//! 序号是撒谎)。
 //!
 //! 丙二烯的轴手性(`@AL`)**尚未写出**:它的立体信息属于一根轴而不是一个中心,
 //! 没有多面体排列表可言。
@@ -397,14 +400,23 @@ fn output_chiral_tag(
 
     // 配位几何(`@SP`/`@TB`/`@OH`):把序号从存储序换算到本次输出的顺序。
     //
-    // 换算不了(配体数与该几何对不上、序号越界)时写出**不带序号的类别**是不行的
+    // 方括号里的氢、或者一个空的配位位置,也占一个顶点而不在键序列里:输出串里
+    // 它落在"自身位置"(紧跟前驱原子之后、环闭合之前 —— 方括号本来就写在那儿),
+    // 存储序里排最前,见 [`super::coordination_ligands`]。
+    //
+    // 换算不了(缺两个及以上顶点、序号越界)时写出**不带序号的类别**是不行的
     // —— `[Pt@SP]` 读回来是错的。所以给 0,由 `write_atom` 整个略过。
     // 解析侧用的是同一个条件(见 `fix_chirality`),两侧因此对齐。
     if omgkit_core::polyhedron::ligand_count(a.chiral_tag).is_some() {
-        let stored: Vec<u32> = mol.neighbors(atom).map(|(_, bond)| bond).collect();
-        let perm =
-            omgkit_core::polyhedron::renumber(a.chiral_tag, a.stereo_perm, &stored, written_bonds)
-                .unwrap_or(0);
+        let perm = super::coordination_ligands(mol, atom, a.chiral_tag)
+            .and_then(|stored| {
+                let mut written = written_bonds.to_vec();
+                if stored.len() == written.len() + 1 {
+                    written.insert(usize::from(!is_fragment_start), super::VACANT_LIGAND);
+                }
+                omgkit_core::polyhedron::renumber(a.chiral_tag, a.stereo_perm, &stored, &written)
+            })
+            .unwrap_or(0);
         return (a.chiral_tag, perm);
     }
 
