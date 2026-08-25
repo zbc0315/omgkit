@@ -994,15 +994,19 @@ impl<'a> Parser<'a> {
                 continue; // 结构异常,已在别处报错
             }
 
-            // 平面四方:序号说的是"哪两对配体互为反位",把它从书写序换算到存储序。
+            // 配位几何(`@SP`/`@TB`/`@OH`):按该多面体的转动群把序号从书写序
+            // 换算到存储序。
             //
-            // **只在四个配体都是真原子时换算。** 方括号里的氢也占一个配位位置,
-            // 而它不在 `written` / `stored` 这两个键序列里 —— 少了它,换算出来
-            // 的是另一个划分。写出侧用的是同一个条件(度数为 4),两侧因此对齐:
-            // 换算不了的原子,序号原样保管、也不写出去。
-            if rec.tag == ChiralTag::SquarePlanar {
+            // **换算不了就原样保管。** 方括号里的氢也占一个配位位置,而它不在
+            // `written` / `stored` 这两个键序列里 —— 配体数与该几何对不上时,
+            // 换算出来的是另一个排法。写出侧用的是同一个条件(见
+            // `write.rs::output_chiral_tag`),两侧因此对齐:换算不了的原子,
+            // 序号原样保管、也不写出去。
+            if omgkit_core::polyhedron::ligand_count(rec.tag).is_some() {
                 let literal = self.mol.atoms()[atom as usize].stereo_perm;
-                if let Some(p) = omgkit_core::square_planar_renumber(literal, &written, &stored) {
+                if let Some(p) =
+                    omgkit_core::polyhedron::renumber(rec.tag, literal, &written, &stored)
+                {
                     if let Some(a) = self.mol.atom_mut(atom) {
                         a.stereo_perm = p;
                     }
@@ -1011,10 +1015,9 @@ impl<'a> Parser<'a> {
             }
 
             if !rec.tag.is_tetrahedral() {
-                // 三角双锥与八面体的排列序号换参考系要走查找表(见
-                // `AtomData::stereo_perm` 的文档),不是一次奇偶翻转、也不是
-                // 一个配对能表达的。这里不动它 —— 它保存的是**书写时的字面值**,
-                // 而字面值不会因为存储序变了就变错。
+                // 丙二烯轴手性(`@AL`)的立体信息属于一根轴而不是一个中心,
+                // 没有多面体排列表可言。这里不动它 —— 它保存的是**书写时的
+                // 字面值**,而字面值不会因为存储序变了就变错。
                 continue;
             }
 
@@ -1421,20 +1424,26 @@ mod tests {
         assert_eq!(m.atoms()[1].stereo_perm, 1);
     }
 
-    /// 排列序号原样保管书写值,**不**随邻居重排而改动。
+    /// 排列序号**归一到存储序**;配体数与该几何对不上时原样保管。
     ///
-    /// 换参照系要走查找表(见 `AtomData::stereo_perm`),属于 L6。在那之前
-    /// 本字段的语义就是"作者写了几",这个语义不会因为存储序变了而失效。
+    /// 序号的含义相对"配体按什么顺序列出",而环闭合键是闭合那一刻才建的、
+    /// 排在存储序末尾 —— 书写序与存储序就此岔开。不归一的话,写出侧按存储序
+    /// 解读这个数字,写出来的是另一个分子。
     #[test]
-    fn coordination_permutation_keeps_the_written_literal() {
-        // 环闭合键被追加到键表末尾,故存储序 ≠ 书写序
+    fn coordination_permutation_is_normalised_to_storage_order() {
+        // 环闭合键被追加到键表末尾,故存储序 ≠ 书写序:字面值 5 归一成 11
         let m = parse_ok("[Co@OH5]1(N)(O)(S)(P)CCC1");
         let a = m.atoms()[0];
         assert_eq!(a.chiral_tag, ChiralTag::Octahedral, "类别要保住");
-        assert_eq!(a.stereo_perm, 5, "序号是字面值,不因重排而变");
+        assert_eq!(a.stereo_perm, 11, "书写序 ≠ 存储序,序号要跟着换");
 
-        let m = parse_ok("[Co@OH5](N)(O)(S)(P)C");
+        // 六个配体、书写序 = 存储序:归一是恒等
+        let m = parse_ok("[Co@OH5](N)(O)(S)(P)(C)F");
         assert_eq!(m.atoms()[0].stereo_perm, 5);
+
+        // 只有五个配体 —— 与八面体对不上,换算不了,原样保管
+        let m = parse_ok("[Co@OH5](N)(O)(S)(P)C");
+        assert_eq!(m.atoms()[0].stereo_perm, 5, "对不上就原样保管");
     }
 
     /// 排列序号超出该几何的取值范围时报错。

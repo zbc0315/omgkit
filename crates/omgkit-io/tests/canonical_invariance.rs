@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use omgkit_core::{BondData, ChiralTag, MolBuilder};
+use omgkit_core::{BondData, MolBuilder};
 use omgkit_io::{canon, smiles};
 
 fn corpus(name: &str) -> PathBuf {
@@ -114,13 +114,15 @@ fn renumber(mol: &MolBuilder, atom_perm: &[u32], bond_perm: &[usize]) -> MolBuil
             }
             continue;
         }
-        // 平面四方的序号同样是**相对存储序**的,照抄就是换了个分子 ——
-        // 与上面那条四面体的规则同源,只是变换不是"翻一下"而是换一个配对。
-        if a.chiral_tag == ChiralTag::SquarePlanar {
+        // 配位几何的序号同样是**相对存储序**的,照抄就是换了个分子 ——
+        // 与上面那条四面体的规则同源,只是变换不是"翻一下"而是按该多面体的
+        // 转动群换一个排法。
+        if omgkit_core::polyhedron::ligand_count(a.chiral_tag).is_some() {
             let old_ids: Vec<u32> = old_seq.iter().map(|&b| b as u32).collect();
             let new_ids: Vec<u32> = new_seq.iter().map(|&b| b as u32).collect();
-            let p = omgkit_core::square_planar_renumber(a.stereo_perm, &old_ids, &new_ids)
-                .unwrap_or(a.stereo_perm);
+            let p =
+                omgkit_core::polyhedron::renumber(a.chiral_tag, a.stereo_perm, &old_ids, &new_ids)
+                    .unwrap_or(a.stereo_perm);
             out.atom_mut(new_a).expect("原子存在").stereo_perm = p;
         }
     }
@@ -481,6 +483,43 @@ fn square_planar_with_a_ring_closure_on_the_centre() {
             "{ours} 与外部实现写的 {reference} 是同一个分子,规范串却不同"
         );
     }
+}
+
+/// 三角双锥与八面体也一样:环闭合落在中心上时,**书写序 ≠ 存储序**。
+///
+/// 与上一条同源。第二种写法同样由外部实现给出 —— 语料里只有一个这种形态的
+/// 分子(`[Co@OH5]1(N)(O)(S)(P)CCC1`,由 `differential_l3.rs` 覆盖),
+/// 三角双锥一个都没有。
+#[test]
+fn coordination_stereo_with_a_ring_closure_matches_the_reference() {
+    for (ours, reference) in [
+        // 三角双锥
+        ("[P@TB1]1(F)(Cl)(Br)CC1", "F[P@TB9]1(Cl)(Br)CC1"),
+        ("[P@TB5]1(F)(Cl)(Br)CC1", "F[P@TB13]1(Cl)(Br)CC1"),
+        ("[P@TB12]1(F)(Cl)(Br)CC1", "F[P@TB4]1(Cl)(Br)CC1"),
+        // 八面体
+        (
+            "[Co@OH11]1(N)(O)(S)(P)CCC1",
+            "[NH2][Co@OH21]1([OH])([PH2])([SH])[CH2]C[CH2]1",
+        ),
+        (
+            "[Co@OH20]1(N)(O)(S)(P)CCC1",
+            "[NH2][Co@OH8]1([OH])([PH2])([SH])[CH2]C[CH2]1",
+        ),
+    ] {
+        assert_eq!(
+            canonical_smiles(&perceived(ours)),
+            canonical_smiles(&perceived(reference)),
+            "{ours} 与外部实现写的 {reference} 是同一个分子,规范串却不同"
+        );
+    }
+    // 三个三角双锥的排法互不相同 —— 少了这一条,一个把序号丢光的实现也能过上面那些
+    let a = canonical_smiles(&perceived("[P@TB1]1(F)(Cl)(Br)CC1"));
+    let b = canonical_smiles(&perceived("[P@TB5]1(F)(Cl)(Br)CC1"));
+    let c = canonical_smiles(&perceived("[P@TB12]1(F)(Cl)(Br)CC1"));
+    assert_ne!(a, b);
+    assert_ne!(b, c);
+    assert_ne!(a, c);
 }
 
 /// 不同的分子不能塌到同一个规范串。

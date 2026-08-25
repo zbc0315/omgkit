@@ -47,6 +47,7 @@ pub mod batch;
 pub mod builder;
 pub mod element;
 pub mod error;
+pub mod polyhedron;
 pub mod types;
 pub mod valence;
 pub mod view;
@@ -58,7 +59,6 @@ pub use builder::{AtomData, BondData, BondMut, MolBuilder, Neighbors};
 pub use element::Element;
 pub use error::{Error, Result};
 pub use types::{
-    square_planar_renumber, AtomFlags, BondDirection, BondFlags, BondOrder, BondStereo, ChiralTag,
-    Hybridization, SQUARE_PLANAR_TRANS,
+    AtomFlags, BondDirection, BondFlags, BondOrder, BondStereo, ChiralTag, Hybridization,
 };
 pub use view::MolView;

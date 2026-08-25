@@ -32,12 +32,13 @@
 //! 而 DFS 从哪一端进入这条键不受存储顺序约束,所以写出时要按遍历方向换算
 //! (见 [`bond_symbol`])。少了这次换算,顺式会写成反式。
 //!
-//! 平面四方(`@SP`)会写出:它的序号说的是“按列出顺序哪两对配体互为反位”,
-//! 换个顺序只是换一个配对,不需要查找表。换算见
-//! [`omgkit_core::square_planar_renumber`];只在恰好 4 个邻居时换算得了,
+//! 配位几何(`@SP`/`@TB`/`@OH`)会写出。序号是相对"配体按什么顺序列出"的,
+//! 所以要按该多面体的转动群从存储序换算到本次输出的顺序 ——
+//! 见 [`omgkit_core::polyhedron::renumber`]。只在配体数与该几何对得上时换算得了,
 //! 否则整个丢掉那个标记(丢掉是老实的,瞎写一个序号是撒谎)。
 //!
-//! 三角双锥与八面体(`@TB`/`@OH`)**尚未写出** —— 那要一张排列换算表,属于 L6。
+//! 丙二烯的轴手性(`@AL`)**尚未写出**:它的立体信息属于一根轴而不是一个中心,
+//! 没有多面体排列表可言。
 //!
 //! # 环闭合标号
 //!
@@ -394,16 +395,17 @@ fn output_chiral_tag(
 ) -> (ChiralTag, u8) {
     let a = mol.atoms()[atom as usize];
 
-    // 平面四方:序号说的是"哪两对配体互为反位",从存储序换算到本次输出的顺序。
+    // 配位几何(`@SP`/`@TB`/`@OH`):把序号从存储序换算到本次输出的顺序。
     //
-    // 换算不了(度数不是 4、序号不在 1..=3)时写出**不带序号的类别**是不行的 ——
-    // `[Pt@SP]` 读回来是错的。所以给 0,由 `write_atom` 整个略过。
+    // 换算不了(配体数与该几何对不上、序号越界)时写出**不带序号的类别**是不行的
+    // —— `[Pt@SP]` 读回来是错的。所以给 0,由 `write_atom` 整个略过。
     // 解析侧用的是同一个条件(见 `fix_chirality`),两侧因此对齐。
-    if a.chiral_tag == ChiralTag::SquarePlanar {
+    if omgkit_core::polyhedron::ligand_count(a.chiral_tag).is_some() {
         let stored: Vec<u32> = mol.neighbors(atom).map(|(_, bond)| bond).collect();
         let perm =
-            omgkit_core::square_planar_renumber(a.stereo_perm, &stored, written_bonds).unwrap_or(0);
-        return (ChiralTag::SquarePlanar, perm);
+            omgkit_core::polyhedron::renumber(a.chiral_tag, a.stereo_perm, &stored, written_bonds)
+                .unwrap_or(0);
+        return (a.chiral_tag, perm);
     }
 
     if !a.chiral_tag.is_tetrahedral() {
@@ -640,7 +642,13 @@ fn write_atom(
         ChiralTag::SquarePlanar if perm != 0 => {
             let _ = write!(out, "@SP{perm}");
         }
-        // 三角双锥、八面体与丙二烯轴手性尚不写出,见 output_chiral_tag
+        ChiralTag::TrigonalBipyramidal if perm != 0 => {
+            let _ = write!(out, "@TB{perm}");
+        }
+        ChiralTag::Octahedral if perm != 0 => {
+            let _ = write!(out, "@OH{perm}");
+        }
+        // 丙二烯轴手性(`@AL`)尚不写出,见 output_chiral_tag
         _ => {}
     }
     match total_hs(&a) {

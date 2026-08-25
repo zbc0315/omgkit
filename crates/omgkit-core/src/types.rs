@@ -81,8 +81,8 @@ impl BondOrder {
 ///
 /// 四面体的两种排列直接做成了两个变体,因为"邻居顺序对换一次就翻转"这条
 /// 规则只对它成立(见 [`inverted`](Self::inverted)),下游到处都在用。
-/// 其余类别的排列在邻居重排下的变换不能用一个布尔位表达:平面四方是"换一个
-/// 反位配对"([`square_planar_renumber`]),三角双锥与八面体是一张查找表。
+/// 其余类别的排列在邻居重排下的变换不能用一个布尔位表达,要连同序号一起按
+/// 该多面体的转动群换算,见 [`crate::polyhedron`]。
 ///
 /// # 四面体两个变体的含义
 ///
@@ -116,8 +116,7 @@ impl ChiralTag {
     /// 只有四面体会变 —— 其余类别的排列序号在邻居重排下不是一个可以就地翻转的
     /// 布尔量,故原样返回。这些类别的重排要连同
     /// [`AtomData::stereo_perm`](crate::AtomData::stereo_perm) 一起处理:
-    /// 平面四方用 [`square_planar_renumber`]
-    /// (换一个反位配对即可),三角双锥与八面体要走一张尚未实现的查找表。
+    /// 换算见 [`crate::polyhedron::renumber`]。
     #[must_use]
     pub fn inverted(self) -> Self {
         match self {
@@ -132,63 +131,6 @@ impl ChiralTag {
     pub fn is_tetrahedral(self) -> bool {
         matches!(self, Self::Cw | Self::Ccw)
     }
-}
-
-/// `@SP` 的三个排列序号,各自说的是**按列出顺序哪两对配体互为反位**(trans)。
-///
-/// 下标 0/1/2 对应 `@SP1`/`@SP2`/`@SP3`。
-///
-/// # 这张表是量出来的,不是照着记忆写的
-///
-/// 拿 RDKit 2025.09.2 穷举:`[Pt@SPn](a)(b)(c)d`,四个互不相同的配体,
-/// 24 种列出顺序 × 3 个序号 = **72 种写法**,规范化之后恰好落成 **3 个分子**、
-/// 每个 24 种写法。而"哪两对互为反位"这个量在每一组内恒定、组间互不相同 ——
-/// 72 种写法**零反例**。
-///
-/// 也就是说平面四方的立体信息就是**一个把四个配体分成两对反位的划分**。
-/// 四个东西分成两对无序的对子恰好有 3 种分法,这就是 `@SP` 只有三个序号的原因;
-/// 它不带手性(方形的镜像还是它自己),所以没有 `@`/`@@` 那样的正反之分。
-pub const SQUARE_PLANAR_TRANS: [[(usize, usize); 2]; 3] =
-    [[(0, 2), (1, 3)], [(0, 1), (2, 3)], [(0, 3), (1, 2)]];
-
-/// 按 `ligands` 的顺序把 `@SP` 的序号翻译成"哪两对互为反位",归一后返回。
-///
-/// 归一 = 每对内部排序、两对之间再排序,于是同一个划分只有一种表示。
-fn square_planar_pairing(perm: u8, ligands: &[u32]) -> Option<[[u32; 2]; 2]> {
-    let idx = usize::from(perm).checked_sub(1)?;
-    let pairs = SQUARE_PLANAR_TRANS.get(idx)?;
-    let mut out = [[0u32; 2]; 2];
-    for (k, &(i, j)) in pairs.iter().enumerate() {
-        let (a, b) = (*ligands.get(i)?, *ligands.get(j)?);
-        out[k] = if a <= b { [a, b] } else { [b, a] };
-    }
-    out.sort_unstable();
-    Some(out)
-}
-
-/// 把 `@SP` 的排列序号从一种配体顺序换算到另一种。
-///
-/// `from` / `to` 是同一组配体的两种排列(用什么标识都行 —— 键下标、原子下标,
-/// 只要在这一组里唯一)。返回 `to` 那个顺序下表达同一个分子的序号。
-///
-/// # 为什么这件事必须做
-///
-/// 序号是**相对列出顺序**的,而列出顺序在解析(书写序 → 存储序)与写出
-/// (存储序 → 输出序)两处都会变。不换算就等于换了个分子:实测
-/// `[Pt@SP1](Cl)(Cl)(N)N` 与 `[Pt@SP3](Cl)(Cl)(N)N` 是顺铂与反铂,
-/// 一个降压一个抗癌 —— 序号照抄会把两者搞混。
-///
-/// # 返回 `None` 的情形
-///
-/// 序号不在 1..=3、两侧配体数不是 4、或者两侧不是同一组配体。调用方应当
-/// 把这几种都当作"这个标记表达不出来",而不是猜一个值。
-#[must_use]
-pub fn square_planar_renumber(perm: u8, from: &[u32], to: &[u32]) -> Option<u8> {
-    if from.len() != 4 || to.len() != 4 {
-        return None;
-    }
-    let want = square_planar_pairing(perm, from)?;
-    (1..=3u8).find(|&cand| square_planar_pairing(cand, to) == Some(want))
 }
 
 /// SMILES 中的方向键(`/` 与 `\`),用于表达双键顺反。
@@ -423,97 +365,5 @@ mod tests {
         assert!(f.contains(AtomFlags::NO_IMPLICIT));
         f.set(AtomFlags::NO_IMPLICIT, false);
         assert!(!f.contains(AtomFlags::NO_IMPLICIT));
-    }
-
-    /// 换算必须**保住"哪两对互为反位"这件事** —— 24 种配体顺序逐个验。
-    ///
-    /// 这条判据的形状与量出这张表时用的一模一样:RDKit 上 72 种写法归成 3 个
-    /// 分子、零反例;这里是同一个性质的本地版本,不需要 RDKit。
-    #[test]
-    fn 平面四方换算保住反位配对() {
-        fn pairing(perm: u8, l: &[u32; 4]) -> Vec<[u32; 2]> {
-            SQUARE_PLANAR_TRANS[usize::from(perm) - 1]
-                .iter()
-                .map(|&(i, j)| {
-                    let (a, b) = (l[i], l[j]);
-                    if a <= b {
-                        [a, b]
-                    } else {
-                        [b, a]
-                    }
-                })
-                .collect::<Vec<_>>()
-        }
-        let from = [10u32, 20, 30, 40];
-        // 24 种排列
-        let mut orders = Vec::new();
-        for a in 0..4 {
-            for b in 0..4 {
-                for c in 0..4 {
-                    for d in 0..4 {
-                        if [a, b, c, d]
-                            .iter()
-                            .collect::<std::collections::BTreeSet<_>>()
-                            .len()
-                            == 4
-                        {
-                            orders.push([from[a], from[b], from[c], from[d]]);
-                        }
-                    }
-                }
-            }
-        }
-        assert_eq!(orders.len(), 24);
-        for perm in 1..=3u8 {
-            let mut want = pairing(perm, &from);
-            want.sort_unstable();
-            for to in &orders {
-                let got_perm = square_planar_renumber(perm, &from, to)
-                    .unwrap_or_else(|| panic!("{perm} 在 {to:?} 上换算不出来"));
-                let mut got = pairing(got_perm, to);
-                got.sort_unstable();
-                assert_eq!(
-                    got, want,
-                    "序号 {perm} 换到顺序 {to:?} 得到 {got_perm},配对变了"
-                );
-            }
-        }
-    }
-
-    /// 同一个顺序换到自己,序号不变;三个序号互不相同。
-    #[test]
-    fn 平面四方的三个序号互不相同() {
-        let l = [1u32, 2, 3, 4];
-        for perm in 1..=3u8 {
-            assert_eq!(square_planar_renumber(perm, &l, &l), Some(perm));
-        }
-        // 交换列出顺序里的第 2、3 个配体。反位配对不变,序号跟着换:
-        // SP1(反位 1-3、2-4)在新顺序下写作 SP2,SP2 写作 SP1,SP3 不动。
-        let swapped = [1u32, 3, 2, 4];
-        assert_eq!(square_planar_renumber(1, &l, &swapped), Some(2));
-        assert_eq!(square_planar_renumber(2, &l, &swapped), Some(1));
-        assert_eq!(square_planar_renumber(3, &l, &swapped), Some(3));
-    }
-
-    /// 表达不出来的输入一律给 `None` —— 绝不猜一个值。
-    #[test]
-    fn 平面四方换算不了时不猜() {
-        let l = [1u32, 2, 3, 4];
-        assert_eq!(
-            square_planar_renumber(0, &l, &l),
-            None,
-            "序号 0 不是合法排法"
-        );
-        assert_eq!(square_planar_renumber(4, &l, &l), None, "序号只到 3");
-        assert_eq!(
-            square_planar_renumber(1, &l[..3], &l[..3]),
-            None,
-            "配体数不是 4"
-        );
-        assert_eq!(
-            square_planar_renumber(1, &l, &[1, 2, 3, 5]),
-            None,
-            "两侧不是同一组配体"
-        );
     }
 }

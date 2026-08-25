@@ -265,6 +265,14 @@ jobs:
       - name: 判官:规范化的自指不变量(不动点 + 幂等)
         run: python harness/check_canonical_fixpoint.py harness/corpus/large.smi
 
+      # **配位几何(`@SP`/`@TB`/`@OH`)的排列表每次重新量一遍。**
+      # `crates/omgkit-core/src/polyhedron.rs` 里那三张表是从 RDKit 穷举量出来的
+      # (72 / 2400 / 21600 种写法),进了源码之后就没有任何东西再核对它 ——
+      # 这一条把"量"这件事本身放进 CI。比的是**分组**(哪些写法落到同一个分子)
+      # 而不是字符串:两个实现的规范串本来就不一样,该一致的是谁和谁同分子。
+      - name: 判官:配位几何的排列分组(与外部实现逐组比)
+        run: python harness/check_stereo_perm.py
+
       # **SMARTS 手性的参照系。** 这一档换 RDKit 版本会**翻结论**:同一批查询,
       # 2022.09.5 与 2025.09.2 给出相反的匹配(`[C@@H](C)(N)O` 在 2025 上匹配
       # `C[C@H](N)O`,在 2022 上匹配它的对映体),而两版对**同一串当 SMILES 读**
