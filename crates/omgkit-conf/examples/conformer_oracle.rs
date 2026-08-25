@@ -81,7 +81,7 @@ const MAX_UNREAD: u64 = 0;
 /// 精修之后手性号正确的比例下限。
 ///
 /// 立体化学错了分子就是错的,不是"差一点",所以这是**硬不变量:1.0**。
-/// 先前设 0.90,而实测早已是 100.0% —— 247 个中心里 24 个翻号都拦不住。
+/// 先前设 0.90,而实测早已是 100.0% —— 248 个中心里 24 个翻号都拦不住。
 ///
 /// # 但要清楚这一条量的是什么
 ///
@@ -345,13 +345,7 @@ fn main() {
     println!(
         "  连接表建不起来/净化失败 {n_build_fail} 个(上限 {MAX_BUILD_FAIL});\
          写回顺反 {stereo_applied} 根;这份基准的键元组带顺反列:{}",
-        if has_stereo_col {
-            "是"
-        } else {
-            "**否** —— 这条判官在带 E/Z 的分子上看不见顺反。\
-             实测 `smoke.chirality.jsonl` 的 150 个分子里 23 个带顺反、共 28 根双键;\
-             `smoke.lonepair.jsonl` 的 15 个一根都没有(见 shared/baseline_mol.rs)"
-        }
+        if has_stereo_col { "是" } else { "**否**" }
     );
     println!(
         "判官:端到端构型,基准 {n_lines} 行,真正量到 {n_mol} 个(生成失败 {n_fail},没读进来 {unread})"
@@ -400,6 +394,20 @@ fn main() {
     );
 
     let mut fatal = false;
+    // **顺反列必须在。** 这不是诊断,是闸:`dump_chirality.py` 起初不导这一列,
+    // 于是 `smoke.chirality.jsonl` 里 23 个带 E/Z 的分子(共 28 根双键)在这条
+    // 判官眼里是**没有顺反**的分子 —— 界矩阵少了解 1-4 顺反析取的依据,
+    // 嵌出来的顺反是随机的,而这条判官看不出区别,只是界更松。
+    //
+    // 现在四条判官读的全部基准都是 6 列。列没了,只可能是拿旧脚本重导过 ——
+    // 那正是 `61b8d58` 干过的事(见 shared/baseline_mol.rs)。
+    if !has_stereo_col {
+        eprintln!(
+            "\n这份基准的键元组**没有顺反列** —— 带 E/Z 的分子进来会被当成没有\n\
+             顺反的分子,而这条判官看不出区别。拿当前的 dump 脚本重导基准。"
+        );
+        fatal = true;
+    }
     if n_build_fail > MAX_BUILD_FAIL {
         eprintln!(
             "\n有 {n_build_fail} 个分子连接表建不起来或净化失败(上限 {MAX_BUILD_FAIL})\

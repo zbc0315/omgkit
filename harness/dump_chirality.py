@@ -228,6 +228,11 @@ def main() -> int:
             n_centers += len(centers)
             n_three += sum(1 for c in centers if c["three_coordinate"])
 
+            # **顺反也要导 —— 六列,与 `dump_bounds.py` 同一个约定。**
+            # 头一版只导前三列。判官那边照着这张表建分子,于是这 150 个分子里
+            # **23 个带顺反、共 28 根双键**的 E/Z 信息在手性那两条判官眼里
+            # 根本不存在:界矩阵少了解 1-4 顺反析取的依据,嵌出来的构象
+            # 顺反是随机的,而判据看不出区别 —— 只是界更松。
             bonds = []
             for b in mol.GetBonds():
                 order = {
@@ -236,7 +241,17 @@ def main() -> int:
                     Chem.BondType.TRIPLE: 3,
                     Chem.BondType.AROMATIC: 4,
                 }.get(b.GetBondType(), 1)
-                bonds.append([b.GetBeginAtomIdx(), b.GetEndAtomIdx(), order])
+                sa = list(b.GetStereoAtoms())
+                bonds.append(
+                    [
+                        b.GetBeginAtomIdx(),
+                        b.GetEndAtomIdx(),
+                        order,
+                        int(b.GetStereo()),
+                        sa[0] if len(sa) == 2 else -1,
+                        sa[1] if len(sa) == 2 else -1,
+                    ]
+                )
             fh.write(
                 json.dumps(
                     {

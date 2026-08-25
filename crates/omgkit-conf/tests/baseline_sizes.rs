@@ -121,3 +121,79 @@ fn 界矩阵与特征分解两份基准同批() {
          两者必须是同一批分子导出来的"
     );
 }
+
+/// 行数是契约,**行里装了多少东西也是**。
+///
+/// 上面那条数的是行。手性基准每一行装着若干个中心,而中心数可以在**行数不变**
+/// 的情况下变少 —— 判官照样读满 150 行,只是每行比得少了,而它无从知道。
+///
+/// 这不是假想。提交 `61b8d58` 教会了 `dump_chirality.py` 收**三配位立体中心**
+/// (亚砜的 S、膦的 P),却没有重导 `smoke.chirality.jsonl`:入库的那份里
+/// 247 个中心**全是四配位**,而当时的脚本导出来是 248 个、其中 8 个三配位。
+/// 行数一样(150),判官全绿,那个提交声称落地的那一档在主手性判官眼里
+/// 根本不存在 —— 四个月没人看得见。
+///
+/// `harness/check_baseline_schema.py` 挡的是"脚本长了新字段、基准没重导"
+/// (它比结构);这一条挡的是另一半:**结构没变而内容变少**。
+///
+/// 顺反那一列同理:`dump_chirality.py` 补上它之前,这 150 个分子里 23 个带
+/// E/Z 的分子在两条手性判官眼里是**没有顺反**的分子(界矩阵少了解 1-4 顺反
+/// 析取的依据)。数出来钉死,删掉那一列当场红。
+#[test]
+fn 手性基准装了多少中心与顺反也是契约() {
+    // (基准, 中心总数, 其中三配位, 带顺反的双键)
+    const WANT: &[(&str, usize, usize, usize)] = &[
+        ("smoke.chirality.jsonl", 248, 8, 28),
+        ("smoke.lonepair.jsonl", 21, 17, 0),
+    ];
+    let mut bad = Vec::new();
+    for &(name, n_c, n_three, n_stereo) in WANT {
+        let text = std::fs::read_to_string(baseline(name)).expect("读得到");
+        let (mut c, mut three, mut st) = (0usize, 0usize, 0usize);
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let v: serde_json::Value = serde_json::from_str(line).expect("合法 JSON");
+            for x in v["centers"].as_array().into_iter().flatten() {
+                c += 1;
+                // 按**配体个数**数,不按 `three_coordinate` 那个标注 ——
+                // 判官消费的是 `nbrs`(三配位那一档就是只有三个配体),
+                // 标注只是导出时顺手写的。拿标注当契约会绕回自证。
+                let three_c = x["nbrs"].as_array().map_or(0, Vec::len) == 3;
+                assert_eq!(
+                    three_c,
+                    x["three_coordinate"].as_bool() == Some(true),
+                    "{name} 里有个中心的 `three_coordinate` 标注与 `nbrs` 的长度不符"
+                );
+                if three_c {
+                    three += 1;
+                }
+            }
+            for b in v["bonds"].as_array().into_iter().flatten() {
+                // 第 4 列是 RDKit 的 `BondStereo` 号(2 Z、3 E、4 cis、5 trans),
+                // 第 5–6 列是两个参照原子。三样齐全才算这根键真的带顺反。
+                let has = matches!(b.get(3).and_then(serde_json::Value::as_i64), Some(2..=5))
+                    && b.get(4)
+                        .and_then(serde_json::Value::as_i64)
+                        .is_some_and(|x| x >= 0)
+                    && b.get(5)
+                        .and_then(serde_json::Value::as_i64)
+                        .is_some_and(|x| x >= 0);
+                if has {
+                    st += 1;
+                }
+            }
+        }
+        if (c, three, st) != (n_c, n_three, n_stereo) {
+            bad.push(format!(
+                "  {name}:中心 {c}(契约 {n_c})、其中三配位 {three}(契约 {n_three})、\
+                 带顺反的双键 {st}(契约 {n_stereo})"
+            ));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "手性基准装的内容变了:\n{}\n\n\
+         行数不变而中心/顺反变少,判官全都看不见 —— 它读满了行,只是每行比得少了。\n\
+         **先确认新的数是有意的**,再改这里的契约,并在提交信息里说明。",
+        bad.join("\n")
+    );
+}
