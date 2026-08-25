@@ -50,18 +50,22 @@
 //! 这一档从 0.38 µs/原子 涨到 23 / 82 / 322 µs/原子,涨幅 3.48,当场红。
 //!
 //! **候选生成由并苯那一档守着**,但并苯的围长只有 6。
-//! **"围长大 + 走一般路径"这个组合眼下没有任何测试覆盖** —— 而它正是原注释
-//! 担心的那件事。实测确有超线性:拿一个 **theta 图**(两个三度顶点之间三条
-//! 内部不相交的长路径,`C1 + k×C + C2 + k×C + C1 + k×C + C2`;k=80 时是
-//! 244 原子、圈秩 2、两个 163 元环、**围长 163**、只有 2 个原子度数为 3,
-//! 所以走不了快路径),`ring_set` 的每原子耗时 244 → 1924 原子涨了
-//! **26 倍**(7.3 → 192 µs/原子,约 O(n^2.7))。补这一档要连着治那个超线性
-//! 一起做,见任务清单。
+//! **"围长大 + 走一般路径"这个组合先前没有任何测试覆盖** —— 而它正是原注释
+//! 担心的那件事。现在由 [`ring_search_work_is_pinned_per_shape`] 补上,
+//! 判据是**数出来的工作量**而不是墙钟。
+//!
+//! 那一条同时把两件事记了下来:
+//!
+//! - 这个形状**确实是 O(n²)**(theta 图 122 → 1922 原子,工作量 34 032 →
+//!   8 677 880,255 倍 ≈ 16²),而且不是人造的极端形状 —— 大环上稠合一个苯环
+//!   就是同一档(56 → 806 原子,222 倍 ≈ 14.4²)。
+//! - **超线性本身还没修**,现在只是钉住了它,修好那天会当场红。
 
 use std::time::{Duration, Instant};
 
 use omgkit_chem::{
     assign_radicals, clean_up, kekulize, perceive_rings, ring_set, set_aromaticity,
+    sssr::{ring_set_counted, SearchStats},
     update_property_cache,
 };
 
@@ -180,6 +184,163 @@ fn acene(n: usize) -> String {
     }
     s.push_str("cc1");
     s
+}
+
+/// **theta 图**:两个三度顶点之间三条内部不相交的长路径。
+///
+/// `C12` + k×C + `C(` + k×C + `1)` + k×C + `2` —— 3k+2 个原子、圈秩 2、
+/// 三个 2k+2 元环,**只有 2 个原子度数为 3**,所以走不了纯环那条快路径。
+///
+/// 化学上这不是造出来的形状:穴醚(cryptand)、环芳烃、带一条交联的双环肽
+/// 都是它。
+fn theta(k: usize) -> String {
+    let c = "C".repeat(k);
+    format!("C12{c}C({c}1){c}2")
+}
+
+/// **大环上稠合一个苯环** —— 比 theta 更接近真实分子的那种大围长形状。
+///
+/// 环芳烃、带芳环的大环内酰胺都是它。同样有度数 3 的顶点、走不了纯环快路径,
+/// 同样是 O(n²):56 → 806 原子(14.4 倍),工作量 6 652 → 1 478 210(**222 倍
+/// ≈ 14.4²**)。
+fn aryl_fused_macrocycle(n: usize) -> String {
+    format!("c1ccc2c(c1){}2", "C".repeat(n))
+}
+
+/// 跑一遍环搜索,返回(原子数, 工作量)。
+fn ring_work(smi: &str) -> (usize, SearchStats) {
+    let mut m = omgkit_io::smiles::parse(smi).expect("语料应能解析");
+    clean_up(&mut m);
+    update_property_cache(&mut m).expect("价键校验应通过");
+    let (_, st) = ring_set_counted(&m);
+    (m.num_atoms(), st)
+}
+
+/// 环搜索的工作量:**数出来的整数**,不是墙钟。
+///
+/// # 为什么另起一条,而不是再加一档墙钟
+///
+/// 上面三条判的是"每原子**耗时**不随规模上升"。两处不够:
+///
+/// - 墙钟会抖。这个文件里已经记着一次:整个工作区并行跑时大环那一档慢 55%,
+///   涨幅越过阈值,**判据在报噪声**。
+/// - "涨幅"这个形状看不见**按比例整体变慢**的退化。
+///
+/// 同一条教训在 `omgkit-match/tests/scaling.rs` 上栽过一次(墙钟把一个改的是
+/// 别的 crate 的提交打红了),那里已经换成数工作量并钉死绝对值。这里照办。
+/// 墙钟那三条**留着**,它们守的是计数看不见的另一半:每次操作本身变贵了。
+///
+/// # 三种形状,三种判法
+///
+/// | 形状 | 判据 | 现值 |
+/// |---|---|---|
+/// | 单个大环 | 工作量**恒为 0** | 走快路径,一次 BFS 都不做 |
+/// | 线性并苯 | 每原子工作量不上升 | 约 15.5 次 BFS/原子 |
+/// | **theta 图** | 钉死绝对值 | **O(n²)**,见下 |
+///
+/// # theta 那一档是**钉住现状**,不是"这样就对了"
+///
+/// Horton 算法要对**每个**顶点做一次覆盖整个分量的 BFS,而 theta 图的围长
+/// 就是 2n/3 量级,迭代加深必须一路加到那么深 —— 于是 O(n²)。实测
+/// 122 → 1922 原子(16 倍)工作量 34 032 → 8 677 880(**255 倍 ≈ 16²**)。
+///
+/// **这个超线性本身没修**,这一条只保证它不再悄悄变坏,而且修好的那天会
+/// **当场红**(数变小了),逼着改的人把新数写进来。教科书的修法是
+/// **抑制二度顶点**(把每条二度链缩成一条带权边,再在缩图上跑带权 Horton),
+/// 那要把 BFS 换成 Dijkstra、处理重边、再把环展开回去 —— 是单独一块的活。
+///
+/// 顺带量过:**真实语料一次都够不着这一档**。`large.smi` 的 8830 个分子
+/// 合计只做 242 637 次 BFS,最坏的一个 1 252 次(90 原子的双环缩肽);
+/// `hard.smi` 68 个分子合计 2 896、最坏 864;`bridged.smi` 25 个合计 2 517。
+/// 都不到 theta k=40 一个分子(34 032)的零头 —— 也就是说这个形状**在语料里
+/// 是缺的**,这条测试补的正是它。
+#[test]
+fn ring_search_work_is_pinned_per_shape() {
+    // 一、单个大环:快路径,一次 BFS 都不做。
+    //    这一条比上面那条墙钟版严得多 —— 快路径一旦失效,数就不是 0 了,
+    //    而墙钟版要等到慢出 1.25 倍才红。
+    for n in [100usize, 400, 1600] {
+        let (atoms, st) = ring_work(&macrocycle(n));
+        assert_eq!(
+            (st.bfs_visits, st.edge_tests, st.path_steps),
+            (0, 0, 0),
+            "{atoms} 元大环走了一般路径 —— `component_ring_set` 开头那条\
+             '全部顶点度数为 2 ⇒ 分量本身就是一条环'的快路径失效了"
+        );
+    }
+
+    // 二、线性并苯:每原子工作量不上升。
+    let mut rows: Vec<(usize, f64)> = Vec::new();
+    let mut path_rows: Vec<(usize, f64)> = Vec::new();
+    for n in [12usize, 24, 48] {
+        let (atoms, st) = ring_work(&acene(n));
+        #[allow(clippy::cast_precision_loss)]
+        let per = st.bfs_visits as f64 / atoms as f64;
+        #[allow(clippy::cast_precision_loss)]
+        let per_path = st.path_steps as f64 / atoms as f64;
+        println!(
+            "并苯 {n:>3}:{atoms:>4} 原子  bfs={:<8} {per:>6.2} 次/原子  \
+             回溯 {:<8} {per_path:>6.2} 步/原子",
+            st.bfs_visits, st.path_steps
+        );
+        rows.push((atoms, per));
+        path_rows.push((atoms, per_path));
+    }
+    let base = rows[0].1;
+    for &(atoms, per) in &rows[1..] {
+        assert!(
+            per / base < MAX_GROWTH,
+            "稠合体系:每原子 BFS 次数从 {base:.2}({} 原子)涨到 {per:.2}({atoms} 原子)",
+            rows[0].0
+        );
+    }
+    // 回溯量也要判 —— 两条剪枝失效时 `bfs_visits` 与 `edge_tests` 纹丝不动,
+    // 只有这一项会涨(见 `SearchStats::path_steps`)。
+    let base_path = path_rows[0].1;
+    for &(atoms, per) in &path_rows[1..] {
+        assert!(
+            per / base_path < MAX_GROWTH,
+            "稠合体系:每原子回溯步数从 {base_path:.2}({} 原子)涨到 {per:.2}({atoms} 原子)\
+             —— 平衡剪枝或首步剪枝失效了",
+            path_rows[0].0
+        );
+    }
+
+    // 三、大围长 + 走一般路径:钉死绝对值。**变小也红** —— 见本条文档。
+    const THETA: &[(usize, usize, u64, u64, u64)] = &[
+        // (k, 原子数, bfs_visits, edge_tests, path_steps)
+        (40, 122, 34_032, 35_010, 20_252),
+        (80, 242, 136_034, 138_240, 78_892),
+        (160, 482, 543_412, 548_310, 311_372),
+    ];
+    for &(k, want_atoms, want_bfs, want_edge, want_path) in THETA {
+        let (atoms, st) = ring_work(&theta(k));
+        assert_eq!(atoms, want_atoms, "theta k={k} 的原子数变了 —— 生成器改了?");
+        assert_eq!(
+            (st.bfs_visits, st.edge_tests, st.path_steps),
+            (want_bfs, want_edge, want_path),
+            "theta k={k}({atoms} 原子)的环搜索工作量变了。\
+             **变大**是回归;**变小**说明超线性被治了 —— 那是好事,\
+             把新的数写进来,并在提交信息里说明治的是什么。"
+        );
+    }
+
+    // 四、苯稠大环 —— 同一个超线性,但形状是真实分子里有的那种。
+    //     theta 图容易被读成"人造的极端形状";这一档说明不是。
+    const FUSED: &[(usize, usize, u64, u64, u64)] = &[
+        // (链长, 原子数, bfs_visits, edge_tests, path_steps)
+        (50, 56, 6_652, 6_962, 3_095),
+        (200, 206, 95_526, 97_060, 41_879),
+    ];
+    for &(n, want_atoms, want_bfs, want_edge, want_path) in FUSED {
+        let (atoms, st) = ring_work(&aryl_fused_macrocycle(n));
+        assert_eq!(atoms, want_atoms, "苯稠大环 {n} 的原子数变了");
+        assert_eq!(
+            (st.bfs_visits, st.edge_tests, st.path_steps),
+            (want_bfs, want_edge, want_path),
+            "苯稠大环 {n}({atoms} 原子)的环搜索工作量变了 —— 同上"
+        );
+    }
 }
 
 #[test]

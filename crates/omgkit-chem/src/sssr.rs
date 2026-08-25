@@ -63,6 +63,9 @@
 //! **平衡剪枝**:只取两条最短路长度差 ≤ 1 的 (顶点, 边) 对。Horton 定理保证
 //! 每个最小环基成员都能由某个顶点"对面"的边平衡地生成。
 //!
+//! ——但**这一条现在跑不到**,而且是结构上跑不到,见
+//! `horton_candidates` 里那处 `debug_assert`(私有项,搜文件名即可)。
+//!
 //! **首步剪枝**:两条最短路若从 v 迈出的第一步相同,必然相交。这个判断是 O(1),
 //! 而回溯出路径再判是 O(路径长)。
 
@@ -98,6 +101,37 @@ impl Ring {
 /// 返回顺序:按(环大小, 最小原子号)升序,保证确定性。
 #[must_use]
 pub fn ring_set(mol: &MolBuilder) -> Vec<Ring> {
+    ring_set_counted(mol).0
+}
+
+/// 环搜索**做了多少事**。整数、确定,debug 与 release 逐位相同。
+///
+/// # 为什么要数,而不是量耗时
+///
+/// 复杂度是"做了多少事"的性质,墙钟只是它乘上一个会抖的常数。而"每原子耗时
+/// 涨幅"这个形状还漏掉一整类退化:按比例整体变慢时涨幅纹丝不动。
+/// (同一条教训在 `omgkit-match` 的 `scaling.rs` 上栽过一次,那里已经换成
+/// 数工作量并钉死绝对值。)
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SearchStats {
+    /// BFS 出队次数 —— 全部分量、全部加深轮次、全部起点合计
+    pub bfs_visits: u64,
+    /// 考察过的(起点, 边)对数。计在 `edge_done` 判重**之后**、
+    /// 各条剪枝**之前** —— 计在剪枝之后的话,被剪掉的那些数不到,
+    /// 而剪枝失效正是要守的东西。
+    pub edge_tests: u64,
+    /// 回溯两条最短路时走过的顶点数合计。
+    ///
+    /// **这一项专门盯剪枝。** `bfs_visits` 与 `edge_tests` 都记在剪枝**之前**,
+    /// 所以平衡剪枝(两条路长度差 ≤ 1)与首步剪枝(第一步相同必相交)失效时
+    /// 那两个数纹丝不动 —— 而模块文档说得很清楚,少了它们复杂度会从 O(n²)
+    /// 退化到 O(n³)。回溯是它们保护的那个 O(路径长) 操作,数它才碰得到。
+    pub path_steps: u64,
+}
+
+/// 与 [`ring_set`] 同一条路,外加工作量计数。
+#[must_use]
+pub fn ring_set_counted(mol: &MolBuilder) -> (Vec<Ring>, SearchStats) {
     let active: Vec<bool> = mol
         .bonds()
         .iter()
@@ -105,9 +139,10 @@ pub fn ring_set(mol: &MolBuilder) -> Vec<Ring> {
         .collect();
     let adj = crate::rings::Adjacency::build(mol, &active);
 
+    let mut stats = SearchStats::default();
     let mut out: Vec<Ring> = Vec::new();
     for comp_bonds in crate::rings::biconnected_bond_components(&adj) {
-        out.extend(component_ring_set(mol, &comp_bonds));
+        out.extend(component_ring_set(mol, &comp_bonds, &mut stats));
     }
 
     out.sort_by_key(|r| {
@@ -117,7 +152,7 @@ pub fn ring_set(mol: &MolBuilder) -> Vec<Ring> {
             r.atoms.iter().copied().max().unwrap_or(u32::MAX),
         )
     });
-    out
+    (out, stats)
 }
 
 // ---------------------------------------------------------------------------
@@ -285,7 +320,7 @@ struct Candidate {
     key: Vec<u32>,
 }
 
-fn component_ring_set(mol: &MolBuilder, comp_bonds: &[u32]) -> Vec<Ring> {
+fn component_ring_set(mol: &MolBuilder, comp_bonds: &[u32], stats: &mut SearchStats) -> Vec<Ring> {
     let c = Component::build(mol, comp_bonds);
 
     // 快路径:分量内所有顶点度数都是 2 ⇒ 这个分量本身就是一条简单环。
@@ -304,7 +339,7 @@ fn component_ring_set(mol: &MolBuilder, comp_bonds: &[u32]) -> Vec<Ring> {
     let mut limit = INITIAL_LENGTH_LIMIT;
     loop {
         let capped = limit >= c.n_atoms();
-        let (rings, rank) = cycles_up_to(&c, limit.min(c.n_atoms()));
+        let (rings, rank) = cycles_up_to(&c, limit.min(c.n_atoms()), stats);
         if rank >= rank_target || capped {
             debug_assert!(
                 rank >= rank_target,
@@ -357,8 +392,8 @@ fn single_cycle_component(c: &Component) -> Option<Ring> {
 /// 求"长度 ≤ `limit`"的全部相关环,并返回它们张成的秩。
 ///
 /// 秩达到圈秩即可停止加深:更长的环必然落在更短者的张成中,按定义不 relevant。
-fn cycles_up_to(c: &Component, limit: usize) -> (Vec<Ring>, usize) {
-    let mut cands = horton_candidates(c, limit);
+fn cycles_up_to(c: &Component, limit: usize, stats: &mut SearchStats) -> (Vec<Ring>, usize) {
+    let mut cands = horton_candidates(c, limit, stats);
     // 同长度必须整组判定 —— 见模块文档
     cands.sort_by(|a, b| a.atoms.len().cmp(&b.atoms.len()).then(a.key.cmp(&b.key)));
 
@@ -401,7 +436,7 @@ fn cycles_up_to(c: &Component, limit: usize) -> (Vec<Ring>, usize) {
 /// 长度 ≤ limit 的相关环。
 ///
 /// 这个限深是把代价从 O(分量点数 × 分量边数 × 路径长)压回来的关键。
-fn horton_candidates(c: &Component, limit: usize) -> Vec<Candidate> {
+fn horton_candidates(c: &Component, limit: usize, stats: &mut SearchStats) -> Vec<Candidate> {
     let n = c.n_atoms();
     let m = c.n_bonds();
     let depth_limit = limit.div_ceil(2) as u32;
@@ -435,6 +470,7 @@ fn horton_candidates(c: &Component, limit: usize) -> Vec<Candidate> {
         while head < queue.len() {
             let x = queue[head];
             head += 1;
+            stats.bfs_visits += 1;
             if dist[x as usize] >= depth_limit {
                 continue; // 不再向外扩
             }
@@ -457,6 +493,7 @@ fn horton_candidates(c: &Component, limit: usize) -> Vec<Candidate> {
                     continue;
                 }
                 edge_done[lb as usize] = true;
+                stats.edge_tests += 1;
 
                 let (a, b) = c.edge_ends[lb as usize];
                 if dist[a as usize] == u32::MAX || dist[b as usize] == u32::MAX {
@@ -474,9 +511,28 @@ fn horton_candidates(c: &Component, limit: usize) -> Vec<Candidate> {
                 // 必然平衡。不平衡的组合要么给出同一个环(由别的 v 平衡地生成),
                 // 要么根本不是简单环。
                 //
-                // 这个剪枝是把大环从立方压回来的关键:纯 n 元大环里,从每个顶点
-                // 出发只有 1 条边是平衡的,而不是全部 n 条。不加的话 200 原子的
-                // 大环要 26 ms。
+                // # 但这一支**跑不到**,而且是结构上跑不到
+                //
+                // 无权 BFS 里,任意一条边的两个端点距离差 ≤ 1 —— 这是 BFS 的
+                // 基本性质。限深只会让越界的点 `dist` 保持 `MAX`,而那种点上面
+                // 那条 `dist == u32::MAX` 已经滤掉了。所以 `|da − db| ≥ 2`
+                // 不可能出现。
+                //
+                // 实测:全语料 8830 个分子 + 五种合成形状(theta、并苯、大环、
+                // 苯稠大环、共边双大环),这一支**一次都没进过**;把它整个关掉,
+                // 三个工作量计数器在每一档上**逐位相同**。
+                //
+                // 这段注释先前写着"这个剪枝是把大环从立方压回来的关键 ……
+                // 不加的话 200 原子的大环要 26 ms" —— 那个数是别的版本上量的,
+                // 现在纯大环走的是开头那条快路径,压根到不了这里。
+                //
+                // 留着守卫 + 一条 `debug_assert`:哪天最短路换成**带权**的
+                // (做"抑制二度顶点"那个修法时就要换成 Dijkstra),这个不变量
+                // 就没了,而那时它必须重新起作用。
+                debug_assert!(
+                    da.abs_diff(db) <= 1,
+                    "无权 BFS 里一条边两端的距离差应当 ≤ 1,实得 {da} 与 {db}"
+                );
                 if da.abs_diff(db) > 1 {
                     continue;
                 }
@@ -491,6 +547,7 @@ fn horton_candidates(c: &Component, limit: usize) -> Vec<Candidate> {
 
                 let px = trace(&parent, &parent_bond, v, a);
                 let py = trace(&parent, &parent_bond, v, b);
+                stats.path_steps += (px.len() + py.len()) as u64;
                 // 两条路径除 v 外不得相交
                 for &(t, _) in &px {
                     on_path[t as usize] = true;
