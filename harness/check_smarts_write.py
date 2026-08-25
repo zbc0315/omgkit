@@ -32,7 +32,7 @@ SMILES 往返、SMARTS 表达式树、这里,三处都要各自处理。
     cargo run --release -p omgkit-io --example dump_smarts_written -- \\
         harness/corpus/smarts.txt > /tmp/sw.tsv
     python3 harness/check_smarts_write.py /tmp/sw.tsv \\
-        --mols harness/corpus/large.smi
+        --mols harness/corpus/large.smi --corpus harness/corpus/smarts.txt
 """
 
 import argparse
@@ -40,6 +40,8 @@ import collections
 import pathlib
 import sys
 
+import denominator
+import rdkit
 from rdkit import Chem, RDLogger
 
 RDLogger.DisableLog("rdApp.*")
@@ -71,9 +73,24 @@ def matches(patt, probes):
     return out
 
 
+#: SMARTS 语料里允许有多少条**没真正进比对**。见 `denominator.py`。
+#:
+#: 这条判官原本只有 `--min-hits`(区分力闸:"真的匹配到东西的模式数"),
+#: 那守的是"判据别空过",守不住"上游少喂了几条模式" —— 少喂几条,分歧数
+#: 跟着变好看,而 `hits` 只要还够就照样退 0。两条闸各守一半。
+#:
+#: 实测 `smarts.txt`(776 条)没比到 **20** —— 全是语料里**故意写坏**的模式,
+#: 本实现解析失败。现值 25 = 实测值加一点余量:解析器要是在合法模式上退化,
+#: 这个数会往上走,当场红。
+MAX_UNCOMPARED = 25
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("tsv", type=pathlib.Path, help="dump_smarts_written 的输出")
+    ap.add_argument(
+        "--corpus", type=pathlib.Path, required=True, help="喂给 dump 的那份 SMARTS 语料(核分母用)"
+    )
     ap.add_argument("--mols", type=pathlib.Path, required=True, help="探针分子语料")
     ap.add_argument("--limit-mols", type=int, default=3000, help="用前几个分子当探针")
     ap.add_argument(
@@ -92,10 +109,12 @@ def main() -> int:
     stat: collections.Counter = collections.Counter()
     bad = []
     hits = 0
+    rows = 0
 
     for line in args.tsv.read_text().splitlines():
         if not line.strip():
             continue
+        rows += 1
         src, _, got = line.partition("\t")
         if got.startswith("<"):
             stat["本实现解析失败(语料里的非法输入)"] += 1
@@ -121,9 +140,16 @@ def main() -> int:
         only_b = {k: v for k, v in mb.items() if ma.get(k) != v}
         bad.append((src, got, f"原文独有 {list(only_a)[:3]} / 写出独有 {list(only_b)[:3]}"))
 
+    # **分母闸。** 见 `MAX_UNCOMPARED`:`--min-hits` 守的是"判据别空过",
+    # 这一条守的是"上游别少喂"—— 两回事。
+    n_corpus = denominator.corpus_size(args.corpus)
+    compared = stat["语义相同"] + len(bad)
+
+    print(f"外部实现:RDKit {rdkit.__version__}")
     for k, v in stat.most_common():
         print(f"  {k:<28} {v}")
     print(f"  {'其中确实匹配到东西':<28} {hits}")
+    print(denominator.line(n_corpus, rows, compared, MAX_UNCOMPARED))
     for s, g, why in bad[: args.limit]:
         print(f"\n  {s}\n    -> {g}\n     ({why})")
     if len(bad) > args.limit:
@@ -132,7 +158,14 @@ def main() -> int:
     if hits < args.min_hits:
         print(f"\n判据几乎是空过的:只有 {hits} 条真的匹配到东西(要求 ≥ {args.min_hits})")
         return 1
-    return 1 if bad else 0
+    if bad:
+        return 1
+    why = denominator.verdict(n_corpus, rows, compared, MAX_UNCOMPARED)
+    if why:
+        print(f"\n{why}")
+        return 1
+    print("零分歧")
+    return 0
 
 
 if __name__ == "__main__":

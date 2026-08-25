@@ -96,6 +96,29 @@ NOT_YET_WRITTEN = {
 #: 涨上去说明有一类分子进不了比对,要当场查,不是调大它。
 MAX_UNCOMPARED = 15
 
+#: **已知未实现:非四面体立体写不出来。** 按 SMILES **逐条钉死**,不是一个上限。
+#:
+#: 读得回来(`smiles.rs` 里 `@SP` / `@TB` / `@OH` 的解析有判据),写出去丢掉 ——
+#: 而这件事先前**一条判据都没守**:CI 只拿 `large.smi` 跑这条判官,而那份语料里
+#: 一条非四面体立体都没有。冒烟语料里有 6 条,`--strict` 下当场 6 条分歧,
+#: 只是从来没人在 CI 里跑过(`check_write_fidelity.py` 也一样)。
+#:
+#: 为什么钉集合而不是设上限:上限只能变松,而钉死的集合**两个方向都红** ——
+#: 写出器补上任何一条,这里当场红,逼着把它从名单里划掉;写出器在别的分子上
+#: 退化,那个分子不在名单里,照旧算分歧。
+#:
+#: 语料里没有这些分子时(比如 `large.smi`)期望集合是空的,不需要另开开关。
+NON_TETRAHEDRAL_GAP = frozenset(
+    {
+        "[Pt@SP1](Cl)(Cl)(N)N",
+        "[Pt@SP3](Cl)(Cl)(N)N",
+        "[C@SP1](F)(Cl)(Br)I",
+        "F[P@TB15](Cl)(Br)(I)S",
+        "C[Co@OH25](N)(O)(S)(P)Cl",
+        "[Co@OH5]1(N)(O)(S)(P)CCC1",
+    }
+)
+
 
 def canonical_without(mol, drop):
     """抹掉若干类立体信息后的规范 SMILES。`mol` 会被就地修改,故传副本。"""
@@ -121,6 +144,7 @@ def main() -> int:
     chiral = 0
     excused = {name: 0 for name in NOT_YET_WRITTEN}
     bad = []
+    gap = set()
     rows = 0
     unreadable = 0
 
@@ -160,6 +184,10 @@ def main() -> int:
                     break
         if matched:
             excused[matched] += 1
+        elif orig in NON_TETRAHEDRAL_GAP:
+            # 已知未实现,**逐条钉死**的那一档 —— 见 NON_TETRAHEDRAL_GAP。
+            # 收进集合而不是计数:待会儿要与名单**逐条**核,少一条也红。
+            gap.add(orig)
         else:
             bad.append((orig, got, f"{Chem.MolToSmiles(a)}\n       != {Chem.MolToSmiles(b)}"))
 
@@ -169,8 +197,17 @@ def main() -> int:
         for l in args.corpus.read_text(encoding="utf-8").splitlines()
         if l.strip() and not l.lstrip().startswith("#")
     )
-    compared = exact + sum(excused.values()) + len(bad)
+    compared = exact + sum(excused.values()) + len(bad) + len(gap)
     uncompared = n_corpus - compared
+
+    # **已知未实现那一档:与名单逐条核,两个方向都红。** 见 NON_TETRAHEDRAL_GAP。
+    # 语料里根本没有这些分子时(`large.smi`)期望集合是空的,这一段自然不作声。
+    corpus_smis = {
+        l.split()[0]
+        for l in args.corpus.read_text(encoding="utf-8").splitlines()
+        if l.strip() and not l.lstrip().startswith("#") and l.split()
+    }
+    want_gap = NON_TETRAHEDRAL_GAP & corpus_smis
 
     print(f"外部实现:RDKit {rdkit.__version__}")
     print(f"逐条规范形式相同 {exact} 条;含立体中心 {chiral} 条")
@@ -179,9 +216,18 @@ def main() -> int:
         f"没比到 {uncompared} 条(上限 {MAX_UNCOMPARED})"
     )
     print(f"  没比到的两条路:没写出 {n_corpus - rows} 条,外部实现读不了原串 {unreadable} 条")
+    if want_gap or gap:
+        print(f"  已知未实现(非四面体立体写出){len(gap)} 条,名单里 {len(want_gap)} 条")
     for name, count in excused.items():
         if count:
             print(f"仅 {name} 不同 {count} 条({name}写出尚未实现,已登记)")
+    if gap != want_gap:
+        print(
+            f"\n已知未实现那一档对不上名单 —— 多出来的 {sorted(gap - want_gap)},"
+            f"名单里却没红的 {sorted(want_gap - gap)}。\n"
+            "写出器补上了就把它从 `NON_TETRAHEDRAL_GAP` 里划掉;多出来的是新的回归。"
+        )
+        return 1
     if bad:
         print(f"\n分歧 {len(bad)} 条(最多列 {args.limit} 条):")
         for orig, got, why in bad[: args.limit]:

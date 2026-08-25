@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 # 漏一处就是个不会报错的假数。CI 的头注释里记过同一个坑(那里原先写着
 # "四道闸门",而步骤早已加到八步)。这里由 `step` 计数,末尾自查:
 # 改了步骤忘了改 `TOTAL`,脚本最后一行会红。
-TOTAL=19
+TOTAL=24
 N=0
 step() {
     N=$((N + 1))
@@ -35,12 +35,12 @@ step() {
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-# **最后四条判据要 RDKit,所以先在这里查一次。** 放在末尾的话,要等前面十四步
+# **末尾那一批判据要 RDKit,所以先在这里查一次。** 放在末尾的话,要等前面十几步
 # (十来分钟 cargo)跑完才知道环境缺东西。没有就直接失败,**不跳过** ——
 # 静默跳过的判据是最坏的一种,它让人以为跑过了。
 PY=.venv/bin/python
 if [ ! -x "$PY" ]; then
-    echo "缺 $PY —— 最后四条判据要 RDKit。" >&2
+    echo "缺 $PY —— 末尾那一批判据要 RDKit。" >&2
     echo "  建法:python3 -m venv .venv &&" >&2
     echo "        .venv/bin/pip install --only-binary=:all: -r harness/requirements.lock" >&2
     exit 1
@@ -119,14 +119,14 @@ cargo run -q -p omgkit-conf --release --example conformer_oracle -- harness/base
 step "判官:三配位立体中心(孤对那一档)"
 cargo run -q -p omgkit-conf --release --example conformer_oracle -- harness/baseline/smoke.lonepair.jsonl
 
-# ---- 要外部实现(RDKit)的那四条 ----
+# ---- 要外部实现(RDKit)的那一批 ----
 #
-# 上面几条都是拿预先烘好的基准比,所以不需要 RDKit。这四条不一样:它们把
+# 上面几条都是拿预先烘好的基准比,所以不需要 RDKit。下面这一批不一样:它们把
 # **当次**画出来 / 嵌出来的东西交给 RDKit 反读,基准没法预先烘。
 #
-# CI 里这四条在单独一个 job(`external`)里,版本钉在 `harness/requirements.lock`
+# CI 里这一批在单独一个 job(`external`)里,版本钉在 `harness/requirements.lock`
 # (RDKit 2025.09.2 —— 仓库里 `harness/baseline/` 那批基准就是它导的)。
-# 开发机的 `.venv` 眼下是 2022.09.5,与 CI 不同:**这四条判据两边喂的是同一个
+# 开发机的 `.venv` 眼下是 2022.09.5,与 CI 不同:**这一批判据两边喂的是同一个
 # RDKit**,版本变化会对消,两版都实测过退 0。判据自己会打印版本号,别靠记。
 # 要跟 CI 完全对版就照 lock 重建 `.venv`。
 
@@ -170,12 +170,42 @@ cargo run -q -p omgkit-conf --release --example dump_conformers -- harness/corpu
 # (把全部顺式写成反式),判据打印"仅 双键立体 不同 149 条"然后**退 0**;
 # 同样手法翻四面体手性则报 300 条分歧、退 1 —— 是这一档的洞,不是判官坏了。
 # 大语料上两个豁免桶现值都是 0,所以 `--strict` 现在就能开(实测两个方向都退 0)。
+# ---- 先前只在本地手动跑的那几条 ----
+#
+# **闸不进 CI 就不是闸。** 下面这四条判官一直躺在 `harness/` 里,谁想起来谁跑一次
+# —— 而接进来的那一刻,`check_bond_stereo.py` **就是红的**(小环双键那一条,
+# 见下),`check_write.py --strict` 拿冒烟语料跑也是红的(非四面体立体写不出来,
+# 现在按 SMILES 逐条钉死在 `NON_TETRAHEDRAL_GAP` 里)。
+#
+# 四条都补了**分母闸**(`harness/denominator.py`):它们原本只数分歧、
+# 不数"该数到多少",喂个空文件进去打印一片空白然后退 0。
+step "判官:双键顺反的感知(与外部实现逐根比)"
+cargo run -q -p omgkit-io --release --example dump_bond_stereo -- harness/corpus/large.smi >"$WORK/bs.tsv"
+"$PY" harness/check_bond_stereo.py "$WORK/bs.tsv" harness/corpus/large.smi
+step "判官:写出时 E/Z 守不守恒"
+cargo run -q -p omgkit-io --release --example dump_written -- harness/corpus/large.smi >"$WORK/dw.tsv"
+"$PY" harness/check_ez.py "$WORK/dw.tsv" harness/corpus/large.smi
+step "判官:净化之后写出忠不忠实"
+cargo run -q -p omgkit-chem --release --example dump_sanitized -- harness/corpus/large.smi >"$WORK/san.tsv"
+"$PY" harness/check_write_fidelity.py "$WORK/san.tsv" harness/corpus/large.smi
+step "判官:SMARTS 写出(语义相同,自带区分力闸)"
+cargo run -q -p omgkit-io --release --example dump_smarts_written -- harness/corpus/smarts.txt >"$WORK/sw.tsv"
+"$PY" harness/check_smarts_write.py "$WORK/sw.tsv" --mols harness/corpus/large.smi --corpus harness/corpus/smarts.txt
+
 step "判官:SMILES 写出(按存储顺序,严格)"
 cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/large.smi >"$WORK/written.tsv"
 "$PY" harness/check_write.py "$WORK/written.tsv" harness/corpus/large.smi --strict
 step "判官:SMILES 写出(规范,严格)"
 cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/large.smi --canonical >"$WORK/canon.tsv"
 "$PY" harness/check_write.py "$WORK/canon.tsv" harness/corpus/large.smi --strict
+
+# **冒烟语料也要跑写出。** CI 先前只拿 `large.smi` 跑这条判官,而那份语料里
+# 一条非四面体立体(`@SP` / `@TB` / `@OH`)都没有 —— 于是"读得回来、写不出去"
+# 这件事**一条判据都没守**。冒烟语料里有 6 条,现在按 SMILES 逐条钉死:
+# 写出器补上任何一条这里当场红,逼着把它从名单里划掉。
+step "判官:SMILES 写出(冒烟语料,严格 —— 非四面体立体那一档钉在这里)"
+cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/smoke.smi >"$WORK/wsmoke.tsv"
+"$PY" harness/check_write.py "$WORK/wsmoke.tsv" harness/corpus/smoke.smi --strict
 
 # **自查。** 加了闸门忘了改 `TOTAL` 的话,这里红 —— 上面那些 `N/TOTAL`
 # 就不会悄悄变成假数。

@@ -31,7 +31,7 @@
 
     cargo run --release -p omgkit-chem --example dump_sanitized -- \\
         harness/corpus/large.smi > /tmp/san.tsv
-    python3 harness/check_write_fidelity.py /tmp/san.tsv
+    python3 harness/check_write_fidelity.py /tmp/san.tsv harness/corpus/large.smi
 """
 
 import argparse
@@ -39,24 +39,37 @@ import collections
 import pathlib
 import sys
 
+import denominator
+import rdkit
 from rdkit import Chem, RDLogger
 from rdkit.Chem import rdMolDescriptors
 
 RDLogger.DisableLog("rdApp.*")
 
 
+#: 语料里允许有多少条**没真正进比对**。见 `denominator.py`。
+#:
+#: 实测:`large.smi`(8839 行)没比到 **10**(2022.09.5:8 条本实现净化失败
+#: + 2 条判官读不了原串)/ **8**(2025.09.2,CI 装的:那 2 条它读得了)。
+#: 现值 20 = 实测最大加一点余量。这是分母闸,不是宽容度。
+MAX_UNCOMPARED = 20
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("tsv", type=pathlib.Path, help="dump_sanitized 的输出")
+    ap.add_argument("corpus", type=pathlib.Path, help="喂给上游 dump 的那份语料(核分母用)")
     ap.add_argument("--limit", type=int, default=8, help="最多打印几条失败")
     args = ap.parse_args()
 
     stat: collections.Counter = collections.Counter()
     bad = []
+    rows = 0
 
     for line in args.tsv.read_text().splitlines():
         if not line.strip():
             continue
+        rows += 1
         src, got = line.split("\t")
         if got.startswith("<"):
             # <parse-error> / <sanitize-error> —— 本实现自己报的,不在本判据范围内
@@ -84,14 +97,28 @@ def main() -> int:
         hint = f"分子式 {fw} -> {fh}" if fw != fh else "分子式没变,多半是立体或电荷"
         bad.append((src, got, f"{cw}\n        vs {ch}\n     ({hint})"))
 
+    # **分母闸。** 见 `MAX_UNCOMPARED` 与 `denominator.py`:少比几个分子,
+    # 上面每一档都会变好看,而"分歧 0"是它退 0 的唯一依据。
+    n_corpus = denominator.corpus_size(args.corpus)
+    compared = stat["写出忠实"] + len(bad)
+
+    print(f"外部实现:RDKit {rdkit.__version__}")
     for k, v in stat.most_common():
         print(f"  {k:<24} {v}")
+    print(denominator.line(n_corpus, rows, compared, MAX_UNCOMPARED))
     for s, g, why in bad[: args.limit]:
         print(f"\n  {s}\n    -> {g}\n     ({why})")
     if len(bad) > args.limit:
         print(f"\n  ...(另有 {len(bad) - args.limit} 条)")
 
-    return 1 if bad else 0
+    if bad:
+        return 1
+    why = denominator.verdict(n_corpus, rows, compared, MAX_UNCOMPARED)
+    if why:
+        print(f"\n{why}")
+        return 1
+    print("零分歧")
+    return 0
 
 
 if __name__ == "__main__":

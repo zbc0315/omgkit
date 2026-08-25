@@ -15,7 +15,7 @@
 # 那 16 条还标着(`differential_l1/l2_*`),另外 3 条是重导模板的工具。
 # 只靠入库语料就能跑的五条已经解禁,默认 `cargo test` 会跑到它们。
 #
-# 下面还有第二个 job(`external`)**确实要外部实现**:有四条判官是把我们的产物
+# 下面还有第二个 job(`external`)**确实要外部实现**:那一批判官是把我们的产物
 # 交给 RDKit 反读,基准没法预先烘进仓库(RDKit 读的是我们**当次**画出/嵌出的
 # 东西)。它单独一个 job,所以 pip 那一步挂了看得出是环境问题,不是本仓库。
 #
@@ -142,11 +142,11 @@ jobs:
         run: cargo run -p omgkit-conf --release --example chiral_oracle -- harness/baseline/smoke.chirality.jsonl
 
   # ==========================================================================
-  # 要外部实现(RDKit)的那四条判官
+  # 要外部实现(RDKit)的那一批判官
   # ==========================================================================
   #
   # 上面 `gates` 里的判官都是拿**预先烘好的基准**比,所以不需要装 RDKit。
-  # 这四条不一样:它们把**当次**画出来 / 嵌出来 / 写出来的东西交给 RDKit,基准
+  # 这一批不一样:它们把**当次**画出来 / 嵌出来 / 写出来的东西交给 RDKit,基准
   # 没法预先烘 —— 产物变了,该拿去反读的就是新产物。
   #
   # 它们先前只在本地手动跑,而其中一条**当时就是红的**:`check_wedge_readback.py`
@@ -163,7 +163,7 @@ jobs:
   # numpy 也钉了:只钉 RDKit 的话 pip 会自己解 numpy,而版本配错会让
   # `_ARRAY_API not found` / SIGSEGV。同样见那个文件。
   #
-  # 开发机的 `.venv` 眼下是 2022.09.5,与这里不同。这四条判据**两边喂的是同一个
+  # 开发机的 `.venv` 眼下是 2022.09.5,与这里不同。这一批判据**两边喂的是同一个
   # RDKit**(参考侧与读回侧),所以版本变化会对消,判据断的是上限而不是精确计数
   # —— 两版都实测过退 0(2022.09.5 构型一致 498,2025.09.2 是 495,差的 3 个是
   # 参考侧丢了 CIP 码)。判据现在会**打印它跑在哪个版本上**,别靠记。
@@ -238,6 +238,49 @@ jobs:
           cargo run -q -p omgkit-conf --release --example dump_conformers -- harness/corpus/large.smi > "$RUNNER_TEMP/ours.jsonl"
           python harness/verify_stereo.py "$RUNNER_TEMP/ours.jsonl" harness/corpus/large.smi
 
+      # ---- 先前只在本地手动跑的那四条 ----
+      #
+      # **闸不进 CI 就不是闸。** 它们一直躺在 `harness/` 里,谁想起来谁跑一次。
+      # 接进来的那一刻 `check_bond_stereo.py` **就是红的**:大语料 8839 个分子里
+      # 有一个五元环内的双键,判官的参照那一侧用的是 `SetBondStereoFromDirections`
+      # —— 那是低层原语,把 `/` `\` 机械折算成 CIS/TRANS,**不问这根双键有没有
+      # 资格带顺反**。RDKit 的高层解析问(小环里的双键被环锁死,反式环辛烯是最小的
+      # 能分离出来的反式环烯烃),本实现跟高层走。判官那一侧改成拿 RDKit 的高层
+      # 解析过一道筛,**过筛之后照旧逐根比** —— 变异实测:把小环规则关掉,
+      # 同一条判据报"本实现多标 1"并退 1。
+      #
+      # 四条都补了分母闸(`harness/denominator.py`):它们原本只数分歧、不数
+      # "该数到多少",喂个空文件进去打印一片空白然后退 0。
+      - name: 判官:双键顺反的感知(与外部实现逐根比)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -q -p omgkit-io --release --example dump_bond_stereo -- harness/corpus/large.smi > "$RUNNER_TEMP/bs.tsv"
+          python harness/check_bond_stereo.py "$RUNNER_TEMP/bs.tsv" harness/corpus/large.smi
+
+      - name: 判官:写出时 E/Z 守不守恒
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -q -p omgkit-io --release --example dump_written -- harness/corpus/large.smi > "$RUNNER_TEMP/dw.tsv"
+          python harness/check_ez.py "$RUNNER_TEMP/dw.tsv" harness/corpus/large.smi
+
+      - name: 判官:净化之后写出忠不忠实
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -q -p omgkit-chem --release --example dump_sanitized -- harness/corpus/large.smi > "$RUNNER_TEMP/san.tsv"
+          python harness/check_write_fidelity.py "$RUNNER_TEMP/san.tsv" harness/corpus/large.smi
+
+      # 这一条自带**区分力闸**(`--min-hits`:至少要有 150 条模式真的匹配到东西)。
+      # 那守的是"判据别空过",守不住"上游少喂了几条模式" —— 两条闸各守一半。
+      - name: 判官:SMARTS 写出(语义相同)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -q -p omgkit-io --release --example dump_smarts_written -- harness/corpus/smarts.txt > "$RUNNER_TEMP/sw.tsv"
+          python harness/check_smarts_write.py "$RUNNER_TEMP/sw.tsv" --mols harness/corpus/large.smi --corpus harness/corpus/smarts.txt
+
       # 写出的外部裁判:两边各自规范化再比串,与本实现无共谋。
       #
       # **两个方向都要跑。** 规范那一条先前红了很久没人知道 —— `omgkit-io` 的
@@ -263,3 +306,18 @@ jobs:
           set -euo pipefail
           cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/large.smi --canonical > "$RUNNER_TEMP/canon.tsv"
           python harness/check_write.py "$RUNNER_TEMP/canon.tsv" harness/corpus/large.smi --strict
+
+      # **冒烟语料也要跑写出。** 上面两条只拿 `large.smi` 跑,而那份语料里一条
+      # 非四面体立体(`@SP` / `@TB` / `@OH`:平面四方、三角双锥、八面体)都没有
+      # —— 于是"读得回来、写不出去"这件事先前**一条判据都没守**。
+      #
+      # 冒烟语料里有 6 条,`--strict` 下当场 6 条分歧。现在按 SMILES **逐条钉死**
+      # 在 `check_write.py` 的 `NON_TETRAHEDRAL_GAP` 里,而不是设一个上限:
+      # 上限只能变松,钉死的集合**两个方向都红** —— 写出器补上任何一条,这里当场
+      # 红,逼着把它从名单里划掉;在别的分子上退化,那个分子不在名单里,照旧算分歧。
+      - name: 判官:SMILES 写出(冒烟语料,严格)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/smoke.smi > "$RUNNER_TEMP/wsmoke.tsv"
+          python harness/check_write.py "$RUNNER_TEMP/wsmoke.tsv" harness/corpus/smoke.smi --strict

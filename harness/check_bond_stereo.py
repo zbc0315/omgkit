@@ -20,7 +20,7 @@ STEREOCIS/STEREOTRANS,而不是 `AssignStereochemistry` 给出的 STEREOE/STEREO
 
     cargo run --release -p omgkit-io --example dump_bond_stereo -- \\
         harness/corpus/large.smi > /tmp/bs.tsv
-    python3 harness/check_bond_stereo.py /tmp/bs.tsv
+    python3 harness/check_bond_stereo.py /tmp/bs.tsv harness/corpus/large.smi
 """
 
 import argparse
@@ -28,9 +28,45 @@ import collections
 import pathlib
 import sys
 
+import denominator
+import rdkit
 from rdkit import Chem, RDLogger
 
 RDLogger.DisableLog("rdApp.*")
+
+
+# 高层解析:全套净化 + 立体感知,而且**留着显式氢**,所以下标与
+# `MolFromSmiles(sanitize=False)` 那一份逐个对齐(默认的 `removeHs=True` 会
+# 把 `[H]/N=C…` 开头的氢删掉,整串下标错位)。
+_KEEP_HS = Chem.SmilesParserParams()
+_KEEP_HS.removeHs = False
+
+
+def stereogenic(smi: str, ref):
+    """RDKit **自己**认哪些双键是立体元素 —— 用来给方向标记那一层过筛。
+
+    `SetBondStereoFromDirections` 是低层原语:它把 `/` `\\` 机械地折算成
+    CIS/TRANS,**不问这根双键有没有资格带顺反**。RDKit 的高层解析问 ——
+    小环里的双键(最小环 < 8)被环锁死,没有 E/Z 可言,反式环辛烯是最小的
+    能分离出来的反式环烯烃。
+
+    实测大语料 8833 个分子,两者只在**一根**键上分歧:
+    `CN1CCC\\2=C1/C(=N\\O)/S/C2=N\\c3ccc(cc3)F` 的 4=5,它在一个**五元环**里。
+    方向标记那一层照折算,高层解析给 STEREONONE。本实现跟高层走。
+
+    这不是把判据改成"跟我们一样"。过筛用的是 RDKit 的**另一条**解析路径,
+    筛完之后"哪根键、什么顺反、相对谁"照旧逐个比 —— 我们要是给小环双键
+    标了顺反,这里就是**多标**,照样红。
+    """
+    hi = Chem.MolFromSmiles(smi, _KEEP_HS)
+    if hi is None or hi.GetNumAtoms() != ref.GetNumAtoms():
+        return None
+    ok = set()
+    for b in hi.GetBonds():
+        if b.GetStereo() != Chem.BondStereo.STEREONONE:
+            i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
+            ok.add((min(i, j), max(i, j)))
+    return ok
 
 
 def reference(smi: str):
@@ -43,12 +79,17 @@ def reference(smi: str):
         Chem.SetBondStereoFromDirections(m)
     except Exception:
         return None
+    ok = stereogenic(smi, m)
+    if ok is None:
+        return None
     out = {}
     for b in m.GetBonds():
         st = str(b.GetStereo())
         if st not in ("STEREOCIS", "STEREOTRANS"):
             continue
         i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
+        if (min(i, j), max(i, j)) not in ok:
+            continue
         sa = list(b.GetStereoAtoms())
         if len(sa) != 2:
             continue
@@ -102,18 +143,36 @@ def ours(smi: str, cell: str):
     return out
 
 
+#: 语料里允许有多少条**没真正进比对**。
+#:
+#: 这条判据先前只数分歧、不数"该数到多少" —— 上游的 `dump_bond_stereo` 少喂
+#: 几个分子,每一档都跟着变好看,而它退 0。喂**空文件**进去更彻底:一条分歧
+#: 都没有,打印一片空白然后"全部通过"。
+#:
+#: 实测:`large.smi`(8839 行)没比到 **6**(2022.09.5)/ **8**(2025.09.2,CI 装的),
+#: 全是外部实现读不了原串;
+#: `smoke.smi`(149 行)没比到 **12**(8 条故意解析不了 + 4 条判官读不了)。
+#: 现值 15 = 实测最大加一点余量。
+#:
+#: 这是分母闸,不是宽容度。涨上去说明有一类分子进不了比对,要当场查。
+MAX_UNCOMPARED = 15
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("tsv", type=pathlib.Path)
+    ap.add_argument("corpus", type=pathlib.Path, help="喂给 dump_bond_stereo 的那份语料(核分母用)")
     ap.add_argument("--limit", type=int, default=8)
     args = ap.parse_args()
 
     stat: collections.Counter = collections.Counter()
     bad = []
+    rows = 0
 
     for line in args.tsv.read_text().splitlines():
         if not line.strip():
             continue
+        rows += 1
         smi, _, cell = line.partition("\t")
         if cell.startswith("<"):
             stat[cell] += 1
@@ -146,13 +205,28 @@ def main() -> int:
                 stat["顺反判定不同"] += 1
             bad.append((smi, f"缺{missing} 多{extra} 不同{differ}"))
 
+    # **分母闸。** 见 `MAX_UNCOMPARED` 与 `denominator.py`:少比几个分子,
+    # 上面每一档都会变好看,而"分歧 0"是它退 0 的唯一依据 ——
+    # 喂空文件进去分歧当然是 0。
+    n_corpus = denominator.corpus_size(args.corpus)
+    compared = stat["一致"] + len(bad)
+
+    print(f"外部实现:RDKit {rdkit.__version__}")
     for k, v in stat.most_common():
         print(f"  {k:<24} {v}")
+    print(denominator.line(n_corpus, rows, compared, MAX_UNCOMPARED))
     for s, why in bad[: args.limit]:
         print(f"\n  {s}\n     {why}")
     if len(bad) > args.limit:
         print(f"\n  ...(另有 {len(bad) - args.limit} 条)")
-    return 1 if bad else 0
+    if bad:
+        return 1
+    why = denominator.verdict(n_corpus, rows, compared, MAX_UNCOMPARED)
+    if why:
+        print(f"\n{why}")
+        return 1
+    print("零分歧")
+    return 0
 
 
 if __name__ == "__main__":

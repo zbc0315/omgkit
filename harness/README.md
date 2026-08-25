@@ -442,7 +442,7 @@ gunzip -c chembl_35_chemreps.txt.gz | tail -n +2 | cut -f2 \
 ```bash
 cargo run --release -p omgkit-io --example dump_written -- \
     harness/corpus/large.smi > /tmp/written.tsv
-python3 harness/check_ez.py /tmp/written.tsv
+python3 harness/check_ez.py /tmp/written.tsv harness/corpus/large.smi
 ```
 
 两种失败**分开计数**,别合并成一个"分歧数":
@@ -464,7 +464,7 @@ python3 harness/check_ez.py /tmp/written.tsv
 ```bash
 cargo run --release -p omgkit-chem --example dump_sanitized -- \
     harness/corpus/large.smi > /tmp/san.tsv
-python3 harness/check_write_fidelity.py /tmp/san.tsv
+python3 harness/check_write_fidelity.py /tmp/san.tsv harness/corpus/large.smi
 ```
 
 判据是 `规范(外部实现读原文)` 与 `规范(外部实现读本实现写出的串)` 相同。
@@ -503,8 +503,10 @@ python3 harness/check_write_fidelity.py /tmp/san.tsv
 ```bash
 cargo run --release -p omgkit-io --example dump_bond_stereo -- \
     harness/corpus/large.smi > /tmp/bs.tsv
-python3 harness/check_bond_stereo.py /tmp/bs.tsv
+python3 harness/check_bond_stereo.py /tmp/bs.tsv harness/corpus/large.smi
 ```
+
+(第二个参数是同一份语料,判官拿它**核分母** —— 见 `harness/denominator.py`。)
 
 判据是三样一起比:**哪根双键、什么顺反、相对谁**。只比顺反值不够 ——
 顺反离开参照原子没有意义,四取代双键上参照挑得不同,同一个几何会得出相反的值。
@@ -514,10 +516,30 @@ python3 harness/check_bond_stereo.py /tmp/bs.tsv
 比的是**由方向键直接决定的顺反**,不是按 CIP 优先级定出的 E/Z —— 后者要先算
 优先级,是另一件事,不在这一档的范围内。
 
-当前:8831 条一致(其中 366 条确实有标注),0 分歧。
+### 判官那一侧的参照原本太宽:小环双键
+
+接进 CI 的那一刻这条判据**就是红的**,大语料 8839 个分子里红一条:
+
+```
+CN1CCC\2=C1/C(=N\O)/S/C2=N\c3ccc(cc3)F     4=5 那根双键在一个五元环里
+```
+
+判官的参照那一侧用的是 `SetBondStereoFromDirections` —— 那是**低层原语**,
+把 `/` `\` 机械地折算成 CIS/TRANS,**不问这根双键有没有资格带顺反**。
+小环里的双键被环锁死,没有 E/Z 可言(反式环辛烯是最小的能分离出来的
+反式环烯烃,所以门槛是最小环 < 8)。RDKit 的**高层**解析问这件事,
+本实现跟高层走。
+
+改法:参照那一侧拿 RDKit 的高层解析(`removeHs=False`,下标与低层那份逐个
+对齐)过一道筛,**筛完之后照旧三样逐根比**。这不是把判据改成"跟我们一样" ——
+变异实测:把小环规则关掉,同一条判据报"本实现**多标** 1"并退 1。
+筛掉的键全语料只有这一根。
+
+当前:8833 条一致(其中 366 条确实有标注),0 分歧,6 条外部实现读不了原串。
 
 变异验证过判官有牙齿:翻转顺反抓 153 条、抹掉标注抓 366 条、参照原子置零抓
-366 条。第一项只有 153 是对的 —— 原本判 TRANS 的那 213 条被翻成 TRANS 后不变。
+366 条、关掉小环规则抓 1 条。第一项只有 153 是对的 —— 原本判 TRANS 的
+那 213 条被翻成 TRANS 后不变。
 
 
 ## 规范 SMILES 的忠实性
@@ -529,7 +551,7 @@ python3 harness/check_bond_stereo.py /tmp/bs.tsv
 ```bash
 cargo run --release -p omgkit-chem --example dump_canonical -- \
     harness/corpus/large.smi > /tmp/canon.tsv
-python3 harness/check_write_fidelity.py /tmp/canon.tsv
+python3 harness/check_write_fidelity.py /tmp/canon.tsv harness/corpus/large.smi
 ```
 
 判据与 `dump_sanitized` 那档共用(规范串相同)。变异实测:
@@ -570,6 +592,26 @@ python3 harness/check_write_fidelity.py /tmp/canon.tsv
 | 产物侧**手性**的四种指令 | `check_product_chirality.py`(自带区分力检查) |
 
 **加新路径时先问这张表**:它落在哪一格?没有格子就是新缺口。
+
+### 有格子还不够 —— 那道判据**在不在 CI 里**
+
+**闸不进 CI 就不是闸。** 上表里好几条判官长期只在本地手动跑,而接进 CI 的
+那一刻就有红的:
+
+| 判官 | 在 CI 里 | 备注 |
+|---|---|---|
+| `check_bond_stereo.py` | 是 | **接进来时是红的** —— 五元环内的双键,判官那一侧的参照太宽,见 §双键顺反的感知 |
+| `check_ez.py` | 是 | — |
+| `check_write_fidelity.py` | 是 | 只跑 `large.smi`;非四面体立体那一档由下一行钉着 |
+| `check_smarts_write.py` | 是 | 自带区分力闸 `--min-hits` |
+| `check_write.py` | 是(三次) | 大语料两个方向 + **冒烟语料**。冒烟那次是新加的:大语料里一条非四面体立体都没有,`@SP`/`@TB`/`@OH` 写不出来这件事先前一条判据都没守 |
+| `check_baseline_schema.py` | 是 | 基准与生成它的脚本脱没脱钩 |
+| `check_wedge_readback.py` / `verify_stereo.py` | 是 | — |
+| `check_reactions.py` | **否** | 25 条刻意分歧还没钉死,见 §与外部实现的一处刻意分歧 |
+| `check_byproducts.py` / `check_canonical_fixpoint.py` / `check_smarts_chirality.py` / `check_product_chirality.py` | **否** | 都要 `omgkit` wheel(maturin),CI 里眼下没有 |
+
+接进来的同时给这几条补了**分母闸**(`harness/denominator.py`,只留一份):
+它们原本只数分歧、不数"该数到多少",喂个空文件进去打印一片空白然后退 0。
 
 ## 追命中率的前提是真值本身是对的
 
@@ -660,7 +702,7 @@ canon.rs 里"打破对称影响几条分子"那个数取决于写出器写出多
 cargo run --release -p omgkit-io --example dump_smarts_written -- \
     harness/corpus/smarts.txt > /tmp/sw.tsv
 python3 harness/check_smarts_write.py /tmp/sw.tsv \
-    --mols harness/corpus/large.smi
+    --mols harness/corpus/large.smi --corpus harness/corpus/smarts.txt
 ```
 
 Rust 侧的 `roundtrip_smarts` 测试守的是**写出幂等**,只能保证"解析→写出→解析
@@ -807,9 +849,22 @@ python3 harness/bench_reactions.py <语料.csv> --limit 3000
 
 ## 与外部实现的一处**刻意分歧**:产物分子数由连通性决定
 
-`check_reactions.py` 当前报 **717 一致 / 24 不同**。那 24 条不是缺陷,是本实现
-刻意选择的语义,全部形如 `[C:1][O:2][C:3]>>[C:1][O:2].[C:3]` 作用在**环状**
-醚或内酯上:
+`check_reactions.py` 当前(2026-08-25 实测,`reactions.txt` × `large.smi` 前 300 个)
+报 **716 一致 / 25 不同**,按反应模板分:
+
+| 条数 | 模板 | 底物带环 |
+|---|---|---|
+| 18 | `[C:1][N:2]>>[C:1].[N:2]` | 17 带环、**1 无环** |
+| 5 | `[C:1][O:2][C:3]>>[C:1][O:2].[C:3]` | 全带环 |
+| 1 | `[C:1](=[O:2])[N:3]>>[C:1](=[O:2])[OH].[N:3]` | 带环 |
+| 1 | `[C:1][C:2]=[O:3]>>[C:1][C:2][OH:3]` | 带环 |
+
+**这段先前写的是 717 / 24,而且说这些"全部形如 `[C:1][O:2][C:3]>>…`"** ——
+两样都不对了:数目挪了一条,而占大头的其实是 C–N 那条模板。**这份文档自己
+写着"数目变了要重新查",而没有任何判据在看这个数** —— `check_reactions.py`
+至今没进 CI,谁想起来谁跑一次。见本节末尾。
+
+下面这个例子仍然成立(环状底物 + 断环模板 → 按连通分量切):
 
 ```
 底物   [C@]12(C(OCC1C(=C)CC[C@@H]2O)=O)C          双环内酯
@@ -828,8 +883,30 @@ python3 harness/bench_reactions.py <语料.csv> --limit 3000
 任何一档判据在看这个数,所以专门加了
 `omgkit-match/tests/reaction.rs` 的 `products_never_invent_atoms`。
 
-**这 24 条的数目变了要重新查**:变多说明有新的形状撞上来,变少说明改动被
+**这 25 条的数目变了要重新查**:变多说明有新的形状撞上来,变少说明改动被
 无意中撤销了。
+
+### 那 25 条里**有一条不是这个故事**:无环底物上的手性
+
+```
+反应   [C:1][N:2]>>[C:1].[N:2]
+底物   [H]/N=C(\C#N)/[C@@](C)([NH+](C)C)SC     无环
+基准   … C[NH2+]C . [H]/N=C(\C#N)[C@@H](C)SC
+本实现 … C[NH2+]C . [H]/N=C(\C#N)[C@H](C)SC
+                                    ↑ 号相反
+```
+
+四配位手性中心被摘掉一个取代基,空出来的位置补隐式氢 —— 补进**哪个槽位**
+决定了剩下的构型。这与"产物分子数由连通性决定"完全无关,是另一档,而它
+先前被"那 24 条是刻意分歧"整个盖住了。产物侧手性有专门的判官
+(`check_product_chirality.py`),但它要 wheel,也没进 CI。
+
+### 为什么 `check_reactions.py` 还不能进 CI
+
+它是零容差的(`return 1 if bad else 0`),而这 25 条是**刻意**分歧 —— 直接接
+进去当场红。要接进去得先把这批分歧**按(反应, 底物)逐条钉死**,像
+`check_write.py` 的 `NON_TETRAHEDRAL_GAP` 那样两个方向都红,而不是设一个上限。
+钉之前先得把上面那条手性分歧查清楚:那一条不该进名单,它是缺陷不是选择。
 
 
 ## SMARTS 手性:判据必须先证明自己分得出正反
