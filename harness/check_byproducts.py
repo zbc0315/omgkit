@@ -37,7 +37,23 @@ import json
 import sys
 
 import omgkit
+import rdkit
 from rdkit import Chem, RDLogger
+
+
+def _banner() -> None:
+    """**把版本与 wheel 的来路打出来。**
+
+    这条判据是**经 wheel** 看 Rust 侧行为的,而 `import omgkit` 未必装的是
+    刚建的那一份(用户级 site-packages 里可能躺着一个旧的)。改完 Rust 不重建
+    就量,结论会稳稳指向错误的方向且毫无迹象 —— 这个坑本仓库栽过。
+
+    RDKit 版本也要打:仓库钉 2025.09.2,开发机的 `.venv` 未必是同一个,
+    而这一档**换版本会翻结论**(见 harness/README.md)。
+    """
+    print(f"外部实现:RDKit {rdkit.__version__}")
+    print(f"  omgkit wheel:{omgkit.__file__}")
+
 
 RDLogger.DisableLog("rdApp.*")
 
@@ -147,6 +163,7 @@ def mutate(smis, kind):
 
 
 def main():
+    _banner()
     ap = argparse.ArgumentParser()
     ap.add_argument("corpus", help="templates.jsonl(带 fwd 模板与 reactants)")
     ap.add_argument("--limit", type=int, default=0)

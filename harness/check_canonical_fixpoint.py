@@ -26,11 +26,24 @@ import sys
 
 import omgkit
 
+
+def _banner() -> None:
+    """**把版本与 wheel 的来路打出来。**
+
+    这条判据是**经 wheel** 看 Rust 侧行为的,而 `import omgkit` 未必装的是
+    刚建的那一份(用户级 site-packages 里可能躺着一个旧的)。改完 Rust 不重建
+    就量,结论会稳稳指向错误的方向且毫无迹象 —— 这个坑本仓库栽过。
+    """
+    print(f"  omgkit wheel:{omgkit.__file__}")
+
+
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument("corpus")
 ap.add_argument("--max-bad", type=int, default=0, help="容忍几条不动点例外")
 ap.add_argument("--limit", type=int, default=10**9)
 args = ap.parse_args()
+
+_banner()
 path = args.corpus
 limit = args.limit
 

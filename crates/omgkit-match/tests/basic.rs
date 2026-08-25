@@ -5,7 +5,7 @@
 
 use omgkit_chem::sanitize;
 use omgkit_core::MolBuilder;
-use omgkit_io::{smarts, smiles};
+use omgkit_io::{canon, smarts, smiles};
 use omgkit_match::{substructure_matches, MatchOptions, MolProps};
 
 /// 解析并跑完整的净化 —— 匹配要用到隐式氢、芳香标志、环信息。
@@ -175,6 +175,63 @@ fn chirality_matching_rebases_the_reference_frame() {
             .len();
             assert_eq!(got, want[i], "{query} 对 {smi}");
         }
+    }
+}
+
+/// **首原子的括号氢排第几** —— SMARTS 必须与 SMILES 读成同一件事。
+///
+/// 规范:`[C@H]` 的括号氢占四元组里"紧跟前一个原子"那一位。首原子没有前一个
+/// 原子,氢因此落到**第一位**;而 `C[C@H](N)O` 里第一位是前面那个碳、氢排第二。
+/// 两者差一次对换,所以 `[C@@H](C)(N)O` 与 `C[C@H](N)O` 是**同一个**构型。
+///
+/// # 为什么值得单独钉一条
+///
+/// 上面那条 `chirality_matching_rebases_the_reference_frame` 的查询里手性原子
+/// 虽然也在首位,但**没写括号氢**(`[C@:1](...)`)—— 正好绕开了这一档。
+/// 于是"首原子 + 括号氢"这一支在 Rust 侧一条判据都没有,只有
+/// `harness/check_smarts_chirality.py` 看得见,而它要 wheel、先前也不在 CI 里。
+///
+/// # 期望值从哪来:RDKit **自己跟自己**对不上
+///
+/// 同一批查询,RDKit 2022.09.5 与 2025.09.2 给出**相反**的匹配
+/// (`[C@@H](C)(N)O` 在 2025 上匹配 `C[C@H](N)O`,在 2022 上匹配它的对映体);
+/// 而两版对**同一串当 SMILES 读**的结果完全一致(都规范成 `C[C@H](N)O`)。
+/// 也就是说 2022 的 SMARTS 与它自己的 SMILES 读法自相矛盾,2025 修好了。
+/// 本仓库钉 2025.09.2,本实现与它一致。
+///
+/// 这条判据因此**不诉诸任何外部实现**:它断的是"SMARTS 与 SMILES 同一个读法",
+/// 而 SMILES 那一侧由全量差分判据独立守着。
+#[test]
+fn a_leading_bracket_h_is_read_the_same_in_smarts_and_smiles() {
+    // (同一串, 它当 SMILES 读等于谁, 谁是对映体)
+    for (query, same, mirror) in [
+        ("[C@@H](C)(N)O", "C[C@H](N)O", "C[C@@H](N)O"),
+        ("[C@H](C)(N)O", "C[C@@H](N)O", "C[C@H](N)O"),
+    ] {
+        // 一、先把 SMILES 那一侧钉死 —— 它是这条判据的立足点,
+        // 不钉的话下面两条断言可以在"两边一起错"的情况下双双通过
+        let a = canon::canonical_smiles(&sanitized(query)).smiles;
+        let b = canon::canonical_smiles(&sanitized(same)).smiles;
+        let c = canon::canonical_smiles(&sanitized(mirror)).smiles;
+        assert_eq!(a, b, "{query} 当 SMILES 读该等于 {same}");
+        assert_ne!(b, c, "{same} 与 {mirror} 该是对映体");
+
+        // 二、SMARTS 那一侧必须给出同一个读法
+        let opts = MatchOptions {
+            max_matches: 0,
+            uniquify: true,
+            use_chirality: true,
+        };
+        assert_eq!(
+            hits(query, same, opts).len(),
+            1,
+            "{query} 该匹配 {same} —— 首原子的括号氢排第一位"
+        );
+        assert_eq!(
+            hits(query, mirror, opts).len(),
+            0,
+            "{query} 不该匹配对映体 {mirror}"
+        );
     }
 }
 

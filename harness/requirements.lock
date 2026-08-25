@@ -26,6 +26,13 @@
 # 三行一起改,然后把 `harness/gates.sh` 最后那两条判据各跑一遍。**别只升 RDKit**
 # —— 上面那个 numpy 的坑就是这么来的。若升级会动到 `harness/baseline/`,
 # 那批基准要用新版重导一遍,并且在同一次提交里说明。
+#
+# # maturin 也钉
+#
+# 有四条判官是**经 wheel** 看 Rust 侧行为的(`check_smarts_chirality.py` 等)。
+# 建 wheel 的工具版本会影响建出来的东西,而这几条判据的结论就挂在上面 ——
+# 与 RDKit 同理,钉住才有"本地绿和 CI 绿是同一件事"。
 rdkit==2025.9.2
 numpy==2.0.2
 pillow==11.3.0
+maturin==1.14.1

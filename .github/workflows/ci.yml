@@ -238,6 +238,46 @@ jobs:
           cargo run -q -p omgkit-conf --release --example dump_conformers -- harness/corpus/large.smi > "$RUNNER_TEMP/ours.jsonl"
           python harness/verify_stereo.py "$RUNNER_TEMP/ours.jsonl" harness/corpus/large.smi
 
+      # ---- 经 wheel 看 Rust 行为的那几条 ----
+      #
+      # **闸不进 CI 就不是闸**,而这几条的门槛比别的高一层:它们 `import omgkit`,
+      # 看到的是**建出来的 wheel**,不是源码。所以要先建再装,而且判据自己会把
+      # `omgkit.__file__` 打出来 —— 用户级 site-packages 里躺着旧的一份时,
+      # `import omgkit` 会静默拿到它,量到的结论稳稳指向错误的方向。
+      #
+      # `check_smarts_chirality.py` 还自带一道"wheel 比源码旧就退 1"的自查。
+      - name: 建并装 omgkit wheel(判据经它看 Rust 行为)
+        shell: bash
+        run: |
+          set -euo pipefail
+          maturin build --release -m crates/omgkit-py/Cargo.toml --out "$RUNNER_TEMP/wheels"
+          pip install --force-reinstall "$RUNNER_TEMP"/wheels/omgkit-*.whl
+          python -c "import omgkit; print('装在', omgkit.__file__)"
+
+      # 规范化的两条**自指**不变量,不需要任何外部参照:规范形式是不动点,
+      # 净化是幂等的。全语料跑。
+      - name: 判官:规范化的自指不变量(不动点 + 幂等)
+        run: python harness/check_canonical_fixpoint.py harness/corpus/large.smi
+
+      # **SMARTS 手性的参照系。** 这一档换 RDKit 版本会**翻结论**:同一批查询,
+      # 2022.09.5 与 2025.09.2 给出相反的匹配(`[C@@H](C)(N)O` 在 2025 上匹配
+      # `C[C@H](N)O`,在 2022 上匹配它的对映体),而两版对**同一串当 SMILES 读**
+      # 完全一致 —— 也就是 2022 的 SMARTS 与它自己的 SMILES 读法自相矛盾。
+      # 仓库钉 2025.09.2,本实现与它一致;判据自己会把版本打出来。
+      #
+      # 同一条约定另有一条**不依赖 RDKit** 的判据看着:`omgkit-match/tests/basic.rs`
+      # 的 `a_leading_bracket_h_is_read_the_same_in_smarts_and_smiles`。
+      - name: 判官:SMARTS 手性的参照系(自带区分力闸)
+        run: python harness/check_smarts_chirality.py
+
+      # 产物模板两侧写没写手性各自表达什么。自带区分力检查。
+      - name: 判官:产物侧手性的四种指令
+        run: python harness/check_product_chirality.py
+
+      # Python 绑定层:类型翻错、错误信息丢失、对象语义不对、构建配置埋雷。
+      - name: 判官:Python 绑定
+        run: python harness/test_python.py
+
       # ---- 先前只在本地手动跑的那四条 ----
       #
       # **闸不进 CI 就不是闸。** 它们一直躺在 `harness/` 里,谁想起来谁跑一次。

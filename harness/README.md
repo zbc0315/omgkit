@@ -608,10 +608,29 @@ python3 harness/check_write_fidelity.py /tmp/canon.tsv harness/corpus/large.smi
 | `check_baseline_schema.py` | 是 | 基准与生成它的脚本脱没脱钩 |
 | `check_wedge_readback.py` / `verify_stereo.py` | 是 | — |
 | `check_reactions.py` | 是 | 22 条刻意分歧按(反应, 底物)逐条钉死;接进来的过程中揪出 3 条真缺陷,见 §与外部实现的一处刻意分歧 |
-| `check_byproducts.py` / `check_canonical_fixpoint.py` / `check_smarts_chirality.py` / `check_product_chirality.py` | **否** | 都要 `omgkit` wheel(maturin),CI 里眼下没有 |
+| `check_canonical_fixpoint.py` / `check_smarts_chirality.py` / `check_product_chirality.py` / `test_python.py` | 是 | 要 `omgkit` wheel:CI 先 `maturin build` 再 `pip install`(maturin 版本也钉在 lock 里)。判据自己打印 `omgkit.__file__` |
+| `check_byproducts.py` | **否** | 要 USPTO-50k 的 `templates.jsonl`,那份语料不随仓库分发 |
 
 接进来的同时给这几条补了**分母闸**(`harness/denominator.py`,只留一份):
 它们原本只数分歧、不数"该数到多少",喂个空文件进去打印一片空白然后退 0。
+
+#### 经 wheel 看 Rust 行为的那几条,门槛高一层
+
+它们 `import omgkit`,看到的是**建出来的 wheel**,不是源码。所以:
+
+- CI 与 `gates.sh` 都先 `maturin build` 再 `pip install --force-reinstall`,
+  **maturin 的版本也钉在 `requirements.lock` 里** —— 建 wheel 的工具会影响建出来
+  的东西,而这几条判据的结论就挂在上面。
+- 每条判据自己打印 `omgkit.__file__`:用户级 site-packages 里躺着旧的一份时,
+  `import omgkit` 会**静默**拿到它。实测开发机上就有这么一份。
+- `check_smarts_chirality.py` 另有一道自查:wheel 比源码旧就直接退 1。
+
+#### `gates.sh` 现在先查 RDKit 版本,对不上就当场停
+
+先前这里只查"有没有这个解释器",理由写着"这批判据两边喂的是同一个 RDKit,
+版本变化会对消"。那句话对**当时**那几条成立(参照侧与读回侧都是 RDKit),
+对后来接进来的**不成立**:`check_smarts_chirality.py` 一侧是 RDKit、另一侧是
+本实现,版本一换就没得对消 —— 见下一节。
 
 ## 追命中率的前提是真值本身是对的
 
@@ -957,9 +976,34 @@ python3 harness/bench_reactions.py <语料.csv> --limit 3000
 
 **凡是经 wheel 观察 Rust 行为的判据,都要先重建再测量。**
 
+### 这一档**换 RDKit 版本会翻结论** —— 而且不是本实现的锅
+
+拿开发机的 RDKit **2022.09.5** 跑,这条判据报 **48 条"反了"**,而且分布得
+干干净净:全部落在"**首原子 + 括号氢**"那三格(首有H 0环/1环/2环),
+其余六格 56 条一条不差。拿仓库钉的 **2025.09.2** 跑,104 条全对、0 空过。
+
+谁对不是投票定的。同一批串,问 RDKit **自己**:
+
+| 串 | 当 SMILES 读(两版一致) | 当 SMARTS 匹配 `C[C@H](N)O` |
+|---|---|---|
+| `[C@@H](C)(N)O` | 规范成 `C[C@H](N)O` | 2025 **中**;2022 不中(它中对映体) |
+| `[C@H](C)(N)O` | 规范成 `C[C@@H](N)O` | 2025 不中;2022 **中** |
+| `C[C@H](N)O`(非首) | 规范成自己 | 两版都中 |
+
+**2022 的 SMARTS 与它自己的 SMILES 读法自相矛盾**,2025 修好了。规范是:
+`[C@H]` 的括号氢占"紧跟前一个原子"那一位;首原子没有前一个原子,氢因此落到
+**第一位**,与 `C[C@H](...)` 差一次对换。本实现按规范做,与 2025 一致。
+
+因此 `harness/gates.sh` 现在**先查 RDKit 版本,对不上就当场停**:一侧是本实现
+的判据,版本一换就没得"两边对消"。同一条约定另有一条**不依赖 RDKit** 的判据
+守着 —— `omgkit-match/tests/basic.rs` 的
+`a_leading_bracket_h_is_read_the_same_in_smarts_and_smiles`,它断的是
+"SMARTS 与 SMILES 同一个读法",而 SMILES 那一侧由全量差分判据独立守着。
+变异实测:把首原子那一支关掉(= 2022 的行为),这条判据当场红。
+
 ### 当前状态
 
-104 条生成查询全部一致,0 空过。
+104 条生成查询全部一致,0 空过(RDKit 2025.09.2)。
 
 真基线(无任何补偿)是 52 条与外部实现相反、40 条空过。单独补哪一项都不行:
 只补环闭合置换会翻掉本来正确的那些,只补括号氢更差。要**两项一起补**,而且

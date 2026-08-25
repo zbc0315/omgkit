@@ -621,7 +621,6 @@ pub(super) fn permutation_is_odd(from: &[u32], to: &[u32]) -> bool {
     swaps % 2 == 1
 }
 
-/// 方括号里写的氢数。没写返回 `None`。
 /// 括号氢那一项该不该补。解析与写出**共用这一份**。
 ///
 /// 两处必须互逆:解析把标记从书写序换到存储序,写出换回来。各写一份的话,
@@ -671,6 +670,7 @@ pub(super) fn has_unsaturated_bond(topology: &MolBuilder, bonds: &[BondExpr], at
         .any(|(i, _)| bonds.get(i).is_some_and(multiple))
 }
 
+/// 方括号里写的氢数。没写返回 `None`。
 pub(super) fn bracket_h_count(expr: &AtomExpr) -> Option<u32> {
     match expr {
         AtomExpr::Prim(AtomPrim::TotalHs(n)) => Some(*n),

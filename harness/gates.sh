@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 # 漏一处就是个不会报错的假数。CI 的头注释里记过同一个坑(那里原先写着
 # "四道闸门",而步骤早已加到八步)。这里由 `step` 计数,末尾自查:
 # 改了步骤忘了改 `TOTAL`,脚本最后一行会红。
-TOTAL=25
+TOTAL=29
 N=0
 step() {
     N=$((N + 1))
@@ -38,11 +38,38 @@ trap 'rm -rf "$WORK"' EXIT
 # **末尾那一批判据要 RDKit,所以先在这里查一次。** 放在末尾的话,要等前面十几步
 # (十来分钟 cargo)跑完才知道环境缺东西。没有就直接失败,**不跳过** ——
 # 静默跳过的判据是最坏的一种,它让人以为跑过了。
-PY=.venv/bin/python
+PY=${PY:-.venv/bin/python}
 if [ ! -x "$PY" ]; then
     echo "缺 $PY —— 末尾那一批判据要 RDKit。" >&2
     echo "  建法:python3 -m venv .venv &&" >&2
     echo "        .venv/bin/pip install --only-binary=:all: -r harness/requirements.lock" >&2
+    exit 1
+fi
+
+# **版本也要查,而且要在这里查。**
+#
+# 先前这里只查"有没有这个解释器",理由是"这批判据两边喂的是同一个 RDKit,
+# 版本变化会对消"。那句话对**当时**那几条成立(参照侧与读回侧都是 RDKit),
+# 对后来接进来的**不成立**:`check_smarts_chirality.py` 一侧是 RDKit、
+# 另一侧是本实现,版本一换就没得对消。
+#
+# 实测:同一批 SMARTS 查询,RDKit 2022.09.5 与 2025.09.2 给出**相反**的匹配
+# (`[C@@H](C)(N)O` 在 2025 上匹配 `C[C@H](N)O`,在 2022 上匹配它的对映体),
+# 而两版对同一串**当 SMILES 读**完全一致 —— 2022 的 SMARTS 与它自己的 SMILES
+# 读法自相矛盾,2025 修好了。拿 2022 跑,这条判据报 48 条"反了",一条都不是真的。
+#
+# 所以:版本对不上就**当场停**,不往下跑。读一个跑错版本的绿或红,比不跑更糟。
+WANT_RDKIT=$(sed -n 's/^rdkit==//p' harness/requirements.lock)
+HAVE_RDKIT=$("$PY" -c 'import rdkit; print(rdkit.__version__)' 2>/dev/null || echo "(装不上)")
+# 锁里写 2025.9.2,而 `rdkit.__version__` 报 2025.09.2 —— 补零的差别,按数值比
+norm() { echo "$1" | awk -F. '{printf "%d.%d.%d", $1, $2, $3}'; }
+if [ "$(norm "$HAVE_RDKIT")" != "$(norm "$WANT_RDKIT")" ]; then
+    echo "${PY} 的 RDKit 是 ${HAVE_RDKIT},而 harness/requirements.lock 钉的是 ${WANT_RDKIT}。" >&2
+    echo "  仓库只认一个 RDKit 版本 —— 版本不对时,一侧是本实现的那几条判据" >&2
+    echo "  (check_smarts_chirality)量出来的红绿都不作数。" >&2
+    echo "  对版:$PY -m pip install --force-reinstall --only-binary=:all: -r harness/requirements.lock" >&2
+    echo "  (若 pip list 里同时有 rdkit 与 rdkit-pypi,先卸掉 rdkit-pypi —— 两者装进同一个包目录,后装的赢)" >&2
+    echo "  只想拿别的解释器跑一遍:PY=/path/to/python bash harness/gates.sh" >&2
     exit 1
 fi
 
@@ -170,6 +197,31 @@ cargo run -q -p omgkit-conf --release --example dump_conformers -- harness/corpu
 # (把全部顺式写成反式),判据打印"仅 双键立体 不同 149 条"然后**退 0**;
 # 同样手法翻四面体手性则报 300 条分歧、退 1 —— 是这一档的洞,不是判官坏了。
 # 大语料上两个豁免桶现值都是 0,所以 `--strict` 现在就能开(实测两个方向都退 0)。
+# ---- 经 wheel 看 Rust 行为的那几条 ----
+#
+# 门槛比别的高一层:它们 `import omgkit`,看到的是**建出来的 wheel**,不是源码。
+# 所以要先建再装。用户级 site-packages 里躺着旧的一份时,`import omgkit` 会
+# 静默拿到它 —— 判据自己会把 `omgkit.__file__` 打出来。
+#
+# `check_byproducts.py` 进不来:它要 USPTO-50k 的 templates.jsonl,
+# 那份语料不随仓库分发。
+echo "== 建 wheel(下面几条判据经它看 Rust 行为)"
+"$PY" -m maturin build --release -q -m crates/omgkit-py/Cargo.toml --out "$WORK/wheels"
+"$PY" -m pip install -q --force-reinstall "$WORK"/wheels/omgkit-*.whl
+
+step "判官:规范化的自指不变量(不动点 + 幂等)"
+"$PY" harness/check_canonical_fixpoint.py harness/corpus/large.smi
+# 这一档**换 RDKit 版本会翻结论**:2022.09.5 与 2025.09.2 对同一批查询给出相反
+# 的匹配,而两版对同一串当 SMILES 读完全一致 —— 2022 的 SMARTS 与它自己的
+# SMILES 读法自相矛盾。仓库钉 2025.09.2;判据自己打印版本号。
+# 开发机的 .venv 若是 2022.09.5,这一条会红 48 条,那不是回归。
+step "判官:SMARTS 手性的参照系(自带区分力闸)"
+"$PY" harness/check_smarts_chirality.py
+step "判官:产物侧手性的四种指令"
+"$PY" harness/check_product_chirality.py
+step "判官:Python 绑定"
+"$PY" harness/test_python.py
+
 # ---- 先前只在本地手动跑的那几条 ----
 #
 # **闸不进 CI 就不是闸。** 下面这四条判官一直躺在 `harness/` 里,谁想起来谁跑一次
