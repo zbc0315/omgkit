@@ -165,19 +165,33 @@ const MIN_BROKEN_ALLOWANCE: u64 = 3;
 /// 先前 `conformer_oracle` 把"键交叉 + 环穿刺"列为四件硬事之一、也打印了这个数,
 /// 但它的 fatal 段**只判环穿刺** —— 键交叉一处都没人拦。
 ///
-/// # 环穿刺这里**故意没有闸**,这是记在账上的,不是漏了
-///
-/// `threading::detect` 的环穿刺用**质心扇形三角化 + `.any()`**,在非凸环上
-/// 会假阳性:相交次数是偶数(mod-2 环绕数为 0,拓扑上没穿过去)时 `.any()`
-/// 照样报真。已复现:18 元月牙环,链从凹口外竖直穿过,与两个扇形面相交 2 次,
-/// 报 `pierces = 1`。给一个已知会假阳性的量装硬闸,红起来查的是判据不是产物。
-/// 先修检测器(改成数交点奇偶),再上闸。
-///
 /// 键交叉那一条先前有一例假阳性(四面体烷 `C12C3C1C23` 的三对**对棱**几何上
 /// 就相距 `a/√2 = 1.066 Å`,低于 `CROSS_TOL`,而它们被环系锁死无法互穿)。
 /// 已经在 `threading::detect` 里按拓扑距离排除掉,所以这里的下限可以取 1。
 const MAX_CROSS_MOL_FRAC: f64 = 0.001;
 const MIN_CROSS_ALLOWANCE: u64 = 1;
+
+/// **键都没断、却穿了环**的分子数上限。必须是 0。
+///
+/// # 为什么闸是这个形状,而不是"穿刺分子数 ≤ N"
+///
+/// 环穿刺先前**故意没有闸**:`threading::detect` 用 `.any()` 数"有没有交点",
+/// 非凸环上会假阳性,给一个会撒谎的量装硬闸,红起来查的是判据不是产物。
+/// 检测器现在改成数交点奇偶了(见 `omgkit_conf::threading` 的模块文档),
+/// 可以上闸。
+///
+/// 但"穿刺分子数 ≤ N"是个**可以随手往上抬的数**。实测全语料只有 1 个分子
+/// 报穿刺,而它**已经在"至少断一根键"那 29 个里面**:
+/// `C12([P+](CCC3=CC=CC=C3)(C)C)CC4CC(C1)CC(C2)C4`,金刚烷笼塌了 ——
+/// 那根穿过去的 C–C 键距离六元环质心只有 0.15 Å,笼上 13 对里 13 对越界,
+/// 连 1-2 键 `19-0` 都只有 1.344 Å(界 `[1.517, 1.537]`),精修跑满 400 步没收敛。
+///
+/// 所以闸判的是**关系**:穿了环的分子,必须同时是键断了的分子。
+/// 这不是定律 —— 自穿判据存在的理由正是"穿过去时每一对距离都可以完全合法"
+/// (见 `threading` 的模块文档)。它是一条**回归闸**:钉住"今天每一处穿刺都
+/// 由一个已经报出来的缺陷解释得了",哪天冒出一个键完好却穿了环的分子,
+/// 那是新的一类,当场红。
+const MAX_PIERCE_WITH_INTACT_BONDS: u64 = 0;
 
 /// **漏了把 `/` `\` 折算成 `BondStereo` 的分子数**上限。必须是 0。
 ///
@@ -235,6 +249,8 @@ fn main() {
     // ---- 几何:先前**只有 150 个分子的判官在看**,全语料这边一条都没有 ----
     let mut viol = [(0u64, 0u64); 5];
     let (mut n_broken_bond, mut n_cross_mol, mut n_pierce_mol) = (0u64, 0u64, 0u64);
+    let mut n_pierce_intact = 0u64;
+    let mut pierce_intact_cases: Vec<String> = Vec::new();
     let (mut n_cross, mut worst_over) = (0u64, 0.0f64);
     let mut broken_cases: Vec<String> = Vec::new();
     let mut thread_cases: Vec<String> = Vec::new();
@@ -370,7 +386,8 @@ fn main() {
             viol[k].0 += bad;
             viol[k].1 += tot;
         }
-        if v[1].0 > 0 {
+        let bonds_broken = v[1].0 > 0;
+        if bonds_broken {
             n_broken_bond += 1;
             if broken_cases.len() < 6 {
                 broken_cases.push(smi.to_string());
@@ -393,6 +410,12 @@ fn main() {
         n_cross += t.crossings as u64;
         n_cross_mol += u64::from(t.crossings > 0);
         n_pierce_mol += u64::from(t.pierces > 0);
+        if t.pierces > 0 && !bonds_broken {
+            n_pierce_intact += 1;
+            if pierce_intact_cases.len() < 6 {
+                pierce_intact_cases.push(smi.to_string());
+            }
+        }
         if (t.crossings > 0 || t.pierces > 0) && thread_cases.len() < 6 {
             thread_cases.push(format!("{smi}(交叉{} 穿刺{})", t.crossings, t.pierces));
         }
@@ -454,7 +477,10 @@ fn main() {
     if !broken_cases.is_empty() {
         println!("    断键的例子:{}", broken_cases.join("  "));
     }
-    println!("    键交叉 {n_cross} 处,分布在 {n_cross_mol} 个分子;有环穿刺的分子 {n_pierce_mol}");
+    println!(
+        "    键交叉 {n_cross} 处,分布在 {n_cross_mol} 个分子;有环穿刺的分子 {n_pierce_mol},\
+         其中**键都没断**的 {n_pierce_intact}(上限 {MAX_PIERCE_WITH_INTACT_BONDS})"
+    );
     if !thread_cases.is_empty() {
         println!("    自穿的例子:{}", thread_cases.join("  "));
     }
@@ -539,6 +565,16 @@ fn main() {
     )]
     let allow = |frac: f64, floor: u64| ((n_conf as f64 * frac).ceil() as u64).max(floor);
     let broken_allowed = allow(MAX_BROKEN_MOL_FRAC, MIN_BROKEN_ALLOWANCE);
+    if n_pierce_intact > MAX_PIERCE_WITH_INTACT_BONDS {
+        eprintln!(
+            "\n有 {n_pierce_intact} 个分子**键都没断却穿了环** > 上限 \
+             {MAX_PIERCE_WITH_INTACT_BONDS} —— 这是新的一类缺陷:\n\
+             它不会被越界那几档看见(穿过去时每一对距离都可以完全合法)\n\
+             例子:{}",
+            pierce_intact_cases.join("  ")
+        );
+        fatal = true;
+    }
     if n_broken_bond > broken_allowed {
         eprintln!(
             "\n有 {n_broken_bond} 个分子至少断一根键 > 允许的 {broken_allowed} 个\
@@ -560,7 +596,7 @@ fn main() {
     }
     // 逐条点名,别只报个数 —— 加了闸忘了改数,或者改了数没加闸,都是这么来的。
     println!(
-        "\n十条都过:空区间 / 界不可行 / 顺反没折算 / 原子重合 / 非有限数 / 该出没出 / \
-         1-2 键 / 1-3 角 / 断键分子 / 键交叉分子。"
+        "\n十一条都过:空区间 / 界不可行 / 顺反没折算 / 原子重合 / 非有限数 / 该出没出 / \
+         1-2 键 / 1-3 角 / 断键分子 / 键交叉分子 / 键没断却穿环的分子。"
     );
 }
