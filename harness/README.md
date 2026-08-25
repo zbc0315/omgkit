@@ -581,7 +581,8 @@ python3 harness/check_write_fidelity.py /tmp/canon.tsv harness/corpus/large.smi
 | 规范排序的唯一性 | `canonical_invariance`(重排不变,不需要外部参照) |
 | 双键顺反的感知 | `check_bond_stereo.py` |
 | SMARTS 解析(L4) | `oracle_smarts.py` |
-| SMARTS **写出**(L3) | `roundtrip_smarts`(幂等)+ `check_smarts_write.py`(语义) |
+| SMARTS **写出**(L3) | `roundtrip_smarts`(幂等 + 规模 + **映射号**)+ `check_smarts_write.py`(语义) |
+| SMARTS 写出的**原子映射号** | `roundtrip_smarts::reaction_templates_keep_their_atom_maps`(语料是 `reactions.txt`) |
 | 子结构匹配(L5) | `oracle_matches.py` |
 | 产物生成(L7) | `check_reactions.py` |
 | 被丢弃原子的收口(L7) | `omgkit-match/tests/byproduct.rs`(判据是质量守恒,不依赖记录) |
@@ -727,6 +728,32 @@ python3 harness/check_smarts_write.py /tmp/sw.tsv \
 Rust 侧的 `roundtrip_smarts` 测试守的是**写出幂等**,只能保证"解析→写出→解析
 这一趟没丢信息"。一个系统性写错的运算符可以既幂等又是错的 —— 这一档补的正是
 那个缺口:两个 SMARTS 都交给外部实现去匹配同一批分子,比匹配到的东西。
+
+### 原子映射号:三条判据一起瞎了
+
+写出器把 `:n` 整批丢掉的话:
+
+| 判据 | 抓得住吗 | 为什么 |
+|---|---|---|
+| `roundtrip_smarts` 的**幂等** | **抓不住** | 第一趟没 `:n`、再解析没有、第二趟还是没有 —— 幂等成立 |
+| `roundtrip_smarts` 的**规模守恒** | **抓不住** | 原子数与键数一个没少 |
+| `check_smarts_write.py` 的**语义** | **抓不住** | 映射号不参与匹配,匹配到的东西一个不差 |
+| `differential_smarts` | **抓不住** | 实测变异下退 0 |
+
+而这一档丢了就是灾难:产物构建全靠映射号对位,丢掉之后模板还"写得出来、
+解析得回、幂等",只是它描述的不再是同一个反应。
+
+**语料这一层也是空的**:`smarts.txt` 的 776 条模式里**一条映射号都没有**。
+所以判据加在哪都得先问"这份语料里有没有这东西" —— `check_smarts_write.py`
+现在把 `其中带原子映射号 N` 打出来,N 为 0 时空过是**看得见**的。
+
+真正带映射号的语料是 `reactions.txt`(20 条模板、96 个映射号),由 Rust 侧的
+`reaction_templates_keep_their_atom_maps` 守:**逐段**比多重集(合起来比的话,
+把一个号从反应物挪到产物照样"守恒"),并把条数与映射号总数钉死 ——
+语料换成没有映射号的一份时,上面每条断言都会在空多重集上成立。
+
+变异实测:写出器丢掉 `:n` → 新判据红,`differential_smarts` 与
+`check_smarts_write.py` **双双退 0**。
 
 ### 比的是集合,不是匹配元组
 

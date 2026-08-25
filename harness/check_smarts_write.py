@@ -110,6 +110,7 @@ def main() -> int:
     bad = []
     hits = 0
     rows = 0
+    n_mapped = 0
 
     for line in args.tsv.read_text().splitlines():
         if not line.strip():
@@ -128,6 +129,22 @@ def main() -> int:
         if pb is None:
             stat["写出的串外部实现读不了"] += 1
             bad.append((src, got, "外部实现读不了"))
+            continue
+        # **原子映射号不参与匹配** —— 上面那条语义判据对它是**瞎的**:
+        # 写出器把 `:n` 整批丢掉,匹配到的东西一个不差,这里照样"语义相同"。
+        # 所以单独数一遍。
+        #
+        # 注意这一档在**当前语料上是空过的**:`smarts.txt` 的 776 条模式里
+        # 一条映射号都没有(下面 `n_mapped` 会把这个数打出来,别让它静默)。
+        # 真正带映射号的语料是 `reactions.txt`,由 Rust 侧的
+        # `roundtrip_smarts.rs::reaction_templates_keep_their_atom_maps` 守着。
+        maps_a = sorted(a.GetAtomMapNum() for a in pa.GetAtoms() if a.GetAtomMapNum())
+        maps_b = sorted(a.GetAtomMapNum() for a in pb.GetAtoms() if a.GetAtomMapNum())
+        if maps_a:
+            n_mapped += 1
+        if maps_a != maps_b:
+            stat["原子映射号变了"] += 1
+            bad.append((src, got, f"映射号 {maps_a} -> {maps_b}"))
             continue
         ma, mb = matches(pa, probes), matches(pb, probes)
         if ma:
@@ -149,6 +166,9 @@ def main() -> int:
     for k, v in stat.most_common():
         print(f"  {k:<28} {v}")
     print(f"  {'其中确实匹配到东西':<28} {hits}")
+    # **把 0 打出来。** 这份语料一条映射号都没有,上面那条映射号判据因此是
+    # 空过的 —— 空过要看得见,不能只在源码注释里写着。
+    print(f"  {'其中带原子映射号':<28} {n_mapped}(为 0 说明这份语料验不了映射号)")
     print(denominator.line(n_corpus, rows, compared, MAX_UNCOMPARED))
     for s, g, why in bad[: args.limit]:
         print(f"\n  {s}\n    -> {g}\n     ({why})")

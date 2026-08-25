@@ -8,14 +8,56 @@
 //! 所以判据是:
 //!
 //! - **规模守恒** —— 原子数与键数不变
+//! - **映射号守恒** —— 原子映射号(`:n`)的多重集不变
 //! - **写出幂等** —— `write(parse(write(q))) == write(q)`
 //!
 //! 幂等这条比看上去强:写出的结果一旦与它自己的再解析对不上,说明这一趟里
 //! 有信息被丢掉或被凭空添上。
 //!
+//! # 但幂等对"整批丢掉"是**瞎的**
+//!
+//! 映射号被写出器整个丢掉的话:第一趟写出没有 `:n`,再解析也没有,第二趟写出
+//! 还是没有 —— **幂等成立、规模守恒成立**,而反应模板已经废了(产物构建全靠
+//! 映射号对位)。所以映射号要单独数。
+//!
+//! 同一个洞外部判据也堵不上:`harness/check_smarts_write.py` 比的是**匹配语义**,
+//! 而映射号不参与匹配;`harness/corpus/smarts.txt` 的 776 条模式里**一条映射号
+//! 都没有**。真正带映射号的语料是 `harness/corpus/reactions.txt`,
+//! 见 `reaction_templates_keep_their_atom_maps`。
+//!
 //! 语义等价(两个 SMARTS 匹配到同样的东西)要外部实现当判官,那是另一档。
 
-use omgkit_io::smarts;
+use omgkit_io::smarts::{self, AtomExpr, AtomPrim, QueryMol};
+
+/// 一个查询里所有原子映射号,**排好序的多重集**。
+///
+/// 写出会重排原子编号,所以只能比多重集,不能逐位比。递归 SMARTS
+/// (`$(...)`)里面的也要收 —— 那里同样写得下 `:n`。
+fn atom_maps(q: &QueryMol) -> Vec<u16> {
+    fn walk(e: &AtomExpr, out: &mut Vec<u16>) {
+        match e {
+            AtomExpr::Prim(AtomPrim::AtomMap(m)) => out.push(*m),
+            AtomExpr::Prim(AtomPrim::Recursive(sub)) => {
+                for a in &sub.atoms {
+                    walk(a, out);
+                }
+            }
+            AtomExpr::Prim(_) => {}
+            AtomExpr::Not(inner) => walk(inner, out),
+            AtomExpr::And(parts) | AtomExpr::Or(parts) => {
+                for p in parts {
+                    walk(p, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for a in &q.atoms {
+        walk(a, &mut out);
+    }
+    out.sort_unstable();
+    out
+}
 
 fn check(src: &str) -> Result<(), String> {
     let q = smarts::parse(src).map_err(|e| format!("解析失败: {}", e.render()))?;
@@ -30,6 +72,11 @@ fn check(src: &str) -> Result<(), String> {
             q2.num_atoms(),
             q2.num_bonds()
         ));
+    }
+    // **映射号要单独数。** 整批丢掉时幂等与规模守恒双双成立,见模块文档。
+    let (m1, m2) = (atom_maps(&q), atom_maps(&q2));
+    if m1 != m2 {
+        return Err(format!("原子映射号变了:{m1:?} -> {m2:?}(写出 {w1})"));
     }
     if w1 != w2 {
         return Err(format!("写出不幂等:{w1} -> {w2}"));
@@ -115,6 +162,93 @@ fn reactions_keep_three_sections() {
         assert_eq!(r2.products.len(), r.products.len(), "{src} -> {w}");
         assert_eq!(smarts::write_reaction(&r2), w, "反应写出不幂等");
     }
+}
+
+/// **反应模板的映射号必须原样活下来** —— 语料是 `reactions.txt`。
+///
+/// # 为什么单开一条,不并进上面的语料
+///
+/// `harness/corpus/smarts.txt` 的 776 条模式里**一条映射号都没有**(实测)。
+/// 也就是说上面 `corpus_round_trips` 里那条映射号判据在那份语料上是**空过**的:
+/// 数出来两边都是空多重集,当然相等。真正带映射号的语料只有反应模板。
+///
+/// 而这一档丢了就是灾难:产物构建全靠映射号对位,丢掉之后模板还"写得出来、
+/// 解析得回、幂等",只是它描述的不再是同一个反应。
+///
+/// # 三段都要走
+///
+/// 反应写成 `反应物 > 试剂 > 产物`,三段各自是一串 `.` 分开的模式。
+/// 只测反应物那一段的话,写出器在产物段上的回归照样全绿。
+#[test]
+fn reaction_templates_keep_their_atom_maps() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../harness/corpus/reactions.txt");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("读不到 {}: {e}", path.display()));
+
+    let mut n_rxn = 0usize;
+    let mut n_maps = 0usize;
+    let mut bad: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let src = line.trim();
+        if src.is_empty() || src.starts_with('#') {
+            continue;
+        }
+        let r = match smarts::parse_reaction(src) {
+            Ok(r) => r,
+            Err(e) => {
+                bad.push(format!("  {src}\n     解析不了:{}", e.render()));
+                continue;
+            }
+        };
+        n_rxn += 1;
+        let before: Vec<Vec<u16>> = [&r.reactants, &r.agents, &r.products]
+            .into_iter()
+            .map(|part| {
+                let mut v: Vec<u16> = part.iter().flat_map(atom_maps).collect();
+                v.sort_unstable();
+                v
+            })
+            .collect();
+        n_maps += before.iter().map(Vec::len).sum::<usize>();
+
+        let w = smarts::write_reaction(&r);
+        let Ok(r2) = smarts::parse_reaction(&w) else {
+            bad.push(format!("  {src}\n     写成 {w} 之后解析不了"));
+            continue;
+        };
+        let after: Vec<Vec<u16>> = [&r2.reactants, &r2.agents, &r2.products]
+            .into_iter()
+            .map(|part| {
+                let mut v: Vec<u16> = part.iter().flat_map(atom_maps).collect();
+                v.sort_unstable();
+                v
+            })
+            .collect();
+        // **逐段比。** 合起来比的话,把一个映射号从反应物挪到产物照样"守恒"。
+        for (i, seg) in ["反应物", "试剂", "产物"].into_iter().enumerate() {
+            if before[i] != after[i] {
+                bad.push(format!(
+                    "  {src}\n     写成 {w}\n     {seg}段的映射号 {:?} -> {:?}",
+                    before[i], after[i]
+                ));
+            }
+        }
+    }
+
+    assert!(
+        bad.is_empty(),
+        "反应模板的映射号没活下来:\n{}",
+        bad.join("\n")
+    );
+    // **区分力闸。** 语料换成一份没有映射号的,上面每一条断言都会在空多重集上
+    // 成立 —— 那是这条判据最会骗人的一种绿。数出来钉死。
+    assert_eq!(n_rxn, 20, "反应语料的条数变了 —— 先确认是有意的再改这个数");
+    assert_eq!(
+        n_maps, 96,
+        "语料里的映射号总数变了 —— 先确认是有意的再改这个数;\
+         这个数掉到 0 时上面每一条断言都会空过"
+    );
 }
 
 /// 全量 SMARTS 语料。
