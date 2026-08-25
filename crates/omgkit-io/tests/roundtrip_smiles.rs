@@ -19,7 +19,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use omgkit_core::{AtomFlags, BondOrder, BondStereo, MolBuilder};
+use omgkit_core::{AtomFlags, BondOrder, BondStereo, ChiralTag, MolBuilder};
 use omgkit_io::smiles;
 
 fn corpus(name: &str) -> PathBuf {
@@ -56,6 +56,44 @@ struct Stats {
     with_high_ring_labels: usize,
 }
 
+/// 平面四方的排列序号往返之后还说不说同一件事。
+///
+/// **不能直接比数值。** 序号是相对**邻居存储顺序**的,而往返会重排邻居 ——
+/// 同一个分子在两个存储序下的序号本来就可以不同。所以把写出后那一侧的序号
+/// 按原分子的邻居顺序换算过去,再比。
+///
+/// 少了这一步,这条判据对"序号被写错成另一个排法"完全失明:原子字段逐个相同,
+/// 分子却换了个异构体。
+fn square_planar_agrees(
+    before: &MolBuilder,
+    after: &MolBuilder,
+    order: &[u32],
+    orig: u32,
+    i: usize,
+) -> bool {
+    let a = before.atoms()[orig as usize];
+    if a.chiral_tag != ChiralTag::SquarePlanar {
+        return true;
+    }
+    // 配体数不是 4:序号表达不出来(方括号里的氢也占一个位置,而它不在邻居里)。
+    // 这时写出**整个丢掉**这个标记 —— 丢掉是老实的,瞎写一个序号是撒谎。
+    // 所以这里要求的不是"保住",是"丢干净"。语料里两条(5 配体与 1 配体),
+    // RDKit 在这两条上同样整个丢掉;3 配体那一档它保留而我方丢,
+    // 钉在 `square_planar_with_three_ligands_is_dropped`。
+    if before.degree(orig) != 4 {
+        return after.atoms()[i].chiral_tag == ChiralTag::Unspecified;
+    }
+    // 两侧各取邻居**原子**(不是键 —— 键下标不跨分子对应),
+    // 写出侧的邻居再按 `order` 映回原分子的下标。
+    let from: Vec<u32> = before.neighbors(orig).map(|(n, _)| n).collect();
+    let to: Vec<u32> = after
+        .neighbors(i as u32)
+        .map(|(n, _)| order[n as usize])
+        .collect();
+    let b = after.atoms()[i];
+    omgkit_core::square_planar_renumber(b.stereo_perm, &to, &from) == Some(a.stereo_perm)
+}
+
 /// 逐原子比对(按输出顺序换算回原分子)。
 fn compare_atoms(before: &MolBuilder, after: &MolBuilder, order: &[u32]) -> Option<String> {
     for (i, &orig) in order.iter().enumerate() {
@@ -69,8 +107,9 @@ fn compare_atoms(before: &MolBuilder, after: &MolBuilder, order: &[u32]) -> Opti
             && a.num_radical_electrons == b.num_radical_electrons
             && a.flags.contains(AtomFlags::AROMATIC) == b.flags.contains(AtomFlags::AROMATIC)
             && a.flags.contains(AtomFlags::NO_IMPLICIT) == b.flags.contains(AtomFlags::NO_IMPLICIT)
-            // 四面体手性要往返;配位几何尚不写出,故只在能写的那类上比
-            && (!a.chiral_tag.is_tetrahedral() || a.chiral_tag == b.chiral_tag);
+            // 四面体手性要往返;三角双锥/八面体尚不写出,故只在能写的那类上比
+            && (!a.chiral_tag.is_tetrahedral() || a.chiral_tag == b.chiral_tag)
+            && square_planar_agrees(before, after, order, orig, i);
         if !same {
             return Some(format!(
                 "原子 {i}(原下标 {orig}):写出前 {a:?}\n            写出后 {b:?}"
@@ -691,13 +730,18 @@ fn noise_direction_bonds_are_dropped() {
     }
 }
 
-/// 配位几何(`@SP`/`@TB`/`@OH`)与丙二烯轴手性尚未写出。
+/// 三角双锥(`@TB`)、八面体(`@OH`)与丙二烯轴手性(`@AL`)**尚未写出**。
 ///
 /// 这条断言把"尚未实现"钉成显式事实 —— 免得将来实现了却没人发现输出里
-/// 其实一直没有这些信息。
+/// 其实一直没有这些信息。平面四方(`@SP`)先前也在这张名单上,现在写得出来了,
+/// 见 [`square_planar_stereo_round_trips`]。
 #[test]
-fn coordination_and_axial_stereo_are_not_written_yet() {
-    for smi in ["[Pt@SP1](Cl)(Cl)(N)N", "N[C@AL1]=C=C(O)F"] {
+fn trigonal_bipyramidal_octahedral_and_axial_stereo_are_not_written_yet() {
+    for smi in [
+        "F[P@TB15](Cl)(Br)(I)S",
+        "C[Co@OH25](N)(O)(S)(P)Cl",
+        "N[C@AL1]=C=C(O)F",
+    ] {
         let m = smiles::parse(smi).unwrap();
         let w = smiles::write(&m).smiles;
         assert!(
@@ -705,6 +749,80 @@ fn coordination_and_axial_stereo_are_not_written_yet() {
             "{smi} 写成了 {w},但这类立体信息的写出尚未实现"
         );
     }
+}
+
+/// 配体数不是 4 的 `@SP`:写出会**整个丢掉**这个标记。
+///
+/// 方括号里的氢也占一个配位位置,而它不在邻居序列里 —— 少了它,序号换算出来的
+/// 是另一个划分。所以只在四个配体都是真原子时换算,否则丢掉整个标记
+/// (丢掉是老实的,瞎写一个序号是撒谎)。解析侧用的是同一个条件,两侧对齐。
+///
+/// 实测 RDKit 2025.09.2:
+///
+/// | 写法 | RDKit 的规范串 | 我方 |
+/// |---|---|---|
+/// | `[Pt@SP1](Cl)(Cl)(N)(N)Cl`(5 配体) | `[NH2][Pt]([NH2])([Cl])([Cl])[Cl]` 丢 | 丢 |
+/// | `[Pt@SP1]Cl`(1 配体) | `[Cl][Pt]` 丢 | 丢 |
+/// | `[Pt@SP1](Cl)(Cl)N`(3 配体) | `[NH2][Pt@SP1]([Cl])[Cl]` **保留** | **丢** |
+///
+/// 第三行是**已知缺口**:三配位时第四个位置是隐式氢或空位,要像四面体那条
+/// degree==3 补偿规则一样单独定位置约定。眼下没做 —— 写在这里,不假装守住了。
+#[test]
+fn square_planar_with_three_ligands_is_dropped() {
+    for (smi, ligands) in [
+        ("[Pt@SP1](Cl)(Cl)(N)(N)Cl", 5),
+        ("[Pt@SP1]Cl", 1),
+        ("[Pt@SP1](Cl)(Cl)N", 3),
+    ] {
+        let m = smiles::parse(smi).unwrap_or_else(|e| panic!("{smi}: {}", e.render()));
+        assert_eq!(m.degree(0), ligands, "{smi}:配体数与预期不符");
+        let w = smiles::write(&m).smiles;
+        assert!(
+            !w.contains("@SP"),
+            "{smi} 写成了 {w} —— 配体数不是 4 时序号换算不了,应当整个丢掉"
+        );
+    }
+}
+
+/// 平面四方(`@SP`)写得出来,而且**往返之后还是同一个分子**。
+///
+/// 序号是相对**列出顺序**的,而写出会重排配体,所以往返要的不是"序号一样",
+/// 是"配对一样"。这里比的是规范串:三种排法必须给出三串,而且各自往返不变。
+///
+/// 光比"往返不变"是不够的 —— 一个把序号整个丢掉的实现也满足它(三串塌成
+/// 一串,每串都往返不变)。所以同时要求**三串互不相同**。
+#[test]
+fn square_planar_stereo_round_trips() {
+    let mut seen = std::collections::BTreeSet::new();
+    for smi in [
+        "[Pt@SP1](Cl)(Br)(N)P",
+        "[Pt@SP2](Cl)(Br)(N)P",
+        "[Pt@SP3](Cl)(Br)(N)P",
+    ] {
+        let m = smiles::parse(smi).unwrap_or_else(|e| panic!("{smi}: {}", e.render()));
+        let w = smiles::write(&m);
+        assert!(
+            w.smiles.contains("@SP"),
+            "{smi} 写成了 {},丢了立体",
+            w.smiles
+        );
+        let back = smiles::parse(&w.smiles)
+            .unwrap_or_else(|e| panic!("{smi} → {} 读不回来:{}", w.smiles, e.render()));
+        let again = smiles::write(&back).smiles;
+        assert_eq!(w.smiles, again, "{smi}:写出 → 读回 → 再写出,两串不同");
+        assert!(
+            compare_atoms(&m, &back, &w.atom_order).is_none(),
+            "{smi} → {}:往返之后原子对不上",
+            w.smiles
+        );
+        seen.insert(w.smiles);
+    }
+    assert_eq!(
+        seen.len(),
+        3,
+        "三种平面四方排法塌成了 {} 串:{seen:?}",
+        seen.len()
+    );
 }
 
 /// 带显式氢的原子必须写在方括号里 —— 简写形式没地方放它们。

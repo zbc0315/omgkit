@@ -32,7 +32,12 @@
 //! 而 DFS 从哪一端进入这条键不受存储顺序约束,所以写出时要按遍历方向换算
 //! (见 [`bond_symbol`])。少了这次换算,顺式会写成反式。
 //!
-//! 配位几何(`@SP`/`@TB`/`@OH`)**尚未写出** —— 那要一张排列换算表,属于 L6。
+//! 平面四方(`@SP`)会写出:它的序号说的是“按列出顺序哪两对配体互为反位”,
+//! 换个顺序只是换一个配对,不需要查找表。换算见
+//! [`omgkit_core::square_planar_renumber`];只在恰好 4 个邻居时换算得了,
+//! 否则整个丢掉那个标记(丢掉是老实的,瞎写一个序号是撒谎)。
+//!
+//! 三角双锥与八面体(`@TB`/`@OH`)**尚未写出** —— 那要一张排列换算表,属于 L6。
 //!
 //! # 环闭合标号
 //!
@@ -386,17 +391,30 @@ fn output_chiral_tag(
     written_bonds: &[u32],
     is_fragment_start: bool,
     ring_closures: usize,
-) -> ChiralTag {
+) -> (ChiralTag, u8) {
     let a = mol.atoms()[atom as usize];
+
+    // 平面四方:序号说的是"哪两对配体互为反位",从存储序换算到本次输出的顺序。
+    //
+    // 换算不了(度数不是 4、序号不在 1..=3)时写出**不带序号的类别**是不行的 ——
+    // `[Pt@SP]` 读回来是错的。所以给 0,由 `write_atom` 整个略过。
+    // 解析侧用的是同一个条件(见 `fix_chirality`),两侧因此对齐。
+    if a.chiral_tag == ChiralTag::SquarePlanar {
+        let stored: Vec<u32> = mol.neighbors(atom).map(|(_, bond)| bond).collect();
+        let perm =
+            omgkit_core::square_planar_renumber(a.stereo_perm, &stored, written_bonds).unwrap_or(0);
+        return (ChiralTag::SquarePlanar, perm);
+    }
+
     if !a.chiral_tag.is_tetrahedral() {
-        return ChiralTag::Unspecified;
+        return (ChiralTag::Unspecified, 0);
     }
 
     let stored: Vec<u32> = mol.neighbors(atom).map(|(_, bond)| bond).collect();
     let Some(mut odd) = super::permutation_is_odd(written_bonds, &stored) else {
         // 两个序列不是同一个多重集 —— 只可能是本模块自己算错了邻居
         debug_assert!(false, "输出的邻居顺序与存储顺序不是同一组键");
-        return ChiralTag::Unspecified;
+        return (ChiralTag::Unspecified, 0);
     };
 
     // 补偿规则:隐式/显式氢不参与置换,由这条特判统一处理。
@@ -412,11 +430,12 @@ fn output_chiral_tag(
         }
     }
 
-    if odd {
+    let tag = if odd {
         a.chiral_tag.inverted()
     } else {
         a.chiral_tag
-    }
+    };
+    (tag, 0)
 }
 
 /// 方括号里要写的氢数。
@@ -572,7 +591,14 @@ fn both_aromatic(mol: &MolBuilder, a: u32, b: u32) -> bool {
 }
 
 /// 写一个原子。`tag` 是已经换算到**输出顺序**的立体标记。
-fn write_atom(out: &mut String, mol: &MolBuilder, idx: u32, tag: ChiralTag, style: WriteStyle) {
+fn write_atom(
+    out: &mut String,
+    mol: &MolBuilder,
+    idx: u32,
+    stereo: (ChiralTag, u8),
+    style: WriteStyle,
+) {
+    let (tag, perm) = stereo;
     let a = mol.atoms()[idx as usize];
     let aromatic = a.flags.contains(AtomFlags::AROMATIC);
 
@@ -610,7 +636,11 @@ fn write_atom(out: &mut String, mol: &MolBuilder, idx: u32, tag: ChiralTag, styl
     match tag {
         ChiralTag::Ccw => out.push('@'),
         ChiralTag::Cw => out.push_str("@@"),
-        // 配位几何与丙二烯轴手性尚不写出,见 output_chiral_tag
+        // 序号为 0 表示"这个标记表达不出来",见 `output_chiral_tag`
+        ChiralTag::SquarePlanar if perm != 0 => {
+            let _ = write!(out, "@SP{perm}");
+        }
+        // 三角双锥、八面体与丙二烯轴手性尚不写出,见 output_chiral_tag
         _ => {}
     }
     match total_hs(&a) {

@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use omgkit_core::{BondData, MolBuilder};
+use omgkit_core::{BondData, ChiralTag, MolBuilder};
 use omgkit_io::{canon, smiles};
 
 fn corpus(name: &str) -> PathBuf {
@@ -99,20 +99,29 @@ fn renumber(mol: &MolBuilder, atom_perm: &[u32], bond_perm: &[usize]) -> MolBuil
         out.add_bond_data(nb).expect("端点合法");
     }
 
-    // 逐个手性原子把标记搬到新的存储序上
+    // 逐个立体中心把标记搬到新的存储序上
     for new_a in 0..out.num_atoms() as u32 {
         let old_a = atom_perm[new_a as usize];
-        let tag = mol.atoms()[old_a as usize].chiral_tag;
-        if !tag.is_tetrahedral() {
-            continue;
-        }
+        let a = mol.atoms()[old_a as usize];
         let old_seq: Vec<usize> = mol.neighbors(old_a).map(|(_, b)| b as usize).collect();
         let new_seq: Vec<usize> = out
             .neighbors(new_a)
             .map(|(_, b)| new_to_old_bond[b as usize])
             .collect();
-        if permutation_is_odd(&old_seq, &new_seq).expect("同一组键") {
-            out.atom_mut(new_a).expect("原子存在").chiral_tag = tag.inverted();
+        if a.chiral_tag.is_tetrahedral() {
+            if permutation_is_odd(&old_seq, &new_seq).expect("同一组键") {
+                out.atom_mut(new_a).expect("原子存在").chiral_tag = a.chiral_tag.inverted();
+            }
+            continue;
+        }
+        // 平面四方的序号同样是**相对存储序**的,照抄就是换了个分子 ——
+        // 与上面那条四面体的规则同源,只是变换不是"翻一下"而是换一个配对。
+        if a.chiral_tag == ChiralTag::SquarePlanar {
+            let old_ids: Vec<u32> = old_seq.iter().map(|&b| b as u32).collect();
+            let new_ids: Vec<u32> = new_seq.iter().map(|&b| b as u32).collect();
+            let p = omgkit_core::square_planar_renumber(a.stereo_perm, &old_ids, &new_ids)
+                .unwrap_or(a.stereo_perm);
+            out.atom_mut(new_a).expect("原子存在").stereo_perm = p;
         }
     }
     out
@@ -360,6 +369,13 @@ fn canonical_is_independent_of_bracket_notation() {
         &["c1cc[nH]c1", "[cH]1[cH][cH][nH][cH]1"][..],
         // 吡啶氮无氢,框可去
         &["c1ccncc1", "[cH]1[cH][cH][n][cH][cH]1"][..],
+        // 平面四方:序号说的是“哪两对互为反位”,而两个氯彼此可换 ——
+        // `@SP1` 与 `@SP3` 在这个分子上表达同一件事,必须收敛到一串。
+        // 判据是参照自己给的:RDKit 把它重排原子再规范化,会在这两串之间跳。
+        &["[Pt@SP1](Cl)(Cl)(N)N", "[Pt@SP3](Cl)(Cl)(N)N"][..],
+        // 四个配体互不相同时三种排法各是一个分子,这里只验其中一种的两种写法:
+        // 交换列出顺序里的两个配体,序号跟着换,分子不变。
+        &["[Pt@SP1](Cl)(Br)(N)P", "[Pt@SP2](Cl)(N)(Br)P"][..],
         // 配位键的给体端:写不写框都是同一个分子(氮都是 3 个氢)。
         // 写出器先前碰到配位键无条件留框,于是这一组给出两串 ——
         // 是 `differential_l3.rs` 拿 RDKit 的规范串比出来的。
@@ -405,6 +421,68 @@ fn brackets_that_carry_hydrogen_counts_are_kept() {
     }
 }
 
+/// 环闭合落在平面四方中心上 —— **书写序 ≠ 存储序**,归一那一步只有在这里才做事。
+///
+/// 语料里的 `@SP` 分子(`[Pt@SP1](Cl)(Cl)(N)N` 那几条)书写序恰好等于存储序,
+/// 于是解析侧那一步归一是空操作:变异实测**把它整个删掉,全套判据一条都不红**。
+/// 环闭合键是在闭合的那一刻才建的,排在存储序末尾,而它在串里写在最前面 ——
+/// 这个分子把两者岔开。
+///
+/// # 这个分子上"三种排法"只有两个分子
+///
+/// 两个环碳等价(都只连着 Pt 与彼此),交换它们是一个自同构。按列出顺序
+/// `(C_闭环, Cl, N, C_链)`:
+///
+/// | 写法 | 反位配对 | 自同构映到 |
+/// |---|---|---|
+/// | `@SP1` | C_闭环–N、Cl–C_链 | `@SP2` 的那个 |
+/// | `@SP2` | C_闭环–Cl、N–C_链 | `@SP1` 的那个 |
+/// | `@SP3` | C_闭环–C_链、Cl–N | 自己 |
+///
+/// 所以 `@SP1` 与 `@SP2` 是同一个分子,`@SP3` 是另一个。我方给两串。
+/// **参照(RDKit 2025.09.2)给三串** —— `[NH2][Pt@SP2]1([Cl])[CH2][CH2]1`、
+/// `[NH2][Pt@SP3]1(...)`、`[NH2][Pt@SP1]1(...)` 各一 —— 它的 `@SP` 规范化不考虑
+/// 这个自同构,与它在 `[Pt@SP1](Cl)(Cl)(N)N` 上重排原子会跳串是同一件事。
+#[test]
+fn square_planar_with_a_ring_closure_on_the_centre() {
+    let one = canonical_smiles(&perceived("[Pt@SP1]1(Cl)(N)CC1"));
+    let two = canonical_smiles(&perceived("[Pt@SP2]1(Cl)(N)CC1"));
+    let three = canonical_smiles(&perceived("[Pt@SP3]1(Cl)(N)CC1"));
+    assert_eq!(
+        one, two,
+        "@SP1 与 @SP2 在这个分子上是同一个分子(两个环碳可换),规范串却不同"
+    );
+    assert_ne!(
+        one, three,
+        "@SP3 是另一个分子(它把两个环碳排成反位),却与 @SP1 塌成了一串"
+    );
+    // 换个起笔位置再写一遍同样的三个分子,必须落到同一组串上。
+    // 起笔一换,书写序与存储序的错位方式也跟着变。
+    assert_eq!(one, canonical_smiles(&perceived("C1C[Pt@SP1]1(Cl)N")));
+    assert_eq!(three, canonical_smiles(&perceived("C1C[Pt@SP2]1(Cl)N")));
+    assert_eq!(one, canonical_smiles(&perceived("C1C[Pt@SP3]1(Cl)N")));
+
+    // **另一种写法由外部实现给出。** 上面几条全是我方自己的写法,而
+    // `SQUARE_PLANAR_TRANS` 那张表若整体错位(比如两行对调),解析与写出两侧
+    // 会一起错、正好抵消 —— 变异实测:把表的第 2、3 行对调,全套外部判据
+    // 照样退 0(语料里那几个 `@SP` 分子书写序恰好等于存储序,错表抵消掉了)。
+    //
+    // 这三串是 RDKit 2025.09.2 对上面三个分子给出的规范串。它与我方的配体顺序
+    // 不同,错表在这里就抵消不掉了。语料里没有"环闭合落在 `@SP` 中心上"的分子,
+    // 所以这一对是手写的 —— 但**第二种写法不是我方自己写的**。
+    for (ours, reference) in [
+        ("[Pt@SP1]1(Cl)(N)CC1", "[NH2][Pt@SP2]1([Cl])[CH2][CH2]1"),
+        ("[Pt@SP2]1(Cl)(N)CC1", "[NH2][Pt@SP3]1([Cl])[CH2][CH2]1"),
+        ("[Pt@SP3]1(Cl)(N)CC1", "[NH2][Pt@SP1]1([Cl])[CH2][CH2]1"),
+    ] {
+        assert_eq!(
+            canonical_smiles(&perceived(ours)),
+            canonical_smiles(&perceived(reference)),
+            "{ours} 与外部实现写的 {reference} 是同一个分子,规范串却不同"
+        );
+    }
+}
+
 /// 不同的分子不能塌到同一个规范串。
 ///
 /// 只测"相同的要相同"是不够的 —— 一个恒返回空串的实现也能通过。
@@ -423,6 +501,10 @@ fn different_molecules_get_different_canonical_forms() {
         "CCCC",
         "C1CC2CCC1CC2",
         "C1CC2CCC(C1)CC2",
+        // 平面四方:两个几何异构体只差一个排列序号,图完全相同。
+        // 写不出 `@SP` 的时候这两条塌成一串 —— 那正是补上写出之前的状态。
+        "[Pt@SP1](Cl)(Cl)(N)N",
+        "[Pt@SP2](Cl)(Cl)(N)N",
     ];
     let mut seen: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
     for smi in smis {

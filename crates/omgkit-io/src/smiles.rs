@@ -941,9 +941,12 @@ impl<'a> Parser<'a> {
     /// 隐式氢**不参与置换**,而是由那条 degree==3 的补偿规则统一处理 ——
     /// 见模块文档里的对照表。
     ///
-    /// 只有四面体能这样修:它的两种排列互为镜像,一次对换即翻转。配位几何
-    /// (SP/TB/OH)的排列序号在邻居重排下按查找表变换,不是一个可翻转的
-    /// 布尔量,处理方式见下方注释。
+    /// 只有四面体能这样修:它的两种排列互为镜像,一次对换即翻转。
+    ///
+    /// 平面四方另走一条路 —— 它的序号说的是"哪两对配体互为反位",换个顺序只是
+    /// 换一个配对(`omgkit_core::square_planar_renumber`),照样能归一到存储序。
+    /// 三角双锥与八面体的序号在邻居重排下按一张尚未实现的查找表变换,
+    /// 只能原样保管,处理方式见下方注释。
     fn fix_chirality(&mut self) {
         for rec in &self.chiral {
             let atom = rec.atom;
@@ -991,10 +994,27 @@ impl<'a> Parser<'a> {
                 continue; // 结构异常,已在别处报错
             }
 
+            // 平面四方:序号说的是"哪两对配体互为反位",把它从书写序换算到存储序。
+            //
+            // **只在四个配体都是真原子时换算。** 方括号里的氢也占一个配位位置,
+            // 而它不在 `written` / `stored` 这两个键序列里 —— 少了它,换算出来
+            // 的是另一个划分。写出侧用的是同一个条件(度数为 4),两侧因此对齐:
+            // 换算不了的原子,序号原样保管、也不写出去。
+            if rec.tag == ChiralTag::SquarePlanar {
+                let literal = self.mol.atoms()[atom as usize].stereo_perm;
+                if let Some(p) = omgkit_core::square_planar_renumber(literal, &written, &stored) {
+                    if let Some(a) = self.mol.atom_mut(atom) {
+                        a.stereo_perm = p;
+                    }
+                }
+                continue;
+            }
+
             if !rec.tag.is_tetrahedral() {
-                // 配位几何的排列序号换参考系要走查找表(见 `AtomData::stereo_perm`
-                // 的文档),不是一次奇偶翻转能表达的。这里不动它 —— 它保存的是
-                // **书写时的字面值**,而字面值不会因为存储序变了就变错。
+                // 三角双锥与八面体的排列序号换参考系要走查找表(见
+                // `AtomData::stereo_perm` 的文档),不是一次奇偶翻转、也不是
+                // 一个配对能表达的。这里不动它 —— 它保存的是**书写时的字面值**,
+                // 而字面值不会因为存储序变了就变错。
                 continue;
             }
 

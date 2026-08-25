@@ -58,6 +58,7 @@ pub use builder::{AtomData, BondData, BondMut, MolBuilder, Neighbors};
 pub use element::Element;
 pub use error::{Error, Result};
 pub use types::{
-    AtomFlags, BondDirection, BondFlags, BondOrder, BondStereo, ChiralTag, Hybridization,
+    square_planar_renumber, AtomFlags, BondDirection, BondFlags, BondOrder, BondStereo, ChiralTag,
+    Hybridization, SQUARE_PLANAR_TRANS,
 };
 pub use view::MolView;
