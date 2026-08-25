@@ -30,6 +30,14 @@ const A_RADICALS: usize = 13;
 const B_AROMATIC: usize = 4;
 const B_CONJUGATED: usize = 6;
 
+/// 键行的列数。与原子那侧同一个道理:列号必须与基准同步,对不上时立即炸,
+/// 而不是让错位比对变成一堆无从解释的"化学分歧"。
+///
+/// 原子那侧一直有这道闸,**键这侧九个读取方一个都没有** —— 键元组从 6 列长到
+/// 7 列(末尾的"共轭")的时候没人看得见,而下标一旦是插在中间加的,
+/// 每个读取方都会静默地比错列。
+const B_COLS: usize = 7;
+
 /// l2 原子行的列数。基准与本文件的列号必须同步 —— 对不上时立即炸,
 /// 而不是让错位比对变成一堆无从解释的"化学分歧"。新列一律追加到行尾,
 /// 见 harness/README.md 的列规范。
@@ -172,6 +180,13 @@ fn diff_against(path: &Path) -> DiffResult {
                 .iter()
                 .map(|x| x.as_i64().unwrap())
                 .collect();
+            assert_eq!(
+                v.len(),
+                B_COLS,
+                "{smi}:基准的键列数是 {},本文件按 {B_COLS} 列解读 —— \
+                 基准过期或列号未同步,重新生成基准(见 harness/README.md)",
+                v.len()
+            );
             let b = mol.bonds()[i];
             let conj = i64::from(b.flags.contains(BondFlags::CONJUGATED));
             if v[B_CONJUGATED] != conj {

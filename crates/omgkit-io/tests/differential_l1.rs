@@ -31,12 +31,24 @@ const A_NO_IMPLICIT: usize = 7;
 /// 而不是让越界或错位比对变成一堆无从解释的分歧。
 const A_COLS: usize = 9;
 
-/// l1 键列:[起点, 终点, 键级, 方向, 芳香, 在环中(L1 不比对)]
+/// l1 键列:[起点, 终点, 键级, 方向, 芳香, 在环中, 共轭] —— **7 列**。
+///
+/// 末两列 L1 都不比:环感知与共轭感知都属于净化(L2),这里比它们
+/// 只会把净化的缺陷记到解析头上。到 L2 由 `B_IN_RING` / `B_CONJUGATED` 比。
+/// (这一行先前写的是 6 列,而基准一直是 7 列 —— 见 `B_COLS`。)
 const B_BEGIN: usize = 0;
 const B_END: usize = 1;
 const B_ORDER: usize = 2;
 const B_DIR: usize = 3;
 const B_AROMATIC: usize = 4;
+
+/// 键行的列数。与原子那侧同一个道理:列号必须与基准同步,对不上时立即炸,
+/// 而不是让错位比对变成一堆无从解释的"化学分歧"。
+///
+/// 原子那侧一直有这道闸,**键这侧九个读取方一个都没有** —— 键元组从 6 列长到
+/// 7 列(末尾的"共轭")的时候没人看得见,而下标一旦是插在中间加的,
+/// 每个读取方都会静默地比错列。
+const B_COLS: usize = 7;
 
 struct Mismatch {
     smi: String,
@@ -196,6 +208,13 @@ fn diff_against(path: &Path) -> (usize, Vec<Mismatch>, Coverage) {
                 .iter()
                 .map(|v| v.as_i64().unwrap())
                 .collect();
+            assert_eq!(
+                r.len(),
+                B_COLS,
+                "{smi}:基准的键列数是 {},本文件按 {B_COLS} 列解读 —— \
+                 基准过期或列号未同步,重新生成基准(见 harness/README.md)",
+                r.len()
+            );
             let b = mol.bonds()[i];
             let mut cmp = |name: &str, exp: i64, got: i64| {
                 if exp != got {
