@@ -350,6 +350,20 @@ l1 行只有 8 列核心列,l2 行在核心列之后还插了 6 列自己的。�
 **阈值必须拿真实缺陷标定**:把已知的平方项逐个塞回代码,确认测试真的会红。
 一条从未验证过会失败的定时测试,等于没有。
 
+### 三条复杂度判据现在都数工作量,墙钟只当粗闸
+
+| crate | 判据 | 数的是 |
+|---|---|---|
+| `omgkit-match` | 子结构匹配(两维) | `SearchStats::candidate_tests` |
+| `omgkit-match` | 副产物收口 | `CloseStats::site_visits` / `fragment_scans` |
+| `omgkit-chem` | 环搜索(三种形状) | `SearchStats::bfs_visits` / `edge_tests` / `path_steps` |
+
+三处都是:**钉死绝对值**(主判据,变小也红)+ 每单位工作量的涨幅(守只在大规模
+上冒头的退化)+ 3 倍的墙钟粗闸(守计数看不见的那一半:每次操作本身变贵了)。
+
+收口那一条实测 `site_visits` 恰好 `2n + 1`,debug 与 release 逐位相同 ——
+换掉墙钟之后这一档连"抖"都没有了。
+
 ### 墙钟之外还要**数工作量**
 
 `omgkit-chem/tests/scaling.rs` 里另有一条 `ring_search_work_is_pinned_per_shape`,

@@ -209,6 +209,43 @@ struct Site {
     borrowed_h: u32,
 }
 
+/// 收口**做了多少事**。整数、确定,debug 与 release 逐位相同。
+///
+/// # 为什么要数,而不是量耗时
+///
+/// 收口的一批操作天然是"按位点"的,而位点表是**每个片段原子一条** ——
+/// 于是"遍历位点"这件事的代价正比于整个片段。在按键或按位点的循环里再做
+/// 一次这样的遍历,就是本仓库反复警告的那个形状。
+///
+/// 判它的判据先前是**每原子耗时**,而墙钟会抖:同一个文件里已经记着两次
+/// (一次抽风打红了改别的 crate 的提交,一次把"离散度"错判成"增长")。
+/// 匹配那两条早已换成数 `candidate_tests`,这里补上最后一条。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CloseStats {
+    /// 位点表被访问的次数合计 —— 定电荷、摘氢、配对、写回四处循环。
+    ///
+    /// 记在各条早退判断**之前**:记在之后的话,被跳过的那些数不到,
+    /// 而"跳过得够不够早"正是要守的东西。
+    pub site_visits: u64,
+    /// 整个片段被走一遍的次数(连通分量)。
+    ///
+    /// 单独数是因为它藏在 `form_bonds` 的 `while formed < to_bond` **里面** ——
+    /// 每成一根键就重算一次连通分量。眼下 `to_bond` 只有两三,看不出来;
+    /// 它一旦随片段规模走,这就是一个平方项,而位点计数看不见。
+    pub fragment_scans: u64,
+}
+
+/// 与 [`reconstruct`] 同一条路,外加工作量计数。
+#[must_use]
+pub fn reconstruct_counted(
+    reactants: &[MolBuilder],
+    outcome: &Outcome,
+) -> (Byproducts, CloseStats) {
+    let mut stats = CloseStats::default();
+    let by = reconstruct_inner(reactants, outcome, &mut stats);
+    (by, stats)
+}
+
 /// 把 [`Outcome`] 丢弃的原子收口成分子。
 ///
 /// `reactants` 必须是**传给引擎的那一组原始分子**(已净化),顺序一致 ——
@@ -222,6 +259,14 @@ struct Site {
 /// [`Unresolved::ProductsUnsanitizable`],不去猜。
 #[must_use]
 pub fn reconstruct(reactants: &[MolBuilder], outcome: &Outcome) -> Byproducts {
+    reconstruct_counted(reactants, outcome).0
+}
+
+fn reconstruct_inner(
+    reactants: &[MolBuilder],
+    outcome: &Outcome,
+    stats: &mut CloseStats,
+) -> Byproducts {
     let empty = Budget {
         open_valence: 0,
         fragment_hydrogens: 0,
@@ -294,7 +339,7 @@ pub fn reconstruct(reactants: &[MolBuilder], outcome: &Outcome) -> Byproducts {
 
     // 电荷要**先落定**再算剩余空价。落在哪个元素上决定了它是填掉一处价还是多出
     // 一处(见 `apply_charges`),所以"落定前先估一个 remaining"是估不准的。
-    let charges_ok = charge_shift == 0 || apply_charges(&mut frag, &mut sites, charge_shift);
+    let charges_ok = charge_shift == 0 || apply_charges(&mut frag, &mut sites, charge_shift, stats);
     let opens_after: i32 = sites
         .iter()
         .map(|s| i32::from(u16::try_from(s.opens).unwrap_or(0)))
@@ -341,7 +386,7 @@ pub fn reconstruct(reactants: &[MolBuilder], outcome: &Outcome) -> Byproducts {
     // 它与原有的空价成 π 键 —— 这正是消除的形状(叔丁酯的叔丁基 → 异丁烯)。
     if need < 0 {
         let extra = u32::try_from(-need).unwrap_or(0);
-        if !borrow_hydrogens(&frag, &mut sites, extra) {
+        if !borrow_hydrogens(&frag, &mut sites, extra, stats) {
             return bail(Unresolved::OddValence);
         }
     }
@@ -350,10 +395,10 @@ pub fn reconstruct(reactants: &[MolBuilder], outcome: &Outcome) -> Byproducts {
     // 这里失败**不是**"键太多"——上面 `to_bond > MAX_BONDS` 已经拦过了。
     // 走到这里说明剩下的空价物理上配不起来:只剩一个位点,或只剩两个卤素。
     let heavy_before = heavy_atoms(&closed);
-    if !form_bonds(&mut closed, &mut sites, to_bond) {
+    if !form_bonds(&mut closed, &mut sites, to_bond, stats) {
         return bail(Unresolved::NoPairing);
     }
-    settle_hydrogens(&mut closed, &sites);
+    settle_hydrogens(&mut closed, &sites, stats);
 
     if omgkit_chem::sanitize(&mut closed).is_err() {
         return bail(Unresolved::FragmentUnsanitizable);
@@ -623,13 +668,19 @@ fn order_valence(order: BondOrder) -> u32 {
 /// 先按"这个元素拿得住这个电荷吗"排(卤素/氧/硫 > 氮 > 其它),再要求它**确实
 /// 需要**这次改动:填空价的那一档只落在还欠着价的原子上。挑错原子只影响写法,
 /// 总量由预算定死,所以账不会因此不平。
-fn apply_charges(frag: &mut MolBuilder, sites: &mut [Site], shift: i32) -> bool {
+fn apply_charges(
+    frag: &mut MolBuilder,
+    sites: &mut [Site],
+    shift: i32,
+    stats: &mut CloseStats,
+) -> bool {
     let want_negative = shift < 0;
     let step: i8 = if want_negative { -1 } else { 1 };
     let mut left = shift.unsigned_abs();
     while left > 0 {
         let mut best: Option<(u8, usize)> = None;
         for (k, site) in sites.iter().enumerate() {
+            stats.site_visits += 1;
             let Some(a) = frag.atoms().get(k) else {
                 continue;
             };
@@ -694,10 +745,16 @@ fn apply_charges(frag: &mut MolBuilder, sites: &mut [Site], shift: i32) -> bool 
 /// 优先摘在**与已有空价相邻**的原子上:摘出来的空价与原有空价正好成一根 π 键,
 /// 得到的是烯烃而不是一对远隔的自由价。叔丁酯水解就是这一档 —— 叔丁基欠一处价、
 /// 带的氢比预算多一个,摘掉相邻甲基上的一个氢,两处空价成双键,给出异丁烯。
-fn borrow_hydrogens(frag: &MolBuilder, sites: &mut [Site], extra: u32) -> bool {
+fn borrow_hydrogens(
+    frag: &MolBuilder,
+    sites: &mut [Site],
+    extra: u32,
+    stats: &mut CloseStats,
+) -> bool {
     let mut left = extra;
     for adjacent_first in [true, false] {
         for k in 0..sites.len() {
+            stats.site_visits += 1;
             while left > 0 && has_spare_hydrogen(frag, sites, k) {
                 let near = frag
                     .neighbors(u32::try_from(k).unwrap_or(u32::MAX))
@@ -749,17 +806,24 @@ fn has_spare_hydrogen(frag: &MolBuilder, sites: &[Site], k: usize) -> bool {
 /// 3. 同一分量、原先不相邻 → 成环,最不优先
 ///
 /// 卤素之间不成键:它们是离去基团,该拿氢变成卤化氢,而不是两两配成卤素单质。
-fn form_bonds(frag: &mut MolBuilder, sites: &mut [Site], to_bond: u32) -> bool {
+fn form_bonds(
+    frag: &mut MolBuilder,
+    sites: &mut [Site],
+    to_bond: u32,
+    stats: &mut CloseStats,
+) -> bool {
     let mut formed = 0;
     // 只有**还欠着价**的位点参与配对。片段可以有上百个原子,而欠价的通常只有
     // 两三个 —— 每成一根键就把所有原子两两扫一遍,正是"在按键的循环里做一件
     // 正比于整个片段的事"那个形状。
     let mut open_sites: Vec<usize> = (0..sites.len()).filter(|&k| sites[k].opens > 0).collect();
     while formed < to_bond {
+        stats.fragment_scans += 1;
         let comp = components(frag);
         let mut best: Option<(u32, usize, usize)> = None;
         for (x, &i) in open_sites.iter().enumerate() {
             for &j in &open_sites[x + 1..] {
+                stats.site_visits += 1;
                 if sites[i].opens == 0 || sites[j].opens == 0 {
                     continue;
                 }
@@ -839,8 +903,9 @@ fn raise(order: BondOrder) -> Option<BondOrder> {
 ///
 /// 摘氢那一侧同理:隐式氢原子靠新成的键占掉价、净化自然少补;方括号原子要
 /// 手工扣掉。
-fn settle_hydrogens(frag: &mut MolBuilder, sites: &[Site]) {
+fn settle_hydrogens(frag: &mut MolBuilder, sites: &[Site], stats: &mut CloseStats) {
     for (i, s) in sites.iter().enumerate() {
+        stats.site_visits += 1;
         let Some(a) = frag.atom_mut(u32::try_from(i).unwrap_or(u32::MAX)) else {
             continue;
         };

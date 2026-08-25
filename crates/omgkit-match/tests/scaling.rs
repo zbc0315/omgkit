@@ -43,13 +43,6 @@ use omgkit_match::{substructure_matches, substructure_matches_counted, MatchOpti
 /// 加轮数不动判据规则,只让 min-of-N 更贴近真最小值 —— 对健康值与缺陷值
 /// 同样收紧,不牺牲检出力。
 const ROUNDS: usize = 20;
-/// 每原子**耗时**的最大允许涨幅。
-///
-/// 只剩 `closing_byproducts_is_linear_in_fragment_size` 在用它 —— 那条路上
-/// 还没有确定性的工作量计数。匹配那两条已经换成数 `candidate_tests`,
-/// 理由见 [`assert_pinned`]。
-const MAX_GROWTH: f64 = 1.6;
-
 /// 每单位**工作量**的最大允许涨幅。
 ///
 /// 比耗时那个紧,因为它不抖:同一份输入永远同一个数。实测健康值 1.000
@@ -95,23 +88,6 @@ fn chain(n: usize) -> String {
 ///  选哪个语料的,论据错了三倍,结论就是蒙对的。)
 fn cubanes(n: usize) -> String {
     "C12C3C4C1C5C4C3C25".repeat(n)
-}
-
-fn assert_flat(rows: &[(usize, f64)], what: &str) {
-    let (n_min, c_min) = rows[0];
-    assert!(
-        c_min * n_min as f64 > 50.0,
-        "{what}:最小规模只跑了 {:.0} µs,比值无意义 —— 请调大规模",
-        c_min * n_min as f64
-    );
-    for &(n, c) in &rows[1..] {
-        let growth = c / c_min;
-        assert!(
-            growth < MAX_GROWTH,
-            "{what}:每单位耗时从 {c_min:.3} µs({n_min} 单位)涨到 {c:.3} µs({n} 单位),\
-             涨了 {growth:.2} 倍。线性实现应基本持平;涨上去说明剪枝失效了。逐档:{rows:?}"
-        );
-    }
 }
 
 /// 一次计数测量:(规模, 工作量, 每单位工作量, 每单位耗时微秒)。
@@ -416,27 +392,45 @@ fn rare_atoms_are_anchored_first() {
 /// 差分测试抓不到这类问题:结果全对,只是慢,而且真实的离去片段都很小,
 /// 在语料上完全看不出来。
 ///
-/// # 阈值拿真实缺陷标定过
+/// # 判据是**数出来的工作量**,不是耗时
 ///
-/// 判据是**每原子耗时不随规模上升**,与本文件其余部分同一套。实测(release,
-/// 交错测量、取最小值):
+/// 这是本文件最后一条还在用墙钟的复杂度判据。换掉的理由与匹配那两条一样,
+/// 见 [`assert_pinned`]:墙钟会抖(这个文件里已经栽过两次),而"涨幅"这个
+/// 形状看不见按比例整体变差的退化。
 ///
-/// | | n=800 | 1600 | 3200 | 6400 | 涨幅 |
-/// |---|---|---|---|---|---|
-/// | 现在 | 230 | 219 | 208 | 204 ns/原子 | **1.13×** |
-/// | 塞回一个提不出去的平方项 | 238 | 337 | 530 | 931 | **3.92×** |
+/// 现在数 [`byproduct::CloseStats`]:位点表被访问几次、整个片段被走几遍。
+/// 实测(debug 与 release **逐位相同**):
 ///
-/// 阈值卡在两者之间。**标定时踩过一个坑值得记下**:第一次把平方项塞回去时曲线
-/// 一点没动 —— 因为塞的那个形状(`if sites[i].opens == 0 { continue }`)是循环
-/// 不变量,被编译器提到内层循环外了。用"塞回去看它红不红"标定阈值时,得确认
-/// 塞的东西**真的**在跑,否则标出来的阈值毫无意义。
+/// | 链长 n | 片段原子 | `site_visits` | `fragment_scans` |
+/// |---|---|---|---|
+/// | 800 | 803 | 1 601 | 1 |
+/// | 1600 | 1603 | 3 201 | 1 |
+/// | 3200 | 3203 | 6 401 | 1 |
+/// | 6400 | 6403 | 12 801 | 1 |
+///
+/// 恰好 `2n + 1`,干净的线性。`fragment_scans` 恒为 1 是另一条独立的契约:
+/// 那次连通分量重算藏在 `form_bonds` 的 `while formed < to_bond` **里面**,
+/// 位点计数看不见它 —— 这个底物只成一根键,所以它必须是 1。
+///
+/// 墙钟**留着**当粗闸(3 倍),守计数看不见的那一半:每次访问本身变贵了。
+///
+/// # 先前那版的标定,连同它踩过的坑,一并记下
+///
+/// 先前判的是每原子耗时:现在 230/219/208/204 ns(涨幅 1.13),塞回一个提不
+/// 出去的平方项是 238/337/530/931(涨幅 3.92),阈值卡在两者之间。
+///
+/// **标定时踩过一个坑**:第一次把平方项塞回去时曲线一点没动 —— 塞的那个形状
+/// (`if sites[i].opens == 0 { continue }`)是循环不变量,被编译器提到内层
+/// 循环外了。用"塞回去看它红不红"标定阈值时,得确认塞的东西**真的**在跑。
+/// 换成数工作量之后这个坑还在:计数器同样可能被优化掉,所以校准照做
+/// (见提交信息里的变异表)。
 #[test]
 fn closing_byproducts_is_linear_in_fragment_size() {
     use omgkit_match::{byproduct, run_reactants};
 
-    // 阈值用模块级那个 `MAX_GROWTH`(同样是 1.6)—— 改用 `assert_flat` 之后
-    // 本函数不再自己判,局部那份就成了死代码。
     let sizes = [800usize, 1600, 3200, 6400];
+    // 钉死的工作量。**变小也红** —— 见本条文档。
+    const WANT_SITE_VISITS: &[u64] = &[1_601, 3_201, 6_401, 12_801];
 
     // 长链酯:模板删掉 OCH2C,整条链失去落脚点成为一个很大的片段,
     // 而且要摘一个氢、成一根键 —— 摘氢与配对两条路都走得到。
@@ -451,6 +445,29 @@ fn closing_byproducts_is_linear_in_fragment_size() {
         (m, outs)
     };
     let cases: Vec<_> = sizes.iter().map(|&n| prep(n)).collect();
+
+    // 先把工作量数出来 —— 它与轮次、机器状态都无关,一次就够
+    let mut work: Vec<u64> = Vec::with_capacity(sizes.len());
+    for (i, (m, o)) in cases.iter().enumerate() {
+        let (by, st) = byproduct::reconstruct_counted(std::slice::from_ref(m), &o[0]);
+        assert!(by.verdict.is_closed(), "n={} 应当收得了口", sizes[i]);
+        // **这一条碰得到什么、碰不到什么,量过。**
+        //
+        // 碰得到:把连通分量重算搬进"按位点"的循环 —— 变异实测 1 → 800 遍,
+        // 当场红,而 `site_visits` 纹丝不动(它记的是位点访问,不是图遍历)。
+        //
+        // **碰不到**:把重算搬进"按位点**对**"的循环。这个底物只有两处空价、
+        // 也就是**一对**,重算次数还是 1,变异实测退 0。要覆盖那一档得换一个
+        // 有 ≥3 处空价的离去片段,眼下没有 —— 写在这里,不假装守住了。
+        assert_eq!(
+            st.fragment_scans, 1,
+            "n={}:整个片段被走了 {} 遍。这个底物只成一根键,`form_bonds` 里那次\
+             连通分量重算就该只发生一次 —— 多于一次说明它随规模走了,\
+             而位点计数看不见这一项",
+            sizes[i], st.fragment_scans
+        );
+        work.push(st.site_visits);
+    }
 
     // 预热:线程会先落在能效核上再迁到性能核,频率也要爬
     for _ in 0..2 {
@@ -469,22 +486,30 @@ fn closing_byproducts_is_linear_in_fragment_size() {
         }
     }
 
-    // **比的是"涨没涨",不是"散不散"。**
+    // **比的是"涨没涨",不是"散不散"。**(这一条现在由 `assert_pinned` 落实。)
     //
     // 头一版写的是 `hi / lo`(全档的最大比最小),那测的是**离散度**不是**增长**。
     // CI 上真栽过一次:实测 800→6400 原子的每原子耗时是 449 / 435 / 365 / 276 ns,
     // **单调往下走**(小规模那一档被固定开销摊薄了),明明比线性还好,
     // 而 `hi/lo = 1.62` 照样把断言顶红,报的还是"有一处正比于整个片段的操作"——
-    // 数据说的正相反。同一个文件里的 `assert_flat` 一直是对的:拿每一档比**最小
-    // 那一档**,只看增长方向。这里改成用它,顺带白拿那条"最小规模够不够大"的闸。
+    // 数据说的正相反。拿每一档比**最小那一档**、只看增长方向才是对的。
+    //
+    // 换成数工作量之后,这一档连"抖"都没有了:`site_visits` 恰好 `2n + 1`,
+    // debug 与 release 逐位相同。墙钟降成 3 倍的粗闸。
     #[allow(clippy::cast_precision_loss)]
-    let rows: Vec<(usize, f64)> = sizes
+    let rows: Vec<(usize, u64, f64, f64)> = sizes
         .iter()
+        .zip(&work)
         .zip(&best)
-        .map(|(&n, d)| (n, d.as_nanos() as f64 / n as f64 / 1000.0))
+        .map(|((&n, &w), d)| {
+            let per_work = w as f64 / n as f64;
+            let per_time = d.as_nanos() as f64 / n as f64 / 1000.0;
+            println!(
+                "{n:>6} 原子  site_visits={w:<8} {per_work:.3} 次/原子  每原子 {:.0} ns",
+                per_time * 1000.0
+            );
+            (n, w, per_work, per_time)
+        })
         .collect();
-    for (n, c) in &rows {
-        println!("{n:>6} 原子  每原子 {:.0} ns", c * 1000.0);
-    }
-    assert_flat(&rows, "收口");
+    assert_pinned(&rows, WANT_SITE_VISITS, "收口");
 }
