@@ -25,7 +25,8 @@ use omgkit_conf::bounds;
 use omgkit_conf::embed::{embed, reference_distances};
 use omgkit_conf::smooth::triangle_smooth;
 use omgkit_conf::threading::{self, CROSS_TOL};
-use omgkit_core::{BondOrder, MolBuilder};
+#[path = "shared/baseline_mol.rs"]
+mod baseline_mol;
 
 /// 真实构象上允许报出多少次自穿。**必须是 0** —— 真实分子里没有自穿,
 /// 报出来就是检测器在乱报,那样后面量我们自己的坐标毫无意义。
@@ -59,13 +60,18 @@ const MIN_PIERCE_ALLOWANCE: u64 = 2;
 ///
 /// 两段合起来:这条判官可以 100% 空转而全绿 —— 而它的模块文档正说着
 /// "先校准检测器再量自己,反过来做是自证"。校准段没跑,那个 0 只说明它没在看。
-///
 /// 实测冒烟档三个数都是 0,所以都钉死 0。
 const MAX_UNREAD: u64 = 0;
 /// 见 [`MAX_UNREAD`]。
 const MAX_EMBED_FAIL: u64 = 0;
 /// 见 [`MAX_UNREAD`]。
 const MAX_NO_COORDS: u64 = 0;
+
+/// **连接表建不起来 / 净化失败**的分子数上限。必须是 0。
+///
+/// 这两项先前是一句 `continue`,一个数都不记 —— 分母悄悄变小,而判官照常
+/// 打印好看的比例。跟 [`MAX_UNREAD`] 是同一类闸。
+const MAX_BUILD_FAIL: u64 = 0;
 
 fn floats3(v: &serde_json::Value) -> Vec<[f64; 3]> {
     v.as_array()
@@ -103,6 +109,9 @@ fn main() {
     });
 
     let (mut n_lines, mut n_mol, mut n_emb, mut n_coords) = (0u64, 0u64, 0u64, 0u64);
+    let (mut n_topo_fail, mut n_sanitize_fail) = (0u64, 0u64);
+    let mut has_stereo_col = false;
+    let mut stereo_applied = 0usize;
     // 真实构象上的
     let (mut real_cross, mut real_pierce) = (0u64, 0u64);
     let mut real_gaps: Vec<f64> = Vec::new();
@@ -146,33 +155,25 @@ fn main() {
             continue;
         }
 
-        let mut m = MolBuilder::new();
-        for (k, &a) in z.iter().enumerate() {
-            let mut ad = omgkit_core::AtomData::new(a);
-            ad.formal_charge = chg.get(k).copied().unwrap_or(0);
-            m.add_atom_data(ad);
-        }
-        let mut ok = true;
-        for e in v["bonds"].as_array().into_iter().flatten() {
-            let Some(t) = e.as_array() else { continue };
-            let (Some(i), Some(j), Some(o)) = (
-                t.first().and_then(serde_json::Value::as_u64),
-                t.get(1).and_then(serde_json::Value::as_u64),
-                t.get(2).and_then(serde_json::Value::as_u64),
-            ) else {
+        // **按产品那条路重建** —— 见 `shared/baseline_mol.rs`。
+        // 先前这里只读键的前 3 列、也不跑 `sanitize`,而这份基准的键元组
+        // 是 6 列(带 `stereo` 与参照原子),`bounds_oracle` 读同一个文件用的是全部 6 列。
+        let bonds = baseline_mol::parse_bonds(&v);
+        has_stereo_col |= baseline_mol::has_stereo_column(&bonds);
+        let (m, n_st) = match baseline_mol::build(&z, &chg, &[], &bonds) {
+            Ok(b) => (b.mol, b.stereo_applied),
+            Err(baseline_mol::BuildFail::Topology) => {
+                n_topo_fail += 1;
                 continue;
-            };
-            let ord = match o {
-                2 => BondOrder::Double,
-                3 => BondOrder::Triple,
-                4 => BondOrder::Aromatic,
-                _ => BondOrder::Single,
-            };
-            if m.add_bond(i as u32, j as u32, ord).is_err() {
-                ok = false;
             }
-        }
-        if !ok || m.num_atoms() != nat {
+            Err(baseline_mol::BuildFail::Sanitize) => {
+                n_sanitize_fail += 1;
+                continue;
+            }
+        };
+        stereo_applied += n_st;
+        if m.num_atoms() != nat {
+            n_topo_fail += 1;
             continue;
         }
         n_mol += 1;
@@ -223,6 +224,11 @@ fn main() {
         "判官:自穿,基准 {n_lines} 行,建得出来 {n_mol} 个(嵌出来 {n_emb} 个,\
          带真实坐标 {n_coords} 个,没读进来 {unread})"
     );
+    println!(
+        "  连接表建不起来 {n_topo_fail} 个,净化失败 {n_sanitize_fail} 个(两项上限都是 {MAX_BUILD_FAIL});\
+         写回顺反 {stereo_applied} 根;这份基准的键元组带顺反列:{}",
+        if has_stereo_col { "是" } else { "**否**" }
+    );
     println!("  ── 一、真实构象(检测器的校准)──");
     println!("    键交叉 {real_cross}、环穿刺 {real_pierce}(都必须是 {MAX_FALSE_POSITIVE})");
     println!(
@@ -246,6 +252,13 @@ fn main() {
     }
 
     let mut fatal = false;
+    if n_topo_fail > MAX_BUILD_FAIL || n_sanitize_fail > MAX_BUILD_FAIL {
+        eprintln!(
+            "\n连接表建不起来 {n_topo_fail} 个、净化失败 {n_sanitize_fail} 个\
+             (上限都是 {MAX_BUILD_FAIL})—— 这些分子整个没进比对,分母悄悄小了"
+        );
+        std::process::exit(1);
+    }
     // **三条分母闸,排在其它闸之前。** 见 `MAX_UNREAD`:这条判官先前可以整条空转。
     if unread > MAX_UNREAD {
         eprintln!(

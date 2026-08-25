@@ -19,7 +19,10 @@ use omgkit_conf::bounds;
 use omgkit_conf::chiral;
 use omgkit_conf::embed::{embed, reference_distances};
 use omgkit_conf::smooth::triangle_smooth;
-use omgkit_core::{BondOrder, ChiralTag, MolBuilder};
+#[path = "shared/baseline_mol.rs"]
+mod baseline_mol;
+
+use omgkit_core::ChiralTag;
 
 /// 符号预测错的中心数上限。**这一条必须是 0** ——
 /// 它不是统计量:每个中心的号要么对要么错,没有"大部分对"这回事。
@@ -102,6 +105,8 @@ fn main() {
     });
 
     let (mut n_lines, mut n_mol, mut n_build_fail) = (0u64, 0u64, 0u64);
+    let mut has_stereo_col = false;
+    let mut stereo_applied = 0usize;
     let (mut n_truth, mut n_declared, mut n_found, mut n_wrong, mut n_missed) =
         (0u64, 0u64, 0u64, 0u64, 0u64);
     let (mut n_vol_bad, mut worst_vol) = (0u64, 0.0f64);
@@ -148,36 +153,18 @@ fn main() {
 
         // 按导出的连接表建分子 —— 下标天生对齐,而且**四配位齐全、没有隐式氢**,
         // 正好满足 `chiral::centers` 的两条前置条件。
-        let mut m = MolBuilder::new();
-        for (k, &a) in z.iter().enumerate() {
-            let mut ad = omgkit_core::AtomData::new(a);
-            ad.formal_charge = chg.get(k).copied().unwrap_or(0);
-            m.add_atom_data(ad);
-        }
-        let mut ok = true;
-        for e in v["bonds"].as_array().into_iter().flatten() {
-            let Some(t) = e.as_array() else { continue };
-            let (Some(i), Some(j), Some(o)) = (
-                t.first().and_then(serde_json::Value::as_u64),
-                t.get(1).and_then(serde_json::Value::as_u64),
-                t.get(2).and_then(serde_json::Value::as_u64),
-            ) else {
+        // **按产品那条路重建** —— 见 `shared/baseline_mol.rs`。先前这里不跑
+        // `sanitize`,而 `bounds::build` 读芳香标志与杂化,两样只有净化才会填。
+        let bonds = baseline_mol::parse_bonds(&v);
+        has_stereo_col |= baseline_mol::has_stereo_column(&bonds);
+        let (mut m, n_st) = match baseline_mol::build(&z, &chg, &[], &bonds) {
+            Ok(b) => (b.mol, b.stereo_applied),
+            Err(_) => {
+                n_build_fail += 1;
                 continue;
-            };
-            let ord = match o {
-                2 => BondOrder::Double,
-                3 => BondOrder::Triple,
-                4 => BondOrder::Aromatic,
-                _ => BondOrder::Single,
-            };
-            if m.add_bond(i as u32, j as u32, ord).is_err() {
-                ok = false;
             }
-        }
-        if !ok {
-            n_build_fail += 1;
-            continue;
-        }
+        };
+        stereo_applied += n_st;
         // 基准里**声明**了几个中心 —— 不看字段全不全,待会儿对账。
         // 少了这一步,`filter_map` 丢掉的中心(字段缺失或改名)会静默消失,
         // 而"漏 0、错 0"照样绿。见 `MAX_TRUTH_LOST`。
@@ -264,6 +251,14 @@ fn main() {
 
     let unread = n_lines.saturating_sub(n_mol + n_build_fail);
     println!("判官:手性中心,基准 {n_lines} 行,量到 {n_mol} 个(建不出来 {n_build_fail},没读进来 {unread})");
+    println!(
+        "  写回顺反 {stereo_applied} 根;这份基准的键元组带顺反列:{}",
+        if has_stereo_col {
+            "是"
+        } else {
+            "**否**(见 shared/baseline_mol.rs 的\"已知限制\"一节)"
+        }
+    );
     let truth_lost = n_declared.saturating_sub(n_truth);
     println!(
         "  真值里的中心 {n_truth} 个(基准声明 {n_declared},读丢 {truth_lost});\

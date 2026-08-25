@@ -18,7 +18,10 @@
 
 use omgkit_conf::chiral::Center;
 use omgkit_conf::{bounds, chiral, embed, pipeline, smooth, spread, threading};
-use omgkit_core::{BondOrder, ChiralTag, MolBuilder};
+#[path = "shared/baseline_mol.rs"]
+mod baseline_mol;
+
+use omgkit_core::{ChiralTag, MolBuilder};
 
 /// 精修之后,**键长**(1-2)越界超过这个数的对占比上限。
 ///
@@ -145,6 +148,12 @@ fn topo_dist(mol: &MolBuilder, n: usize) -> Vec<u8> {
     topo
 }
 
+/// **连接表建不起来 / 净化失败**的分子数上限。必须是 0。
+///
+/// 先前这里是一句 `continue`,一个数都不记 —— 分母悄悄变小而判官照常打印
+/// 好看的比例。
+const MAX_BUILD_FAIL: u64 = 0;
+
 fn main() {
     let path = std::env::args()
         .nth(1)
@@ -156,6 +165,8 @@ fn main() {
 
     // `n_lines` 是基准行数(分母),`n_mol` 是真正量到的,`n_fail` 是生成失败的。
     let (mut n_lines, mut n_mol, mut n_fail) = (0u64, 0u64, 0u64);
+    let (mut n_build_fail, mut has_stereo_col) = (0u64, false);
+    let mut stereo_applied = 0usize;
     let mut before = [(0u64, 0u64); 5];
     let mut after = [(0u64, 0u64); 5];
     let (mut cross_b, mut cross_a) = (0u64, 0u64);
@@ -198,33 +209,20 @@ fn main() {
         if z.len() != nat {
             continue;
         }
-        let mut m = MolBuilder::new();
-        for (k, &a) in z.iter().enumerate() {
-            let mut ad = omgkit_core::AtomData::new(a);
-            ad.formal_charge = chg.get(k).copied().unwrap_or(0);
-            m.add_atom_data(ad);
-        }
-        let mut ok = true;
-        for e in v["bonds"].as_array().into_iter().flatten() {
-            let Some(t) = e.as_array() else { continue };
-            let (Some(i), Some(j), Some(o)) = (
-                t.first().and_then(serde_json::Value::as_u64),
-                t.get(1).and_then(serde_json::Value::as_u64),
-                t.get(2).and_then(serde_json::Value::as_u64),
-            ) else {
+        // **按产品那条路重建** —— 见 `shared/baseline_mol.rs`。先前这里不跑
+        // `sanitize`,而 `bounds::build` 读芳香标志与杂化,两样只有净化才会填。
+        let bonds = baseline_mol::parse_bonds(&v);
+        has_stereo_col |= baseline_mol::has_stereo_column(&bonds);
+        let (mut m, n_st) = match baseline_mol::build(&z, &chg, &[], &bonds) {
+            Ok(b) => (b.mol, b.stereo_applied),
+            Err(_) => {
+                n_build_fail += 1;
                 continue;
-            };
-            let ord = match o {
-                2 => BondOrder::Double,
-                3 => BondOrder::Triple,
-                4 => BondOrder::Aromatic,
-                _ => BondOrder::Single,
-            };
-            if m.add_bond(i as u32, j as u32, ord).is_err() {
-                ok = false;
             }
-        }
-        if !ok || m.num_atoms() != nat {
+        };
+        stereo_applied += n_st;
+        if m.num_atoms() != nat {
+            n_build_fail += 1;
             continue;
         }
         for c in v["centers"].as_array().into_iter().flatten() {
@@ -345,6 +343,17 @@ fn main() {
     let pct = |a: u64, b: u64| 100.0 * a as f64 / b.max(1) as f64;
     let unread = n_lines.saturating_sub(n_mol + n_fail);
     println!(
+        "  连接表建不起来/净化失败 {n_build_fail} 个(上限 {MAX_BUILD_FAIL});\
+         写回顺反 {stereo_applied} 根;这份基准的键元组带顺反列:{}",
+        if has_stereo_col {
+            "是"
+        } else {
+            "**否** —— 这条判官在带 E/Z 的分子上看不见顺反。\
+             实测 `smoke.chirality.jsonl` 的 150 个分子里 23 个带顺反、共 28 根双键;\
+             `smoke.lonepair.jsonl` 的 15 个一根都没有(见 shared/baseline_mol.rs)"
+        }
+    );
+    println!(
         "判官:端到端构型,基准 {n_lines} 行,真正量到 {n_mol} 个(生成失败 {n_fail},没读进来 {unread})"
     );
     println!(
@@ -391,6 +400,13 @@ fn main() {
     );
 
     let mut fatal = false;
+    if n_build_fail > MAX_BUILD_FAIL {
+        eprintln!(
+            "\n有 {n_build_fail} 个分子连接表建不起来或净化失败(上限 {MAX_BUILD_FAIL})\
+             —— 它们整个没进比对,分母悄悄小了"
+        );
+        fatal = true;
+    }
     // **分母闸,排在其它闸之前。** 少量到几个分子,下面每一个比例都会变好看。
     if n_fail > MAX_FAIL {
         eprintln!(

@@ -19,10 +19,12 @@
 //! cargo run -p omgkit-conf --release --example bounds_oracle -- harness/baseline/rdkit_bounds.jsonl
 //! ```
 
+#[path = "shared/baseline_mol.rs"]
+mod baseline_mol;
+
 use omgkit_conf::bounds;
 use omgkit_conf::embed::{embed, metric_matrix, reference_distances};
 use omgkit_conf::smooth::{triangle_smooth, Bounds};
-use omgkit_core::{BondOrder, MolBuilder};
 
 /// 真实构象允许越界多少(Å)。**不是容差,是给参数表分位数留的余量** ——
 /// 表用的是 p05/p95,按定义就有约 10% 的真实值落在外面,越界量应当很小。
@@ -150,52 +152,6 @@ const MAX_EMBED_VIOL_FRAC: f64 = 30.0;
 /// 带四根键的中性氮,价键检查当场判死 —— 400 个分子里 **201 个**建不出来,
 /// 而判据仍然"跑得通",只是在剩下那一半上量。**判据的样本被腰斩却不报警,
 /// 比判据本身写错更危险。**
-fn build_mol(
-    z: &[u8],
-    chg: &[i8],
-    rad: &[u8],
-    bonds: &[(u32, u32, u8, i64, i64, i64)],
-) -> Option<MolBuilder> {
-    let mut m = MolBuilder::new();
-    for (k, &a) in z.iter().enumerate() {
-        let mut ad = omgkit_core::AtomData::new(a);
-        ad.formal_charge = chg.get(k).copied().unwrap_or(0);
-        ad.num_radical_electrons = rad.get(k).copied().unwrap_or(0);
-        m.add_atom_data(ad);
-    }
-    for &(i, j, o, _, _, _) in bonds {
-        let ord = match o {
-            2 => BondOrder::Double,
-            3 => BondOrder::Triple,
-            4 => BondOrder::Aromatic,
-            _ => BondOrder::Single,
-        };
-        m.add_bond(i, j, ord).ok()?;
-    }
-    omgkit_chem::pipeline::sanitize(&mut m).ok()?;
-    // 立体标记要在 sanitize **之后**写(它可能重排键),而且要在建界**之前**
-    for (bi, &(_, _, _, st, sa0, sa1)) in bonds.iter().enumerate() {
-        if sa0 < 0 || sa1 < 0 {
-            continue;
-        }
-        // RDKit 的 Bond::BondStereo:0 无 2 Z 3 E 4 cis 5 trans
-        let s = match st {
-            2 => omgkit_core::BondStereo::Z,
-            3 => omgkit_core::BondStereo::E,
-            4 => omgkit_core::BondStereo::Cis,
-            5 => omgkit_core::BondStereo::Trans,
-            _ => continue,
-        };
-        #[allow(clippy::cast_possible_truncation)]
-        if let Some(mut b) = m.bond_mut(bi as u32) {
-            b.set_stereo(s);
-            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-            b.set_stereo_atoms([sa0 as u32, sa1 as u32]);
-        }
-    }
-    Some(m)
-}
-
 /// 模拟 RDKit 的 `pickRandomDistMat`:在每一对的区间里**各自独立**取一个值。
 ///
 /// 这是判据三的对照组,不是产品路径 —— 所以用一个确定的 LCG 顶替均匀采样,
@@ -240,6 +196,16 @@ fn rdkit_would_abort(t: &[f64], n: usize) -> bool {
 /// **所以闸要下在分子这一层,不是逐对打补丁。** 逐对记成越界挡不住:
 /// 实测毒化每个分子的一对坐标,四档比例只挪了几个百分点,离阈值还远,
 /// 判官照样退 0。分子级、上限 0,才是"一个都不许有"。
+/// 基准里的顺反**至少要写回几根**。
+///
+/// 实测 `smoke.bounds.jsonl` 27 个分子里 3 个带顺反,共 3 根双键。
+///
+/// 这条闸是量出来的:把"写回顺反"整段删掉,四个判官**一个都不红** ——
+/// 而 `dump_bounds.py` 导第 4–6 列的唯一理由就是让界矩阵解掉 1-4 的顺反析取。
+/// 界那一层自己有判据(`bounds.rs::cis_and_trans_get_different_bounds`),
+/// 缺的正是"判官有没有把这一列喂进去"。
+const MIN_STEREO_APPLIED: usize = 3;
+
 const MAX_NONFINITE: u64 = 0;
 
 /// 这组坐标里有没有非有限数。
@@ -405,6 +371,7 @@ fn main() {
     let (mut fit3_r, mut neg_r) = (Vec::new(), Vec::new());
     let (mut n_degenerate, mut n_neg_centroid, mut n_atoms) = (0u64, 0u64, 0u64);
     let mut n_nonfinite = 0u64;
+    let mut stereo_applied = 0usize;
     // 照搬 RDKit 那条作废条件的话会打掉多少分子(两张表各记一笔)
     let (mut n_abort_u, mut n_abort_r) = (0u64, 0u64);
     // 嵌出来的坐标违反了多少条界 —— 这是给精修阶段的起点质量
@@ -426,25 +393,7 @@ fn main() {
                     .collect()
             })
             .unwrap_or_default();
-        #[allow(clippy::cast_possible_truncation)]
-        let bl: Vec<(u32, u32, u8, i64, i64, i64)> = v["bonds"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|e| {
-                        let t = e.as_array()?;
-                        Some((
-                            t.first()?.as_u64()? as u32,
-                            t.get(1)?.as_u64()? as u32,
-                            t.get(2)?.as_u64()? as u8,
-                            t.get(3).and_then(serde_json::Value::as_i64).unwrap_or(0),
-                            t.get(4).and_then(serde_json::Value::as_i64).unwrap_or(-1),
-                            t.get(5).and_then(serde_json::Value::as_i64).unwrap_or(-1),
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let bl = baseline_mol::parse_bonds(&v);
         let rd: Vec<f64> = v["smoothed"]
             .as_array()
             .map(|a| a.iter().filter_map(serde_json::Value::as_f64).collect())
@@ -471,10 +420,12 @@ fn main() {
                     .collect()
             })
             .unwrap_or_default();
-        let Some(mol) = build_mol(&z, &chg, &rad, &bl) else {
+        let Ok(built) = baseline_mol::build(&z, &chg, &rad, &bl) else {
             n_build_fail += 1;
             continue;
         };
+        let (mol, n_st) = (built.mol, built.stereo_applied);
+        stereo_applied += n_st;
         if mol.num_atoms() != nat {
             n_build_fail += 1;
             continue;
@@ -793,6 +744,13 @@ fn main() {
         );
         fatal = true;
     }
+    if stereo_applied < MIN_STEREO_APPLIED {
+        eprintln!(
+            "\n只把 {stereo_applied} 根顺反喂进了界矩阵(下限 {MIN_STEREO_APPLIED})—— \
+             基准第 4–6 列没被读进来,1-4 的顺反析取就没人解"
+        );
+        fatal = true;
+    }
     if n_nonfinite > MAX_NONFINITE {
         eprintln!(
             "\n有 {n_nonfinite} 次嵌出来的坐标含非有限数(上限 {MAX_NONFINITE})—— \n\
@@ -803,5 +761,6 @@ fn main() {
     if fatal {
         std::process::exit(1);
     }
+    println!("    写回基准里的顺反 {stereo_applied} 根(下限 {MIN_STEREO_APPLIED})");
     println!("\n三条都过(嵌出坐标含非有限数 {n_nonfinite} 次,上限 {MAX_NONFINITE})。");
 }
