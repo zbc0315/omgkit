@@ -309,9 +309,29 @@ mod tests {
 
     /// 距离表之间的最大逐对偏差。距离在刚体变换下不变,所以这是比坐标更该比的量。
     fn max_dist_dev(a: &[f64], b: &[f64]) -> f64 {
-        a.iter()
-            .zip(b)
-            .fold(0.0_f64, |w, (x, y)| w.max((x - y).abs()))
+        a.iter().zip(b).fold(0.0_f64, |w, (x, y)| {
+            crate::linalg::max_nan_wins(w, (x - y).abs())
+        })
+    }
+
+    /// **`max_dist_dev` 不许把 NaN 洗成 0。**
+    ///
+    /// 它是上面那条"最硬的判据"的度量本身。这个模块的坐标**确实会变成 NaN**
+    /// —— 模块里那条断言写着:负特征值一旦被当成有效轴,`√负数` 就是 NaN。
+    /// 那时候度量报"偏差 0",最硬的判据就成了最软的。
+    #[test]
+    fn 最大偏差不许把_nan_洗成零() {
+        let a = [1.0, 2.0, 3.0];
+        assert!((max_dist_dev(&a, &[1.0, 2.0, 3.5]) - 0.5).abs() < 1e-12);
+        assert_eq!(max_dist_dev(&a, &a), 0.0, "同一张表偏差是 0");
+        assert!(
+            max_dist_dev(&a, &[1.0, f64::NAN, 3.0]).is_nan(),
+            "右边带 NaN"
+        );
+        assert!(
+            max_dist_dev(&[f64::NAN, 2.0, 3.0], &a).is_nan(),
+            "左边带 NaN"
+        );
     }
 
     #[test]

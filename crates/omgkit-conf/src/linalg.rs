@@ -38,6 +38,30 @@
 //! `linalg.eigh`(LAPACK)逐个特征值比。另外还有一条不依赖任何外部实现的硬判据 ——
 //! **真实三维构象的 Gram 矩阵秩必须恰好是 3**,多一个非零特征值就是错的。
 
+/// 取两者中较大的一个,**NaN 优先**。
+///
+/// `f64::max` 的语义是"遇 NaN 就返回另一个操作数",两个方向都如此
+/// (实测 `0.0f64.max(NAN)` 与 `NAN.max(0.0)` 都给 `0`)。拿它把一批偏差
+/// 归约成"最坏值"时,NaN 会被**洗成 0** —— 而 0 恰好是最好的那个分数。
+///
+/// 本仓库为这件事栽过:四个原子里放一个 NaN,误差函数罚 0、梯度全 0、
+/// 优化器报 `converged=true, grad_norm=0, value=0`,数值梯度校验报偏差 0。
+/// 四个满分,没有一处报警。
+///
+/// **凡是"把一批偏差归约成一个最坏值、再拿去和阈值比"的地方都用这个。**
+/// 那些故意夹住下界的 `.max(0.0)`(防浮点噪声)不在此列 —— 它们要的正是
+/// `f64::max` 的语义。
+#[must_use]
+pub(crate) fn max_nan_wins(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else if a > b {
+        a
+    } else {
+        b
+    }
+}
+
 /// 最多扫多少轮。Jacobi 典型 6~10 轮收敛;扫到这个数还不收敛说明输入病态,
 /// 这时候要报错,不能返回一个"扫累了"的近似解。
 const MAX_SWEEPS: usize = 60;
@@ -347,10 +371,53 @@ mod tests {
                 for k in 0..n {
                     s += e.values[k] * e.vectors[k * n + i] * e.vectors[k * n + j];
                 }
-                worst = worst.max((s - a[i * n + j]).abs());
+                worst = max_nan_wins(worst, (s - a[i * n + j]).abs());
             }
         }
         worst
+    }
+
+    /// **NaN 必须赢。** `f64::max` 两个方向都会把 NaN 洗掉,而这里的用法是
+    /// "把一批偏差归约成最坏值再和阈值比" —— 洗成 0 就等于满分。
+    #[test]
+    fn 最坏值归约里_nan_必须赢() {
+        assert_eq!(max_nan_wins(1.0, 3.0), 3.0);
+        assert_eq!(max_nan_wins(3.0, 1.0), 3.0);
+        assert_eq!(max_nan_wins(0.0, 0.0), 0.0);
+        assert_eq!(max_nan_wins(f64::INFINITY, 1e300), f64::INFINITY);
+        // 两个方向都要试:`f64::max` 正是两个方向都washed
+        assert!(max_nan_wins(0.0, f64::NAN).is_nan(), "NaN 在右");
+        assert!(max_nan_wins(f64::NAN, 0.0).is_nan(), "NaN 在左");
+        assert!(max_nan_wins(f64::NAN, f64::NAN).is_nan());
+        // 对照:标准库的语义就是这条判据存在的理由
+        assert_eq!(0.0_f64.max(f64::NAN), 0.0, "标准库会洗掉 NaN(右)");
+        assert_eq!(f64::NAN.max(0.0), 0.0, "标准库会洗掉 NaN(左)");
+    }
+
+    /// 两条自检判据本身也不许把 NaN 洗成 0。
+    ///
+    /// 它们是这个模块唯一的正确性闸;喂进一个带 NaN 的分解结果时报"偏差 0",
+    /// 等于一个彻底坏掉的分解拿到满分。
+    #[test]
+    fn 分解自检不许把_nan_报成零偏差() {
+        let n = 2;
+        let a = [2.0, 0.0, 0.0, 3.0];
+        let good = Eigen {
+            values: vec![2.0, 3.0],
+            vectors: vec![1.0, 0.0, 0.0, 1.0],
+            sweeps: 0,
+        };
+        assert!(recon_err(&a, n, &good) < 1e-12, "干净输入上该是零偏差");
+        assert!(orth_err(n, &good) < 1e-12, "干净输入上该是零偏差");
+
+        let mut bad_vec = good.clone();
+        bad_vec.vectors[1] = f64::NAN;
+        assert!(recon_err(&a, n, &bad_vec).is_nan(), "特征向量带 NaN");
+        assert!(orth_err(n, &bad_vec).is_nan(), "特征向量带 NaN");
+
+        let mut bad_val = good.clone();
+        bad_val.values[0] = f64::NAN;
+        assert!(recon_err(&a, n, &bad_val).is_nan(), "特征值带 NaN");
     }
 
     /// 正交性偏差 `‖V V^T − I‖_max`。
@@ -362,7 +429,7 @@ mod tests {
                 for i in 0..n {
                     s += e.vectors[k * n + i] * e.vectors[l * n + i];
                 }
-                worst = worst.max((s - f64::from(u8::from(k == l))).abs());
+                worst = max_nan_wins(worst, (s - f64::from(u8::from(k == l))).abs());
             }
         }
         worst

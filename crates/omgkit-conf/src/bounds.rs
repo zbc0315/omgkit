@@ -1149,7 +1149,7 @@ mod tests {
         let mut worst = 0.0f64;
         for x in 0..6 {
             for y in (x + 1)..6 {
-                worst = worst.max(b.upper(cs[x], cs[y]));
+                worst = crate::linalg::max_nan_wins(worst, b.upper(cs[x], cs[y]));
             }
         }
         assert!(
@@ -1217,7 +1217,9 @@ mod tests {
             "苯该有不少 1-4 对,只找到 {}",
             widths.len()
         );
-        let worst = widths.iter().fold(0.0f64, |a, x| a.max(*x));
+        let worst = widths
+            .iter()
+            .fold(0.0f64, |a, x| crate::linalg::max_nan_wins(a, *x));
         // **用常数表达,不写死数字。** 头一版这里写 `< 0.05`,而"钉住"的宽度
         // 后来变成 `2 × DIST14_TOL = 0.12` —— 断言当场红,可代码是**对的**
         // (那正是与 RDKit 相同的钉死宽度)。判据里的阈值一旦与被判的量脱钩,

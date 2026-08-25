@@ -122,7 +122,10 @@ pub fn max_grad_error(obj: &dyn Objective, x: &[f64], h: f64) -> f64 {
         probe[i] = orig;
         let num = (f1 - f0) / (2.0 * h);
         let denom = num.abs().max(g[i].abs()).max(1.0);
-        worst = worst.max((num - g[i]).abs() / denom);
+        let rel = (num - g[i]).abs() / denom;
+        // 归约必须让 NaN 赢,否则"解析梯度是 NaN"会被判成偏差 0 ——
+        // 见 [`crate::linalg::max_nan_wins`]。
+        worst = crate::linalg::max_nan_wins(worst, rel);
     }
     worst
 }
@@ -136,8 +139,16 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     s
 }
 
+/// 无穷范数。**任何一个分量是 NaN,结果就是 NaN。**
+///
+/// 不能写成 `fold(0.0, f64::max)`:`f64::max` 碰上 NaN 时**返回另一个操作数**
+/// (两个方向都如此,实测 `0.0f64.max(NAN)` 与 `NAN.max(0.0)` 都是 `0`),
+/// 于是整条梯度全是 NaN 时这里给出 **0** —— 恰好就是"梯度为零、已经收敛"的
+/// 意思。收敛判据 `grad_norm <= grad_tol` 于是当场成立,一个废掉的结构
+/// 拿到满分。传播 NaN 之后那个比较恒为 false,不收敛就是不收敛。
 fn inf_norm(v: &[f64]) -> f64 {
-    v.iter().fold(0.0_f64, |m, x| m.max(x.abs()))
+    v.iter()
+        .fold(0.0_f64, |m, x| crate::linalg::max_nan_wins(m, x.abs()))
 }
 
 /// 强 Wolfe 线搜索的结果。

@@ -391,6 +391,23 @@ impl Field {
 
 impl Objective for Field {
     fn value_and_grad(&self, x: &[f64], grad: &mut [f64]) -> f64 {
+        // **非有限坐标必须当场变成 NaN,不能悄悄罚 0。**
+        //
+        // 距离项分三支比大小(`d2 > hi2` / `d2 < lo2` / 落在区间里),而 NaN
+        // 与任何数相比都是 false —— 带 NaN 的原子对于是走第三支,**罚 0、
+        // 梯度 0**。实测四个原子里放一个 NaN:误差 0、梯度全 0,
+        // `minimize` 当场报 `converged=true, grad_norm=0, value=0` ——
+        // 一个废掉的结构拿到满分,而且是最高分。
+        //
+        // 这一遍是 O(n),外面那两层循环是 O(n²)。实测全语料
+        // (`dump_conformers -- large.smi`,各跑三次):有守卫 0.70–0.90 s,
+        // 拿掉守卫 0.71–1.05 s —— 两个区间叠在一起,代价在跑次波动之下。
+        if !x.iter().all(|v| v.is_finite()) {
+            for v in grad.iter_mut() {
+                *v = f64::NAN;
+            }
+            return f64::NAN;
+        }
         for v in grad.iter_mut() {
             *v = 0.0;
         }
@@ -419,6 +436,87 @@ mod tests {
             }
         }
         Field::new(&b, centers)
+    }
+
+    /// **非有限坐标不许被判成满分。**
+    ///
+    /// 修之前四个入口**互相独立地**把 NaN 洗成最好的分数,实测(四个原子
+    /// 里放一个 NaN):
+    ///
+    /// | 入口 | 修之前 | 应有 |
+    /// |---|---|---|
+    /// | `Field::value_and_grad` | 误差 **0**、梯度全 **0** | NaN |
+    /// | `minimize` | `converged=true, grad_norm=0, value=0` | 不收敛 |
+    /// | `max_grad_error` | 偏差 **0** | NaN |
+    ///
+    /// 根因两条:距离项分三支比大小,而 NaN 与任何数比都是 false,于是带 NaN
+    /// 的原子对走"落在区间里"那一支、罚 0;`f64::max` 遇 NaN 返回另一个操作数,
+    /// 于是"最坏偏差"的归约把 NaN 洗成 0(见
+    /// [`crate::linalg::max_nan_wins`])。
+    ///
+    /// `+inf` 也要走同一条路 —— 它经一次减法就变成 NaN。
+    #[test]
+    fn 非有限坐标不许被判成满分() {
+        let pts = [
+            [0.0, 0.0, 0.0],
+            [1.5, 0.0, 0.0],
+            [0.0, 1.5, 0.0],
+            [0.0, 0.0, 1.5],
+        ];
+        let f = field_from(&pts, 0.1, &[]);
+        let clean: Vec<f64> = pts.iter().flatten().copied().collect();
+
+        // **先证明干净坐标上这份场是满分的**,否则下面每一条都可能是空断言:
+        // 一个恒返回 NaN 的实现也能让它们全绿。
+        let mut g = vec![0.0; clean.len()];
+        assert_eq!(
+            f.value_and_grad(&clean, &mut g),
+            0.0,
+            "界就是照这组点定的,它本身该是零点"
+        );
+        assert!(g.iter().all(|v| *v == 0.0), "零点上梯度该是零");
+        assert!(
+            max_grad_error(&f, &clean, 1e-5) < 1e-6,
+            "干净坐标上梯度该对"
+        );
+        let r = minimize(&f, &mut clean.clone(), &Options::default());
+        assert!(r.converged && r.value.is_finite(), "干净坐标上该收敛");
+
+        // 三种非有限值 × 三个不同位置(第一个原子、中间、最后一个分量)
+        for (tag, bad) in [
+            ("NaN", f64::NAN),
+            ("+inf", f64::INFINITY),
+            ("-inf", f64::NEG_INFINITY),
+        ] {
+            for poison in [0usize, 5, 11] {
+                let mut x = clean.clone();
+                x[poison] = bad;
+                let mut g = vec![0.0; x.len()];
+                let e = f.value_and_grad(&x, &mut g);
+                assert!(e.is_nan(), "{tag}@{poison}:误差该是 NaN,实得 {e}");
+                assert!(
+                    g.iter().all(|v| v.is_nan()),
+                    "{tag}@{poison}:梯度该整条 NaN,实得 {g:?}"
+                );
+                assert!(
+                    max_grad_error(&f, &x, 1e-5).is_nan(),
+                    "{tag}@{poison}:梯度校验不许报出一个有限偏差"
+                );
+                let mut xx = x.clone();
+                let r = minimize(&f, &mut xx, &Options::default());
+                assert!(!r.converged, "{tag}@{poison}:不许报收敛");
+                assert!(
+                    !r.grad_norm.is_finite(),
+                    "{tag}@{poison}:梯度范数不许是有限数,实得 {}",
+                    r.grad_norm
+                );
+                assert!(
+                    !r.value.is_finite(),
+                    "{tag}@{poison}:目标值不许是有限数,实得 {}",
+                    r.value
+                );
+            }
+        }
     }
 
     fn lcg(state: &mut u64) -> f64 {

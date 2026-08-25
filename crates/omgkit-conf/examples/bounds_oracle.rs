@@ -229,6 +229,24 @@ fn rdkit_would_abort(t: &[f64], n: usize) -> bool {
     n > 3 && (0..n).any(|i| t[i * n + i] < EIGVAL_TOL)
 }
 
+/// 嵌出来的坐标里**允许有几个分子含非有限数**。必须是 0。
+///
+/// `embed` 自己那条判据只在几个手写分子上断言过坐标有限
+/// (`crate::embed` 的 `#[cfg(test)]` 里那句),整份语料上从来没人问过。
+/// 而 NaN 一旦淌出来,这个判官的每一档都会变好看:越界比大小
+/// (`below > 0.1`)对 NaN 恒为 false,`worst_*` 那两个 `f64::max` 又把 NaN
+/// 洗掉 —— 一组 NaN 坐标四档越界全报 0.0%,拿到最好看的分数。
+///
+/// **所以闸要下在分子这一层,不是逐对打补丁。** 逐对记成越界挡不住:
+/// 实测毒化每个分子的一对坐标,四档比例只挪了几个百分点,离阈值还远,
+/// 判官照样退 0。分子级、上限 0,才是"一个都不许有"。
+const MAX_NONFINITE: u64 = 0;
+
+/// 这组坐标里有没有非有限数。
+fn has_nonfinite(coords: &[[f64; 3]]) -> bool {
+    coords.iter().any(|p| p.iter().any(|v| !v.is_finite()))
+}
+
 /// 嵌出来的坐标离界矩阵有多远,**按方向与拓扑档分开记**。
 ///
 /// # 为什么这个数比 `fit3` 重要
@@ -386,6 +404,7 @@ fn main() {
     let (mut fit3_u, mut neg_u) = (Vec::new(), Vec::new());
     let (mut fit3_r, mut neg_r) = (Vec::new(), Vec::new());
     let (mut n_degenerate, mut n_neg_centroid, mut n_atoms) = (0u64, 0u64, 0u64);
+    let mut n_nonfinite = 0u64;
     // 照搬 RDKit 那条作废条件的话会打掉多少分子(两张表各记一笔)
     let (mut n_abort_u, mut n_abort_r) = (0u64, 0u64);
     // 嵌出来的坐标违反了多少条界 —— 这是给精修阶段的起点质量
@@ -496,6 +515,9 @@ fn main() {
         // ---- 判据三:U 能不能摆进三维,与"区间内随机取"同表对照 ----
         let du = reference_distances(&b);
         if let Ok(e) = embed(&du, nat) {
+            if has_nonfinite(&e.coords) {
+                n_nonfinite += 1;
+            }
             fit3_u.push(e.fit3);
             neg_u.push(e.negative_share);
             if e.degenerate_axes > 0 {
@@ -513,6 +535,9 @@ fn main() {
         }
         let dr = pick_random_dist(&b, 0xf00d);
         if let Ok(e) = embed(&dr, nat) {
+            if has_nonfinite(&e.coords) {
+                n_nonfinite += 1;
+            }
             fit3_r.push(e.fit3);
             neg_r.push(e.negative_share);
             let mut mv = Viol::default();
@@ -768,8 +793,15 @@ fn main() {
         );
         fatal = true;
     }
+    if n_nonfinite > MAX_NONFINITE {
+        eprintln!(
+            "\n有 {n_nonfinite} 次嵌出来的坐标含非有限数(上限 {MAX_NONFINITE})—— \n\
+             NaN 会让这个判官的每一档都变好看,查起来极贵,必须当场拦住"
+        );
+        fatal = true;
+    }
     if fatal {
         std::process::exit(1);
     }
-    println!("\n三条都过。");
+    println!("\n三条都过(嵌出坐标含非有限数 {n_nonfinite} 次,上限 {MAX_NONFINITE})。");
 }
