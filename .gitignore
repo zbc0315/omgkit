@@ -23,13 +23,15 @@
 # smoke,却被一条非 ignore 的测试硬编码引用)。
 #
 # 改动这一段之后要验的不是"规则看着对",而是**把仓库克隆到别处跑一遍
-# `cargo test`** —— 那才是"开箱即跑"的判据。当前入库合计 1658 KB(重量出来的;先前写的 680K 早就过期了,
-# 850K 是我拿旧数加 164K 算的,同样不作数)。
+# `cargo test`** —— 那才是"开箱即跑"的判据。当前入库合计 2159 KB(重量出来的;
+# 先前写过 680K、850K、1658 KB 三个数,前两个是过期的和算出来的,都不作数)。
 /harness/baseline/*
 !/harness/baseline/smoke.*
 !/harness/baseline/smarts.jsonl
-# 匹配差分的大语料基准(164 K)。`matches_large` 解禁之后默认 `cargo test`
-# 会跑到它 —— 按上面那条规矩就必须入库。
+# 匹配差分的大语料基准(678 K,覆盖 `large.smi` 全部 8839 条)。`matches_large`
+# 解禁之后默认 `cargo test` 会跑到它 —— 按上面那条规矩就必须入库。
+# 它一度只覆盖前 2000 条,而那 22.6% 的截断正好挡住了一条活的分歧,
+# 见 `crates/omgkit-match/tests/differential.rs` 里 `matches_large` 的说明。
 !/harness/baseline/matches.tsv
 /harness/corpus/chembl*.smi
 /harness/corpus/*.sdf

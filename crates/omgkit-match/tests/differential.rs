@@ -39,6 +39,32 @@ const MAX_MATCHES: usize = 1000;
 /// 当前为空。
 const KNOWN_UNSANITIZABLE: &[&str] = &[];
 
+/// `large.smi` 里**两边都处理不了**的分子 —— 本实现净化失败,外部实现连解析
+/// 都不过。跳过它们不损失任何比对:基准里本来就没有它们的命中。
+///
+/// 逐条列出来而不是卡个"最多几条",是因为个数上限挡不住"又多了一条净化不了的
+/// 分子"这种回归 —— 抬一下数字就绿了。集合比对没有这个空子。
+///
+/// 实测(RDKit 2025.09.2,`harness/requirements.lock` 钉的版本):
+/// 全语料 8839 条里 RDKit 解析失败 8 条,本实现净化失败 8 条,**是同一批**。
+/// 复核命令见 `harness/README.md`。
+/// `smoke.smi` 里两边都处理不了的分子。语料里另有 8 条**语法就不合法**的
+/// (`CC(`、`[C` 之类),那些连本实现的解析都过不去,压根走不到净化,
+/// 所以不在这份名单里。
+const SMOKE_BOTH_SIDES_REJECT: &[&str] =
+    &["CCl(=O)=O", "OF(=O)(=O)=O", "[NH3]->[B](F)(F)F", "c1cncc1"];
+
+const BOTH_SIDES_REJECT: &[&str] = &[
+    "CC1=[O+][Al]23([O+]=C(C)C1)([O+]=C(C)CC(=[O+]2)C)[O+]=C(C)CC(=[O+]3)C",
+    "CC1=[O+][Be]2([O+]=C(C)C1)[O+]=C(C)CC(=[O+]2)C",
+    "CCCCCCCCCCCCCCCC[N+](C)(C)CC1=CC=CC=C1.F[P](F)(F)(F)(F)F",
+    "CCCCNCCCC.F[Si](F)(F)(F)(F)F",
+    "CCO1=O=C1C2=CC=C(O2)C(C)(C)C",
+    "NC(N)=[O+][Al+3]([O+]=C(N)N)([O+]=C(N)N)([O+]=C(N)N)([O+]=C(N)N)[O+]=C(N)N.[O-]S([O-])(=O)=O.I[I]I",
+    "O=C1O[Al]23(OC1=O)(OC(=O)C(=O)O2)OC(=O)C(=O)O3",
+    "O[Hg]C1=CC=CC=C1.[O-][N+](=O)(=O)[Hg]C2=CC=CC=C2",
+];
+
 fn corpus(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../harness/corpus")
@@ -130,8 +156,9 @@ struct Report {
 
 /// 返回 (报告, 分子串, 模式串, **基准覆盖到的分子数**, **语料总条数**)。
 ///
-/// 后两个是**分母**:基准可以只覆盖语料的一段,而那一段有多大必须报出来 ——
-/// 见 `matches_large` 的说明(它读的基准只覆盖 8839 条里的前 2000 条)。
+/// 后两个是**分母**:基准可以只覆盖语料的一段,而那一段有多大必须报出来。
+/// `matches.tsv` 一度只覆盖 8839 条里的前 2000 条,而截断正好挡住了一条活的
+/// 分歧 —— 见 `matches_large` 的说明。
 fn run(mol_corpus: &str, baseline_name: &str) -> (Report, Vec<String>, Vec<String>, usize, usize) {
     let pats_raw = read_corpus(&corpus("smarts.txt"));
     let base = read_baseline(&baseline(baseline_name));
@@ -262,11 +289,26 @@ fn assert_clean(rep: &Report, smis: &[String], pats: &[String]) {
     );
 }
 
+/// 跳过的分子必须**逐条**对上名单。
+///
+/// 只卡个数上限挡不住"又多了一条净化不了的分子" —— 抬一下数字就绿了。
+fn assert_skipped_is(rep: &Report, want: &[&str], name: &str) {
+    let got: BTreeSet<&str> = rep.skipped_molecules.iter().map(String::as_str).collect();
+    let want: BTreeSet<&str> = want.iter().copied().collect();
+    assert_eq!(
+        got, want,
+        "本实现净化不了的分子集合变了。多出来的要查清楚是不是真缺陷;\n\
+         少掉的说明现在能净化了,请从 {name} 里删除对应条目"
+    );
+}
+
 #[test]
 fn matches_smoke() {
     let (rep, smis, pats, base_mols, total_mols) = run("smoke.smi", "smoke.matches.tsv");
     assert_clean(&rep, &smis, &pats);
+    assert_eq!(base_mols, total_mols, "冒烟基准也要覆盖整份冒烟语料");
     assert!(rep.agreed > 20, "只对上了 {} 条,语料太弱", rep.agreed);
+    assert_skipped_is(&rep, SMOKE_BOTH_SIDES_REJECT, "SMOKE_BOTH_SIDES_REJECT");
     println!(
         "匹配差分(冒烟):基准覆盖语料前 {base_mols} 条(语料共 {total_mols} 条),\
          一致 {} 条;跳过(已登记){} 条分子",
@@ -276,34 +318,42 @@ fn matches_smoke() {
 }
 
 #[test]
-// **不再 `#[ignore]`。** 它读的 `harness/baseline/matches.tsv` 先前没有入库,
-// 所以这一条连本地 `--ignored` 都要先手工生成基准 —— 现在那份基准跟着入库了
-// (164 651 字节),理由见 `.gitignore`:默认 `cargo test` 会跑到的基准必须入库。
+// 读 `harness/baseline/matches.tsv`(678 284 字节,入库)。理由见 `.gitignore`:
+// 默认 `cargo test` 会跑到的基准必须入库。
 //
-// # 名字叫 `large`,实际只覆盖前 2000 条 —— 这一点必须写在脸上
+// # 这份基准**覆盖整份语料**,而且它一度不是
 //
-// `matches.tsv` 首行是 `#mols 2000`,而 `large.smi` 有 8839 条 —— **覆盖 22.6%**。
-// 独立审核指出:测试名叫 `matches_large`、读的是 `large.smi`、打印"大语料",
-// 而 2000 这个数**一处都没露过面**。所以下面把 `base.n_mols` 打出来。
+// 先前它只有前 2000 条(8839 条里的 22.6%),而测试名叫 `matches_large`、
+// 读的是 `large.smi`、打印"大语料" —— 2000 这个数一处都没露过面。
 //
-// 审核还用锁里钉的 RDKit 2025.09.2 重导了**全量**基准(8839 条,678 kB),
-// 报出 6 条本实现命中而 RDKit 不命中的方向键模式(都在同一个分子上,小环内的
-// C=C 被我们给了方向语义)。**那一条我没能自己复核**(复现要重导全量基准),
-// 已按原样记进任务,不当作已确证的结论。
+// 截断不只是"覆盖率数字不好看":用 `harness/requirements.lock` 钉的
+// RDKit 2025.09.2 重导全量之后,判据**当场变红** —— 6 条本实现命中而外部实现
+// 不命中的方向键模式,全落在同一个分子上(语料第 5707 条,文件第 5731 行):
+// 两个稠合五元环,融合处的
+// C=C 两侧写着 `\` 与 `/`,合起来要求"反式",而五元环里根本搭不出反式。
+// 本实现照写法给了它顺反,外部实现按"最小环小于八元就没有顺反"的规矩不给。
 //
-// 也就是说:**这不只是"覆盖率数字不好看",截断很可能挡住了活的分歧。**
-// 扩到全量是另一件事(要连着处理那 6 条),见任务清单。
+// 修在 `omgkit_io::stereo` 的 `MIN_STEREOGENIC_RING`,三条通路(感知/写出/匹配)
+// 一起认这条线;判据是那一层的 `小环里的双键不给顺反`。
+//
+// 语料里撞上这条规则的**只有这 1 个分子**(实测 8839 条里 1 条,`smoke.smi`
+// 与 `hard.smi` 各 0 条)—— 所以真正的覆盖靠那条手写判据逐个环大小走一遍,
+// 这里只负责证明"全量语料上两边一条不差"。
 fn matches_large() {
     let (rep, smis, pats, base_mols, total_mols) = run("large.smi", "matches.tsv");
     assert_clean(&rep, &smis, &pats);
-    assert!(rep.agreed > 10_000, "只对上了 {} 条", rep.agreed);
-    // **跳过的分子要有上限。** 先前只印不判 —— 那是这个仓库刚清过一批的
-    // "单向过滤器":它只会把分歧变成不计数。实测现值 0。
-    assert!(
-        rep.skipped_molecules.len() <= 5,
-        "跳过了 {} 个分子(上限 5)—— 跳过的越多,上面那个'一致 N 条'越不说明问题",
-        rep.skipped_molecules.len()
+    // **基准必须覆盖整份语料。** 这一条是上面那段历史的闸:重导时手滑加个
+    // `--limit-mols`,判据会照常打印"一致 N 条"全绿,而少掉的那一段里可能正
+    // 躺着分歧。
+    assert_eq!(
+        base_mols, total_mols,
+        "基准只覆盖 {base_mols}/{total_mols} 条 —— 重导时别加 --limit-mols"
     );
+    assert!(rep.agreed > 40_000, "只对上了 {} 条", rep.agreed);
+    // **跳过的分子要逐条钉死,不能只卡个数。** 先前只印不判 —— 那是这个仓库
+    // 刚清过一批的"单向过滤器":它只会把分歧变成不计数。换成计数上限也不够,
+    // 上限是个可以随手往上抬的数;这里直接比集合,多一条少一条都要说明理由。
+    assert_skipped_is(&rep, BOTH_SIDES_REJECT, "BOTH_SIDES_REJECT");
     println!(
         "匹配差分:基准覆盖语料前 {} 条(语料共 {} 条),一致 {} 条;跳过(已登记){} 条分子",
         base_mols,

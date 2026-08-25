@@ -605,30 +605,35 @@ dump 那边可以只跑前 N 个 —— 两个数对不上时,第 N 个之后的
 一部分输入的判据,首行都写 `#mols<TAB>N`,判官读不到就直接报错。当前
 `dump_reactions` 与 `oracle_matches.py` 两处都带这个首行。
 
-### `harness/baseline/matches.tsv` 入库了,以及它的两个已知限制
+### `harness/baseline/matches.tsv` 入库了,而且必须**覆盖全量语料**
 
 `matches_large` 解禁进 CI 之后,默认 `cargo test` 会读这份基准,所以它必须入库
-(164 651 字节)。生成命令:
+(678 284 字节,`large.smi` 全部 8839 条)。生成命令 —— **不带 `--limit-mols`**:
 
 ```bash
-.venv/bin/python harness/oracle_matches.py \
+# 必须用 requirements.lock 钉的 RDKit 2025.09.2,不是开发机的 .venv(2022.09.5)
+python3 -m venv /tmp/rd2025
+/tmp/rd2025/bin/pip install --only-binary=:all: -r harness/requirements.lock
+/tmp/rd2025/bin/python harness/oracle_matches.py \
     --mols harness/corpus/large.smi --pats harness/corpus/smarts.txt \
-    --limit-mols 2000 --out harness/baseline/matches.tsv
+    --out harness/baseline/matches.tsv
 ```
 
-**两个限制,都得写在脸上:**
+截断这一件**有闸**:`matches_large` 断言 `#mols` 首行等于语料条数,重导时手滑
+加个 `--limit-mols` 当场红。版本这一件**没有闸** —— 生成脚本只是把 RDKit 版本
+打在输出里,靠人看;基准文件本身不带版本记录。
 
-1. **只覆盖前 2000 条**(语料 8839 条,22.6%)。测试的输出现在会把这个数打出来
-   ——先前它叫 `matches_large`、读 `large.smi`、打印"大语料",而 2000 这个数
-   一处都没露过面。
-2. **它是 RDKit 2022.09.5 导的**,而 `harness/requirements.lock` 钉的是 2025.09.2。
-   前 2000 条上两版逐字节相同(实测),所以眼下不咬人;但全语料上两版有差异,
-   而这份文件里没有任何版本记录。**重导时用 lock 里钉的那个版本**,并且
-   把这一段一起更新。
+**它一度只覆盖前 2000 条(22.6%),而那段截断挡住了一条活的分歧。** 用 2025.09.2
+重导全量之后判据变红:6 条本实现命中而 RDKit 不命中的方向键模式,全落在第 5707 行
+那一个分子上 —— 两个稠合五元环,融合处的 C=C 两侧写着 `\` 与 `/`,合起来要求
+"反式",而五元环里搭不出反式。修在 `omgkit_io::stereo` 的 `MIN_STEREOGENIC_RING`
+(最小环小于八元的双键没有顺反,与 RDKit 的 `MinBondRingSize < 8` 同一条线)。
 
-独立审核用 2025.09.2 重导了全量基准(8839 条,678 kB),报出 6 条本实现命中而
-RDKit 不命中的方向键模式(同一个分子上,小环内的 C=C)。**那一条我没能自己复核**
-(复现要重导全量),已记进任务清单 —— 扩到全量要连着处理它。
+顺带记两条实测,`crates/omgkit-match/tests/differential.rs` 里逐条钉着:
+
+- 全语料 8839 条里,RDKit 解析失败 8 条、本实现净化失败 8 条,**是同一批** ——
+  跳过它们不损失任何比对。
+- 前 2000 条上 2022.09.5 与 2025.09.2 逐字节相同;差异只在 2000 条之后。
 
 ## 注释里的数字也要有闸门
 

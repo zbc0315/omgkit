@@ -93,9 +93,52 @@ pub fn genuine_tetrahedral(mol: &MolBuilder) -> Vec<bool> {
     out
 }
 
+/// 顺/反能成立的**最小环**。环再小一点,双键上那两条环内通路就被环锁成顺式,
+/// `/` 与 `\` 写什么都不改变几何。
+///
+/// 八元是化学事实,不是拍脑袋的阈值:反式环辛烯是能分离出来的最小反式环烯,
+/// 七元及以下的反式在几何上根本搭不起来。外部实现(RDKit `MinBondRingSize < 8`)
+/// 用的是同一条线 —— 实测四到七元一律不标、八元起才标。
+const MIN_STEREOGENIC_RING: usize = 8;
+
+/// 这根键落在小于 [`MIN_STEREOGENIC_RING`] 元的环里吗。
+///
+/// 环的大小 = 这根键 + 绕开它的最短通路,所以只要问"不走这根键,能不能在
+/// `MIN_STEREOGENIC_RING - 2` 步之内从一端走到另一端"。搜索深度是常数,
+/// 不需要成环感知,也就不必把 `omgkit-chem` 拽进这一层。
+fn in_small_ring(mol: &MolBuilder, bond: u32) -> bool {
+    let Some(&b) = mol.bonds().get(bond as usize) else {
+        return false;
+    };
+    let mut seen: BTreeSet<u32> = [b.begin].into_iter().collect();
+    let mut frontier = vec![b.begin];
+    for _ in 0..MIN_STEREOGENIC_RING - 2 {
+        let mut next = Vec::new();
+        for &cur in &frontier {
+            for (other, bi) in mol.neighbors(cur) {
+                if bi == bond {
+                    continue;
+                }
+                if other == b.end {
+                    return true;
+                }
+                if seen.insert(other) {
+                    next.push(other);
+                }
+            }
+        }
+        if next.is_empty() {
+            return false;
+        }
+        frontier = next;
+    }
+    false
+}
+
 /// 直接从**存储的方向键**算一根双键的顺反,不依赖感知结果。
 ///
-/// 返回 `(顺/反, [begin 侧参照, end 侧参照])`;这根键不是双键、或两侧没有
+/// 返回 `(顺/反, [begin 侧参照, end 侧参照])`;这根键不是双键、**落在八元以下
+/// 的环里**(顺反由环定死,见模块内的 `MIN_STEREOGENIC_RING`)、或两侧没有
 /// 成对的方向时返回 `None`。
 ///
 /// # 与 [`perceive_bond_stereo`] 的分工
@@ -106,7 +149,7 @@ pub fn genuine_tetrahedral(mol: &MolBuilder) -> Vec<bool> {
 #[must_use]
 pub fn raw_cis_trans(mol: &MolBuilder, bond: u32) -> Option<(BondStereo, [u32; 2])> {
     let db = *mol.bonds().get(bond as usize)?;
-    if db.order != BondOrder::Double {
+    if db.order != BondOrder::Double || in_small_ring(mol, bond) {
         return None;
     }
     let (ra, da) = raw_outward(mol, db.begin, db.end)?;
@@ -185,6 +228,10 @@ fn would_annotate(
     if db.order != BondOrder::Double || db.flags.contains(BondFlags::AROMATIC) {
         return None;
     }
+    // 小环里的双键没有顺反可言,见 [`MIN_STEREOGENIC_RING`]
+    if in_small_ring(mol, u32::try_from(di).ok()?) {
+        return None;
+    }
     // 已经带着有效标注的不重算,见 `perceive_bond_stereo` 的文档
     if stereo_atoms_are_valid(mol, u32::try_from(di).ok()?) {
         return None;
@@ -227,6 +274,7 @@ fn raw_outward(mol: &MolBuilder, end: u32, other: u32) -> Option<(u32, BondDirec
 /// | `C/1CCCCC1` | 根本没有双键 |
 /// | `F/C=CF` | 只有一侧有方向,说明不了相对位置 |
 /// | `F/C=C(F)F` | 双键一端挂着两个相同的取代基,交换它们是自同构 |
+/// | `C/1=C\CCCC1` | 双键在八元以下的环里,顺反由环定死(`MIN_STEREOGENIC_RING`)|
 ///
 /// 照写不误的代价不只是输出啰嗦:颜色细化看不见键方向,一条噪声方向能打破
 /// 细化分辨不出的对称性,于是规范 SMILES 不再随重排恒定 —— 上表第一行
@@ -243,8 +291,14 @@ pub fn informative_directions(mol: &MolBuilder) -> Vec<bool> {
     }
     let classes = symmetry_classes(mol);
 
-    for db in mol.bonds() {
+    for (di, db) in mol.bonds().iter().enumerate() {
         if db.order != BondOrder::Double || db.flags.contains(BondFlags::AROMATIC) {
+            continue;
+        }
+        // 小环里的双键不是立体源,挂在它两侧的方向是噪声 —— 见
+        // [`MIN_STEREOGENIC_RING`]。少了这一条,规范串会把一条不携带任何
+        // 信息的 `/` 写出去,而外部实现不写。
+        if in_small_ring(mol, u32::try_from(di).unwrap_or(u32::MAX)) {
             continue;
         }
         // 两端都必须能区分自己的取代基,这根双键才是立体源
@@ -942,6 +996,83 @@ mod tests {
         assert!(perceive("F/C=CF").is_empty(), "只有一侧有方向");
         assert!(perceive("F/C=C(F)F").is_empty(), "一端两个取代基相同");
         assert!(perceive("FC=CF").is_empty(), "没有方向键");
+    }
+
+    /// **小环里的双键没有顺反**,阈值是八元 —— 而且三条通路必须同时认这条线:
+    /// 感知([`perceive_bond_stereo`])、写出([`informative_directions`])、
+    /// 匹配([`raw_cis_trans`])。
+    ///
+    /// 三条各自问一遍是必需的:它们是三个入口,先前只在感知那一路加过滤,
+    /// 匹配那一路照旧,于是差分测试上冒出 6 条"只有本实现命中"。
+    ///
+    /// 四元到十元逐个走一遍,阈值挪一格就红。
+    #[test]
+    fn 小环里的双键不给顺反() {
+        // n 元环,环内一根 C=C,两侧的方向都落在环上
+        let ring = |n: usize| format!("C/1=C\\{}1", "C".repeat(n - 2));
+        let double_bond = |m: &MolBuilder| {
+            m.bonds()
+                .iter()
+                .position(|b| b.order == BondOrder::Double)
+                .expect("有双键") as u32
+        };
+        for n in 4..=10 {
+            let smi = ring(n);
+            let m = smiles::parse(&smi).unwrap_or_else(|e| panic!("{smi}: {}", e.render()));
+            assert_eq!(m.num_atoms(), n, "{smi}:环大小没写对,这条用例就测错了东西");
+            // **这里的 8 是写死的字面量,不许换成 MIN_STEREOGENIC_RING。**
+            // 引用被测常量的话,把阈值改成 7 或 9 判据两侧一起动,照样全绿 ——
+            // 那是条自证的断言。八元是化学事实(反式环辛烯是最小的可分离
+            // 反式环烯),写死才拦得住"顺手挪一格"。
+            let stereogenic = n >= 8;
+            assert_eq!(
+                perceive(&smi).len(),
+                usize::from(stereogenic),
+                "{n} 元环 {smi}:感知"
+            );
+            assert_eq!(
+                informative_directions(&m).iter().any(|&x| x),
+                stereogenic,
+                "{n} 元环 {smi}:写出"
+            );
+            assert_eq!(
+                raw_cis_trans(&m, double_bond(&m)).is_some(),
+                stereogenic,
+                "{n} 元环 {smi}:匹配"
+            );
+        }
+
+        // **反过来:挂在小环上的环外双键照给。** 少了这一组,"凡是沾着小环的
+        // 双键一律不给"也能让上面全绿,而那会把一大批真顺反抹掉。
+        let with_raw = |m: &MolBuilder| {
+            (0..m.num_bonds() as u32)
+                .filter(|&b| raw_cis_trans(m, b).is_some())
+                .count()
+        };
+        for smi in [r"F/C=C1\CCCC(F)C1", r"O=C1CCC/C1=C/F"] {
+            let m = smiles::parse(smi).unwrap();
+            assert_eq!(perceive(smi).len(), 1, "{smi}:环外双键,顺反是真的");
+            assert_eq!(with_raw(&m), 1, "{smi}:匹配那一路也要给");
+        }
+
+        // 语料里真实撞上这条规则的那个分子(`large.smi` 第 5707 条,文件第 5731
+        // 行):两个稠合
+        // 五元环,融合处的 C=C 两侧写着 `\` 与 `/`,合起来要求"反式" —— 五元环
+        // 里根本搭不出来。外部实现同样判它没有顺反(实测 RDKit 2025.09.2)。
+        let smi = r"CN1CCC\\2=C1/C(=N\\O)/S/C2=N\\c3ccc(cc3)F";
+        let got = perceive(smi);
+        assert_eq!(got.len(), 2, "{smi}:两根环外 C=N 有顺反,环内那根 C=C 没有");
+        let m = smiles::parse(smi).unwrap();
+        let ring_db = m
+            .bonds()
+            .iter()
+            .position(|b| {
+                b.order == BondOrder::Double
+                    && m.atoms()[b.begin as usize].atomic_num == 6
+                    && m.atoms()[b.end as usize].atomic_num == 6
+            })
+            .expect("有那根 C=C") as u32;
+        assert!(raw_cis_trans(&m, ring_db).is_none(), "五元环里的 C=C");
     }
 
     /// 参照原子的有效性检查。
