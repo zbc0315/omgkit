@@ -43,11 +43,23 @@ python3 harness/gen_elements.py --rdkit ../rdkit \
     --out crates/omgkit-core/src/element_data.rs
 
 # 生成基准。l1/l2 必须保持 --remove-hs 关闭(默认);l3 要打开
-python3 harness/oracle_pipeline.py --in harness/corpus/smoke.smi \
+python3 harness/oracle_pipeline.py --input harness/corpus/smoke.smi \
     --stage l1 --out harness/baseline/smoke.l1.jsonl
-python3 harness/oracle_pipeline.py --in harness/corpus/smoke.smi \
+python3 harness/oracle_pipeline.py --input harness/corpus/smoke.smi \
     --stage l3 --remove-hs --out harness/baseline/smoke.l3.jsonl
+
+# l3 的大语料档(1.5 M,按 .gitignore 的规矩不入库),
+# 给 differential_l3.rs 里那条 #[ignore] 的测试用
+python3 harness/oracle_pipeline.py --input harness/corpus/large.smi \
+    --stage l3 --remove-hs --out harness/baseline/large.l3.jsonl
 ```
+
+`--remove-hs` 在 l3 上是**净化之后**才跑的(`Chem.RemoveHs`),不是解析那一步。
+放在解析那一步会与 `sanitize=False` 撞上:RDKit 会把方括号里的氢数、
+`noImplicit` 标志和手性标记一并抹掉 —— 实测 `[C@@H]1CCCCC1O` 的规范串从
+`OC1[CH]CCCC1` 变成 `OC1CCCCC1`,**2-羟基环己基自由基变成了环己醇**,
+三条刻意造的手性用例全中招。这与本文件开头那句"omgkit 把 `removeHs` 划为
+独立操作,不属于 L2"是同一件事:去氢是净化之后的一步。
 
 ### SMARTS 基准
 
@@ -434,7 +446,48 @@ cargo run --release --example bench_kekulize -- <语料> permol   # 单看 kekul
 - **净化幂等**:`sanitize(sanitize(x)) ≡ sanitize(x)`
 
 `--stage l3` 的基准里带 `can_renumbered` 字段(把原子顺序反转后重新输出),
-可直接检查第一条。
+可直接检查第一条。顺带一提,语料里**有一条 RDKit 自己都不满足这条性质**:
+`[Co@OH5]1(N)(O)(S)(P)CCC1` 重编号前后是 `[Co@OH2]` 与 `[Co@OH30]`。
+
+### 但自测性质有一个共同的盲区:第二种写法出自自己
+
+上面三条的"另一种写法"全部来自我方 —— 重排是自己排的,往返是自己写的。
+**自家写出器漏掉的东西,读回来一样漏,两边共谋着"收敛"。**
+`crates/omgkit-io/tests/canonical_invariance.rs` 里还有一条
+`different_spellings_converge_to_one_canonical_form`,写法是手挑的五组,
+只走得到写的人想得到的形态。
+
+`crates/omgkit-io/tests/differential_l3.rs` 补的是这一档:第二种写法取自
+**RDKit 写出的规范串**,判据是
+
+```text
+canonical(解析(语料里的写法))  ==  canonical(解析(RDKit 的规范串))
+```
+
+外加三列直接比:能不能读、去氢后的原子数、键数。冒烟语料 149 条、大语料 8839 条
+各跑一遍(后者 1.5 M 不入库,标 `#[ignore]`)。
+
+**这份基准入库以来一直没有读取方**,截成一行全套测试照样绿。接上读取方的第一次
+运行就抓出 8 条不收敛:
+
+| 条数 | 哪一侧 | 是什么 |
+|---|---|---|
+| 5 | **我方** | 配位键旁边的原子无条件留方括号。`N->[Cu]` 与 `[NH3]->[Cu]` 是同一个分子(氮都是 3 个氢),净化把前者的氢放进 `num_implicit_hs`、后者放进 `num_explicit_hs`,于是只有后者走到"能不能去框"那个判断,而那里有一条"碰到配位键直接留框"的兜底 —— 同一个分子两串。已修:氢数交给 `implicit_hs_for_bare_form` 那条唯一的规则算,它本来就把配位键的价贡献算对了(给体 0、受体 1) |
+| 2 | 参照 | RDKit 的写出器不写自由基碳上的手性,于是 `chiral-ring-open-cw` 与 `-ccw` 两条语料塌成同一串 |
+| 1 | 参照 | **RDKit 自己的规范串不是自己的不动点**:`OI(=O)O` → `O=[IH](O)O` → 再读回去触发净化第 1 步的卤素修正 → `[O-][IH+](O)O`。我方逐字节复现了这个行为,两次都与 2025.09.2 一致 |
+
+后 3 条钉在 `NOT_CONVERGENT` 里,**双向**:多一条红,少一条也红。
+
+另有一列单独比:**规范串里有没有立体标记**。收敛判据对"两边一起把立体标记丢
+干净"是瞎的 —— 语料里六条非四面体的用例正是如此,我方两次都写不出,两串相同,
+收敛判据全绿。其中 `[Pt@SP1](Cl)(Cl)(N)N` 与 `[Pt@SP3](Cl)(Cl)(N)N` 是**两个不同
+的分子**(顺铂与反铂),我方的规范串都是 `N[Pt](N)(Cl)Cl` —— 写不出
+`@SP`/`@TB`/`@OH` 的代价不是"少个记号",是两个分子塌成一串。这八条(六条我方
+写不出 + 两条参照写不出)钉在 `STEREO_MISMATCH`,同样双向。
+
+大语料上**一条例外都没有**:8831 个读得进来的分子,五列全零分歧,
+带立体标记的分子 311/311。冒烟那 11 条例外全是刻意造的边角,真实语料里
+一条都没出现。
 
 另有两类**差分测试原理上抓不到**的性质,各有专门的测试:
 
@@ -696,7 +749,7 @@ python3 harness/check_write_fidelity.py /tmp/canon.tsv harness/corpus/large.smi
 | `check_write_fidelity.py` | 是 | 只跑 `large.smi`;非四面体立体那一档由下一行钉着 |
 | `check_smarts_write.py` | 是 | 自带区分力闸 `--min-hits` |
 | `check_write.py` | 是(三次) | 大语料两个方向 + **冒烟语料**。冒烟那次是新加的:大语料里一条非四面体立体都没有,`@SP`/`@TB`/`@OH` 写不出来这件事先前一条判据都没守 |
-| `check_baseline_schema.py` | 是 | 基准与生成它的脚本脱没脱钩 |
+| `check_baseline_schema.py` | 是 | 基准与生成它的脚本脱没脱钩。三份只比结构,`smoke.l3.jsonl` **逐字节**比(l3 只吐字符串,同版本跨平台一致 —— macOS-arm64 与 Linux-x86_64 实测 sha256 相同) |
 | `check_wedge_readback.py` / `verify_stereo.py` | 是 | — |
 | `check_reactions.py` | 是 | 22 条刻意分歧按(反应, 底物)逐条钉死;接进来的过程中揪出 3 条真缺陷,见 §与外部实现的一处刻意分歧 |
 | `check_canonical_fixpoint.py` / `check_smarts_chirality.py` / `check_product_chirality.py` / `test_python.py` | 是 | 要 `omgkit` wheel:CI 先 `maturin build` 再 `pip install`(maturin 版本也钉在 lock 里)。判据自己打印 `omgkit.__file__` |

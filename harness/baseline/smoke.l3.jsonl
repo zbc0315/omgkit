@@ -83,10 +83,10 @@
 {"i":82,"smi":"OCl(=O)(=O)=O","name":"perchloric-acid","ok":true,"na":5,"nb":4,"can":"[O-][Cl+3]([O-])([O-])O","can_renumbered":"[O-][Cl+3]([O-])([O-])O"}
 {"i":83,"smi":"OBr(=O)(=O)=O","name":"perbromic-acid","ok":true,"na":5,"nb":4,"can":"[O-][Br+3]([O-])([O-])O","can_renumbered":"[O-][Br+3]([O-])([O-])O"}
 {"i":84,"smi":"OI(=O)O","name":"iodous-acid","ok":true,"na":4,"nb":3,"can":"O=[IH](O)O","can_renumbered":"O=[IH](O)O"}
-{"i":85,"smi":"OF(=O)(=O)=O","name":"fluorine-not-cleaned","ok":false,"err":"MolFromSmiles returned None"}
-{"i":86,"smi":"CCl(=O)=O","name":"halogen-with-carbon-neighbor","ok":false,"err":"MolFromSmiles returned None"}
+{"i":85,"smi":"OF(=O)(=O)=O","name":"fluorine-not-cleaned","ok":false,"err":"净化步骤失败: SANITIZE_PROPERTIES"}
+{"i":86,"smi":"CCl(=O)=O","name":"halogen-with-carbon-neighbor","ok":false,"err":"净化步骤失败: SANITIZE_PROPERTIES"}
 {"i":87,"smi":"O=[n+]1occcc1","name":"charged-aromatic-nitrogen-untouched","ok":true,"na":7,"nb":7,"can":"O=[n+]1cccco1","can_renumbered":"O=[n+]1cccco1"}
-{"i":88,"smi":"c1cncc1","name":"invalid-pyrrole-no-H","ok":false,"err":"MolFromSmiles returned None"}
+{"i":88,"smi":"c1cncc1","name":"invalid-pyrrole-no-H","ok":false,"err":"净化步骤失败: SANITIZE_KEKULIZE"}
 {"i":89,"smi":"c1ccoc1","name":"furan-no-H-needed","ok":true,"na":5,"nb":5,"can":"c1ccoc1","can_renumbered":"c1ccoc1"}
 {"i":90,"smi":"c1ccsc1","name":"thiophene-no-H-needed","ok":true,"na":5,"nb":5,"can":"c1ccsc1","can_renumbered":"c1ccsc1"}
 {"i":91,"smi":"c1cc[cH-]c1","name":"cyclopentadienyl-anion","ok":true,"na":5,"nb":5,"can":"c1cc[cH-]c1","can_renumbered":"c1cc[cH-]c1"}
@@ -134,7 +134,7 @@
 {"i":133,"smi":"[Cu]<-N","ok":true,"na":2,"nb":1,"can":"[NH3]->[Cu]","can_renumbered":"[NH3]->[Cu]"}
 {"i":134,"smi":"[Cu]1<-NCCN->1","ok":true,"na":5,"nb":5,"can":"C1C[NH2]->[Cu]<-[NH2]1","can_renumbered":"C1C[NH2]->[Cu]<-[NH2]1"}
 {"i":135,"smi":"N->1CCCCC1","ok":true,"na":6,"nb":6,"can":"C1CCN->CC1","can_renumbered":"C1CCN->CC1"}
-{"i":136,"smi":"[NH3]->[B](F)(F)F","ok":false,"err":"MolFromSmiles returned None"}
+{"i":136,"smi":"[NH3]->[B](F)(F)F","ok":false,"err":"净化步骤失败: SANITIZE_PROPERTIES"}
 {"i":137,"smi":"O->[Fe](<-O)(<-O)<-O","ok":true,"na":5,"nb":4,"can":"[OH2]->[Fe](<-[OH2])(<-[OH2])<-[OH2]","can_renumbered":"[OH2]->[Fe](<-[OH2])(<-[OH2])<-[OH2]"}
 {"i":138,"smi":"[Cu]<-1CCCC1","ok":true,"na":5,"nb":5,"can":"C1C[CH3]->[Cu][CH2]1","can_renumbered":"C1C[CH3]->[Cu][CH2]1"}
 {"i":139,"smi":"N/1CCCCC<-1","ok":true,"na":6,"nb":6,"can":"C1CCN->CC1","can_renumbered":"C1CCN->CC1"}

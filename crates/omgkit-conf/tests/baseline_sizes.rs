@@ -34,7 +34,9 @@ use std::path::PathBuf;
 
 /// 每个入库基准该有多少行。**改这里之前先读模块文档。**
 ///
-/// 这里只列 **omgkit-conf 的五条判官真的会读**的那四份。其余 13 份实测过:
+/// 这里列的是 **omgkit-conf 的五条判官真的会读**的那四份,外加 `smoke.l3.jsonl`
+/// (它的读取方在 `omgkit-io/tests/differential_l3.rs`,不在本 crate ——
+/// 数只该有一份,所以仍旧钉在这里)。其余 12 份实测过:
 /// `smoke.l1` / `smoke.l2*` / `smoke.matches.tsv` / `smarts.jsonl` 截短之后
 /// `cargo test --release` 都会红(它们的读取方逐行比对,少一行就少一批断言,
 /// 而且有特征覆盖闸),所以不用在这里重复钉。
@@ -42,15 +44,22 @@ use std::path::PathBuf;
 /// `matches.tsv` 更进一步:它首行写着自己覆盖了多少个分子,`matches_large`
 /// 断言那个数等于语料条数 —— 截短与"重导时加了 `--limit-mols`"都当场红。
 ///
-/// **唯一的例外是 `smoke.l3.jsonl`**:149 行,截成 1 行全套测试照样绿 ——
-/// 全仓库只有 `harness/README.md` 的生成命令提到它,**没有任何读取方**。
-/// 那是一份死基准,不是截短风险;要么给它补个读取方,要么删掉。见任务清单。
+/// `smoke.l3.jsonl` 一度是**唯一的例外**:149 行,截成 1 行全套测试照样绿 ——
+/// 全仓库只有 `harness/README.md` 的生成命令提到它,没有任何读取方。那不是截短
+/// 风险,是一份死基准。现在它有读取方了(`omgkit-io/tests/differential_l3.rs`,
+/// 拿 RDKit 的规范串当"同一个分子的另一种写法",接上的第一次运行就抓出 5 条
+/// 我方缺陷),所以行数也进了下面这张表。
+///
+/// 那条判据里钉死的 11 条例外顺带也是一道截短闸:截掉任何一条,"钉住的例外
+/// 不见了"当场红。但那只覆盖那 11 行,行数仍旧要在这里钉。
 const EXPECTED: &[(&str, usize)] = &[
     // omgkit-conf 的五条判官(CI 第 6–8、11–14 步)
     ("smoke.bounds.jsonl", 27),
     ("smoke.gram_eigs.jsonl", 27),
     ("smoke.chirality.jsonl", 150),
     ("smoke.lonepair.jsonl", 15),
+    // 读取方在 omgkit-io:tests/differential_l3.rs
+    ("smoke.l3.jsonl", 149),
 ];
 
 fn baseline(name: &str) -> PathBuf {

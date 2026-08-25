@@ -360,6 +360,14 @@ fn canonical_is_independent_of_bracket_notation() {
         &["c1cc[nH]c1", "[cH]1[cH][cH][nH][cH]1"][..],
         // 吡啶氮无氢,框可去
         &["c1ccncc1", "[cH]1[cH][cH][n][cH][cH]1"][..],
+        // 配位键的给体端:写不写框都是同一个分子(氮都是 3 个氢)。
+        // 写出器先前碰到配位键无条件留框,于是这一组给出两串 ——
+        // 是 `differential_l3.rs` 拿 RDKit 的规范串比出来的。
+        &["N->[Cu]", "[NH3]->[Cu]", "[Cu]<-N"][..],
+        &[
+            "O->[Fe](<-O)(<-O)<-O",
+            "[OH2]->[Fe](<-[OH2])(<-[OH2])<-[OH2]",
+        ][..],
     ] {
         let mut canonical: Option<String> = None;
         for smi in group {

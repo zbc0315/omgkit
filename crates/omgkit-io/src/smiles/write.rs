@@ -738,8 +738,24 @@ fn hard_bracket(mol: &MolBuilder, idx: u32) -> bool {
 /// # 其余的保守取舍
 ///
 /// 一个中性碳(`[C]`)氢数是 0,可去掉方括号写成 `C` 再读回来就补上了
-/// 四个氢 —— 所以"没氢"绝不等于"能去框"。配位键的给体端不计价,这一带的价
-/// 本就不好谈,碰到配位键直接留框。
+/// 四个氢 —— 所以"没氢"绝不等于"能去框"。
+///
+/// # 配位键先前是无条件留框的,那让同一个分子有了两串
+///
+/// 先前这里有一条"邻居里有配位键就直接返回 false",理由写的是"配位键的给体端
+/// 不计价,这一带的价本就不好谈"。它的后果是:`N->[Cu]` 与 `[NH3]->[Cu]` 是同一个
+/// 分子(氮都是 3 个氢),而净化把前者的氢放在 `num_implicit_hs`、后者放在
+/// `num_explicit_hs`,于是**只有后者走到这个函数**,被无条件留框 ——
+/// 一个写成 `N->[Cu]`,一个写成 `[NH3]->[Cu]`。方括号是书写习惯,不是分子的性质,
+/// 规范串不能跟着它变(`tests/canonical_invariance.rs` 有一条判据专门守这个)。
+///
+/// 那条兜底现在没有了:氢数由 [`omgkit_core::valence::implicit_hs_for_bare_form`]
+/// 算,而那条规则本来就把配位键的价贡献算对了(给体 0、受体 1,见
+/// `BondData::valence_contribution_to`),与下面那个 `bonds` 求和同一个约定。
+/// 读者按同一条规则反推,裸写形式补出来的氢数一样。
+///
+/// 抓住它的是 `tests/differential_l3.rs`(拿 RDKit 的规范串当"另一种写法"):
+/// 冒烟语料 149 条里 5 条因此不收敛,全是配位键那一带。
 ///
 /// # 前置条件:调用方已经挡掉了带电 / 自由基 / 同位素的原子
 ///
@@ -762,12 +778,6 @@ fn hs_survive_without_brackets(mol: &MolBuilder, idx: u32) -> bool {
         return false;
     };
     if !e.has_valence_constraint() {
-        return false;
-    }
-    if mol
-        .neighbors(idx)
-        .any(|(_, bi)| mol.bonds()[bi as usize].order == BondOrder::Dative)
-    {
         return false;
     }
     let bonds: f32 = mol

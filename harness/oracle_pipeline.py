@@ -240,7 +240,27 @@ def record(
     remove_hs: bool,
     ops: int | None = None,
 ) -> dict:
-    """`ops` 非 None 时:先不净化地解析,再只跑指定的净化步骤位掩码。"""
+    """`ops` 非 None 时:先不净化地解析,再只跑指定的净化步骤位掩码。
+
+    # 为什么 `removeHs` 不能留在解析这一步
+
+    `MolFromSmiles(params)` 里 `params.sanitize=False` 且 `params.removeHs=True`
+    时,RDKit 会把**方括号里的氢数、`noImplicit` 标志和手性标记一起抹掉**。
+    实测(RDKit 2025.09.2,`[C@@H]1CCCCC1O`):
+
+    | 解析参数 | 原子 0 的手性标记 | 显式氢 | `noImplicit` | 规范串 |
+    |---|---|---|---|---|
+    | `removeHs=False` | `CHI_TETRAHEDRAL_CCW` | 1 | True | `OC1[CH]CCCC1` |
+    | `removeHs=True` | `CHI_UNSPECIFIED` | **0** | **False** | `OC1CCCCC1` |
+
+    第二行不是"少了几个氢原子",是**另一个分子**:2-羟基环己基自由基
+    变成了环己醇。语料里三条(`chiral-ring-open-cw` / `-ccw` /
+    `chiral-cyclopentane`)都中招,而它们正是拿来区分对映体的用例。
+
+    改成净化之后再 `Chem.RemoveHs` 就没有这个问题(上表第一行的结果),
+    而且与 omgkit 那侧的调用顺序一致 —— 本文件开头就写着"omgkit 把
+    `removeHs` 划为独立操作,不属于 L2"。
+    """
     rec: dict = {"i": idx, "smi": smiles}
     if name:
         rec["name"] = name
@@ -255,8 +275,9 @@ def record(
     # 之前只有"不指定 --sanitize-ops"时走 sanitize=True,于是"全 12 步"这份基准
     # 与逐步骤的基准量的**不是同一件事**,而这个差别只在带手性的分子上显形。
     params.sanitize = False
-    # 显式指定,不吃默认值 —— 默认是 True,会把净化与 removeHs 混在一起
-    params.removeHs = remove_hs
+    # 显式关掉,不吃默认值(默认是 True)。**`removeHs` 挪到净化之后**,
+    # 见下方那处调用与函数文档"为什么 removeHs 不能留在解析这一步"。
+    params.removeHs = False
     try:
         mol = Chem.MolFromSmiles(smiles, params)
     except Exception as e:  # RDKit 偶尔抛而非返回 None
@@ -281,6 +302,12 @@ def record(
             rec["ok"] = False
             rec["err"] = f"净化步骤失败: {failed!s}"
             return rec
+
+    # 去氢排在净化**之后** —— 留在解析那一步会改分子,见函数文档。
+    if remove_hs:
+        # `sanitize=False`:这里不能再净化一遍,否则 `--sanitize-ops` 那条
+        # "只跑指定步骤"的约定会被悄悄破坏。
+        mol = Chem.RemoveHs(mol, sanitize=False)
 
     rec["ok"] = True
     rec["na"] = mol.GetNumAtoms()
@@ -333,6 +360,9 @@ def main() -> None:
         f"可选:{','.join(SANITIZE_OPS)}",
     )
     args = ap.parse_args()
+
+    if args.remove_hs and args.stage == "l1":
+        sys.exit("--remove-hs 对 l1 无意义:去氢要在净化之后跑,而 l1 不净化")
 
     ops = None
     if args.sanitize_ops is not None:
