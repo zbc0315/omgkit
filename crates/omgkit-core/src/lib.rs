@@ -48,6 +48,7 @@ pub mod builder;
 pub mod element;
 pub mod error;
 pub mod types;
+pub mod valence;
 pub mod view;
 
 mod element_data;

@@ -43,9 +43,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use omgkit_core::{
-    element, AtomFlags, BondData, BondDirection, BondFlags, BondOrder, ChiralTag, MolBuilder,
-};
+use omgkit_core::{element, AtomFlags, BondData, BondDirection, BondOrder, ChiralTag, MolBuilder};
 
 /// 写出的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -682,12 +680,25 @@ fn hard_bracket(mol: &MolBuilder, idx: u32) -> bool {
 
 /// 去掉方括号之后,再读回来氢数还是不是原来那个。
 ///
-/// # 判据必须与**解析侧**同口径
+/// # 判据必须与**解析侧**同口径 —— 现在是**同一份代码**
 ///
-/// 简写形式的氢数由价反推,而反推的规则是"取**第一个不小于已用价的**允许价,
-/// 差额就是补出来的氢"——见 [`omgkit_core::element::Element::default_valence_for`] 与
-/// `omgkit_chem::valence::implicit_hs_of`。所以这里问的是一个很具体的问题:
-/// **按那条规则,裸写形式会补出几个氢?** 与本原子实际的氢数相等才能去框。
+/// 简写形式的氢数由价反推,而反推的规则住在
+/// [`omgkit_core::valence::implicit_hs_for_bare_form`]。所以这里问的是一个很具体
+/// 的问题:**按那条规则,裸写形式会补出几个氢?** 与本原子实际的氢数相等才能去框。
+///
+/// 先前这里自己写了一份近似(芳香分支只看首位默认价、非芳香分支用
+/// `default_valence_for`),注释里明写着"一处已知的不同步:
+/// `explicit_valence_of` 还有一步芳香价回落,这边没有 …… 两处规则分处两个
+/// crate 各写一遍、靠人同步"。现在两处走同一份代码,不同步这件事从结构上没有了。
+///
+/// 实测两条规则在全语料上**确有分歧**:`large.smi` 的 133 537 个(中性、无同位素、
+/// 无自由基的)原子里有 5 746 处不同,全是"旧的说算不准、新的说补 0 个氢",
+/// 典型是并环芳香碳(三根芳香键,键级和 4.5;旧规则拿首位默认价 4 一比就放弃,
+/// 新规则先做芳香价回落到 4、再算出 0 个氢 —— 而那正是对的)。
+///
+/// 但**写出的结果一行没变**(大语料两个方向 + 冒烟语料,逐行相同):
+/// 那些原子本来就走不到这个函数。也就是说这次是把一个**没在发生**的分岔
+/// 从结构上堵掉,不是修一个正在漏的洞。
 ///
 /// 先前这里只看**首位**默认价(`bonds >= valences[0]` / `bonds + hs == valences[0]`),
 /// 而多价元素的首位默认价根本不是读者会选的那个:
@@ -771,47 +782,25 @@ fn hs_survive_without_brackets(mol: &MolBuilder, idx: u32) -> bool {
     };
     let total_hs = i32::from(a.num_explicit_hs) + i32::from(a.num_implicit_hs);
 
-    // **芳香原子只在一档上更保守。** 键级和不超过首位默认价时,
-    // `default_valence_for` 选的本来就是首位默认价,两条规则同值;差别只在
-    // 键级和**超过**首位默认价那一档 —— 那时 `implicit_hs_of` 的芳香分支
-    // 认为原子已处在某个允许价态、一个氢都不补,而非芳香那条会往上找下一个
-    // 允许价。所以这里直接不去框。
-    //
-    // 这一档是承重的,不是装饰:`c1cc[sH]c1` 的 S 两根芳香键 = 键级和 3,
-    // 非芳香规则会算"补到 4 价 = 1 个氢,与实际相符 → 可以去框",写出 `c1cccs1`,
-    // 而读者按芳香分支读回来是 **0 个氢** —— 氢丢了。变异实测:把这三行删掉,
-    // 全语料写出一行都不变、全部测试与两条外部判据照样全绿,只有
-    // `c1cc[sH]c1` 变成 `c1cccs1`。所以它由
-    // `canonical_write_survives_resanitize` 里那条用例单独钉住。
-    //
-    // **一处已知的不同步**:`omgkit_chem::valence::explicit_valence_of` 还有一步
-    // "芳香价回落"(差在 1.5 以内就取该价态),这边没有。方向是安全的
-    // (我们更保守 → 多留框,不会改分子),但两处规则分处两个 crate 各写一遍、
-    // 靠人同步 —— 那个结构问题另有任务跟着。
-    if is_aromatic(mol, idx) {
-        let v0 = i32::from(e.valences[0]);
-        return bonds <= v0 && v0 - bonds == total_hs;
+    // 超价一律留框 —— 读者补几个氢取决于它那份价表有多长,见函数文档。
+    // 这问的是"算不算得准",不是"补几个氢",所以留在这一侧。
+    if e.default_valence_for(used).is_none() {
+        return false;
     }
-    let Some(v) = e.default_valence_for(used) else {
-        return false; // 超价 → 留框,见函数文档
-    };
-    i32::from(v) - bonds == total_hs
-}
 
-/// 这个原子会被读者当成芳香的吗。
-///
-/// 与 `omgkit_chem::valence::is_aromatic_atom` 同口径:原子自己标了芳香,
-/// **或者**它连着任何一根芳香键。两处口径不同的话,写出侧算的隐式氢就不是
-/// 净化侧会算出来的那个。
-fn is_aromatic(mol: &MolBuilder, idx: u32) -> bool {
-    if mol.atoms()[idx as usize]
-        .flags
-        .contains(AtomFlags::AROMATIC)
-    {
-        return true;
-    }
-    mol.neighbors(idx).any(|(_, bi)| {
-        let b = mol.bonds()[bi as usize];
-        b.flags.contains(BondFlags::AROMATIC) || b.order == BondOrder::Aromatic
-    })
+    // **氢数由那条唯一的规则算**,不在这里另写一份。
+    //
+    // 先前这里是自己写的一份近似:芳香分支只看首位默认价、非芳香分支用
+    // `default_valence_for`。注释里还明写着"一处已知的不同步:
+    // `explicit_valence_of` 还有一步芳香价回落(差在 1.5 以内就取该价态),
+    // 这边没有 …… 两处规则分处两个 crate 各写一遍、靠人同步"。
+    //
+    // 现在两处走同一份代码([`omgkit_core::valence`]),不同步这件事从结构上
+    // 没有了。那条芳香保守分支也一并没了 —— 它守的
+    // `c1cc[sH]c1`(S 两根芳香键、1 个氢)现在由规则本身给出正确答案:
+    // 裸写形式补 0 个氢 ≠ 实际的 1 个,照样留框。
+    let Some(bare) = omgkit_core::valence::implicit_hs_for_bare_form(mol, idx) else {
+        return false; // 电荷/同位素/自由基裸写表达不出来 —— 本来就该留框
+    };
+    i32::from(bare) == total_hs
 }
