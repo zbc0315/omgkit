@@ -1506,6 +1506,8 @@ fn rebase_bond_stereo(mol: &MolBuilder, kept: &BTreeMap<u32, u32>, out: &mut Mol
         }
 
         let mut refs = [BondData::NO_STEREO_ATOM; 2];
+        // 换到"另一侧那个取代基"上的次数。奇数次就要把顺反翻过来。
+        let mut flips = 0usize;
         for (i, (end, other, p_end, p_other)) in
             [(src.begin, src.end, pb, pe), (src.end, src.begin, pe, pb)]
                 .into_iter()
@@ -1539,7 +1541,32 @@ fn rebase_bond_stereo(mol: &MolBuilder, kept: &BTreeMap<u32, u32>, out: &mut Mol
                 .map(|o| kept.get(o).copied().filter(|p| p_subs.contains(p)))
                 .collect();
             let Some(filled) = fill_replaced_slots(&slots, &p_subs) else {
-                break;
+                // **没人顶这个槽位** —— 走掉的位置由隐式氢补上,而隐式氢没有
+                // 下标,做不了参照原子。这时候要**改参照到该端另一个取代基,
+                // 并把顺反翻一次**:它在双键的另一侧。
+                //
+                // 先前这里直接放弃,整根双键的顺反跟着作废。实测大语料上
+                // 硝基烯烃 `[N+](/C(=C/Ar)C)([O-])=O` 被 `[C:1][N:2]>>[C:1].[N:2]`
+                // 打掉硝基之后,交付的是 `CC=Cc1ccccc1` —— **E/Z 整个没了**,
+                // 而双键还在、两端各自还有取代基,构型依旧成立。
+                //
+                // 谁对不是推的:把底物嵌成真实三维构象、把离去的氮**原地**换成
+                // 氢再读回构型,三个分子五个 seed 都给出 `C/C=C\Ar` 这一类
+                // (判据先自校准过:同一条路读底物本身,五个 seed 都还原输入)。
+                let Some(&alt) = subs.iter().find(|&&o| o != want) else {
+                    // 该端只有走掉的那一个取代基 —— 换成两个隐式氢,
+                    // 这根双键**真的**没有构型可言了,作废是对的
+                    break;
+                };
+                let Some(&p_alt) = kept.get(&alt) else {
+                    break;
+                };
+                if !p_subs.contains(&p_alt) {
+                    break;
+                }
+                refs[i] = p_alt;
+                flips += 1;
+                continue;
             };
             refs[i] = filled[pos];
         }
@@ -1548,8 +1575,23 @@ fn rebase_bond_stereo(mol: &MolBuilder, kept: &BTreeMap<u32, u32>, out: &mut Mol
             if refs[0] == BondData::NO_STEREO_ATOM || refs[1] == BondData::NO_STEREO_ATOM {
                 // 挑不出参照就作废 —— 留一个指向别人的下标比没有更糟
                 b.set_stereo(BondStereo::None);
-            } else {
+            } else if flips % 2 == 0 {
                 b.set_stereo_atoms(refs);
+            } else {
+                match src.stereo {
+                    BondStereo::Cis => {
+                        b.set_stereo(BondStereo::Trans);
+                        b.set_stereo_atoms(refs);
+                    }
+                    BondStereo::Trans => {
+                        b.set_stereo(BondStereo::Cis);
+                        b.set_stereo_atoms(refs);
+                    }
+                    // Z/E 是按 **CIP 优先级**定的,与记录的参照原子无关 ——
+                    // 换参照不该翻它;而取代基换掉之后 CIP 排序本身也可能变,
+                    // 那要重新定优先级,不是翻个号能解决的。不猜,作废。
+                    _ => b.set_stereo(BondStereo::None),
+                }
             }
         }
     }

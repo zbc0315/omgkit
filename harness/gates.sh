@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 # 漏一处就是个不会报错的假数。CI 的头注释里记过同一个坑(那里原先写着
 # "四道闸门",而步骤早已加到八步)。这里由 `step` 计数,末尾自查:
 # 改了步骤忘了改 `TOTAL`,脚本最后一行会红。
-TOTAL=24
+TOTAL=25
 N=0
 step() {
     N=$((N + 1))
@@ -198,6 +198,20 @@ cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/lar
 step "判官:SMILES 写出(规范,严格)"
 cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/large.smi --canonical >"$WORK/canon.tsv"
 "$PY" harness/check_write.py "$WORK/canon.tsv" harness/corpus/large.smi --strict
+
+# **产物生成。** 这条判官零容差,而它有 22 条**刻意分歧**(产物模板描述的是
+# 反应中心的片段,不是"一个片段一个分子";环状底物 + 断环模板给出一个开环产物,
+# 外部实现逐产物各搬一次,原子凭空变多)—— 于是它一直进不了 CI,谁想起来谁跑
+# 一次。现在按(反应模板, 底物)**逐条钉死**,名单两个方向都红,才接得进来。
+#
+# 没接进来的这段时间里,文档写的 717 / 24 悄悄变成了 716 / 25,而多出来的那条
+# 根本不是"刻意分歧":双键顺反的参照原子被反应删掉、又没人顶它的槽位时,
+# 整根键的顺反被作废了。已修(见 reaction.rs 的
+# `bond_stereo_rebases_to_the_other_side_when_nothing_fills_the_slot`),
+# 现在是 719 / 22。
+step "判官:产物生成(刻意分歧逐条钉死)"
+cargo run -q -p omgkit-match --release --example dump_reactions -- harness/corpus/reactions.txt harness/corpus/large.smi 300 >"$WORK/rx.tsv"
+"$PY" harness/check_reactions.py "$WORK/rx.tsv" --rxns harness/corpus/reactions.txt --mols harness/corpus/large.smi
 
 # **冒烟语料也要跑写出。** CI 先前只拿 `large.smi` 跑这条判官,而那份语料里
 # 一条非四面体立体(`@SP` / `@TB` / `@OH`)都没有 —— 于是"读得回来、写不出去"
