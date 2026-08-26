@@ -476,5 +476,92 @@ class MolblockReading(unittest.TestCase):
             omgkit.parse_molblock("这不是一个 molblock")
 
 
+# 两条记录:第一条带一个字段,第二条带三个 —— 其中一个多行、一对同名。
+TWO_RECORD_SDF = """甲醇
+     RDKit          2D
+
+  2  1  0  0  0  0  0  0  0  0999 V2000
+   -0.7500    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    0.7500    0.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0
+  1  2  1  0
+M  END
+> <ID>
+1
+
+$$$$
+乙烷
+     RDKit          2D
+
+  2  1  0  0  0  0  0  0  0  0999 V2000
+   -0.7500    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    0.7500    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+  1  2  1  0
+M  END
+> <ID>
+2
+
+> <备注>
+第一行
+> 这一行以大于号开头,不是字段头
+
+> <ID>
+又一个
+
+$$$$
+"""
+
+
+class SdfReading(unittest.TestCase):
+    """`read_sdf`:一次读一批。"""
+
+    def test_every_record_comes_back_in_order(self):
+        recs = omgkit.read_sdf(TWO_RECORD_SDF)
+        self.assertEqual(len(recs), 2)
+        self.assertEqual([r.block.title for r in recs], ["甲醇", "乙烷"])
+        self.assertEqual(recs[0].block.mol.to_canonical_smiles(), "CO")
+        self.assertEqual(recs[1].block.mol.to_canonical_smiles(), "CC")
+
+    def test_data_fields_keep_order_duplicates_and_line_breaks(self):
+        """同名字段一条都不能丢,多行值不能被截断。
+
+        字段头以 `>` 开头,而**值里也可能有以 `>` 开头的行** —— 按"见 `>` 就
+        开新字段"去切的话,值会被拦腰截断。
+        """
+        rec = omgkit.read_sdf(TWO_RECORD_SDF)[1]
+        self.assertEqual(
+            rec.data,
+            [
+                ("ID", "2"),
+                ("备注", "第一行\n> 这一行以大于号开头,不是字段头"),
+                ("ID", "又一个"),
+            ],
+        )
+
+    def test_a_bad_record_stays_in_its_own_place(self):
+        """读不了的那条既不抛异常,也不消失 —— 它留在自己的位置上。
+
+        抛异常会把后面几千条一起丢掉;静默跳过会让条数变小,而调用方数出来的
+        与文件里的不符,没有任何地方报错。
+        """
+        broken = TWO_RECORD_SDF.replace(
+            "  2  1  0  0  0  0  0  0  0  0999 V2000\n   -0.7500    0.0000    0.0000 C"
+            "   0  0  0  0  0  0  0  0  0  0  0  0\n    0.7500    0.0000    0.0000 O",
+            "  0  0  0  0  0  0  0  0  0  0999 V3000\n   -0.7500    0.0000    0.0000 C"
+            "   0  0  0  0  0  0  0  0  0  0  0  0\n    0.7500    0.0000    0.0000 O",
+        )
+        self.assertNotEqual(broken, TWO_RECORD_SDF, "第一条没改到")
+        recs = omgkit.read_sdf(broken)
+        self.assertEqual(len(recs), 2, "条数不能变")
+        self.assertIsNotNone(recs[0].error)
+        self.assertIn("V3000", recs[0].error)
+        self.assertIsNone(recs[0].block, "读不了时没有分子")
+        self.assertIsNone(recs[1].error, "后面那条照读")
+        self.assertEqual(recs[1].block.mol.to_canonical_smiles(), "CC")
+
+    def test_coordinates_line_up_with_the_atom_table(self):
+        for rec in omgkit.read_sdf(TWO_RECORD_SDF):
+            self.assertEqual(len(rec.block.coords), rec.block.mol.num_atoms)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

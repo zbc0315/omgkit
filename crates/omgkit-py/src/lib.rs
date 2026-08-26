@@ -290,6 +290,7 @@ impl PyConformer {
 /// **不在** `Mol` 里:molblock 的立体化学一半靠坐标表达,把坐标丢掉等于把这一半
 /// 丢掉,而丢的时候一声不响。
 #[pyclass(name = "Molblock", module = "omgkit")]
+#[derive(Clone)]
 pub struct PyMolblock {
     mol: PyMol,
     coords: Vec<[f64; 3]>,
@@ -365,12 +366,13 @@ impl PyMolblock {
 /// 三维的立体在坐标本身里,是另一条路,还没做。`is_3d` 为真时交回来的分子
 /// **没有任何立体标记** —— 不是"这个分子没有立体",是"这一档还没实现"。
 /// 二维那条路(楔形定手性、坐标定顺反)是通的。
-#[pyfunction]
-fn parse_molblock(text: &str) -> PyResult<PyMolblock> {
-    let got =
-        omgkit_io::molblock::read_v2000(text).map_err(|e| PyValueError::new_err(e.to_string()))?;
+/// 读出来之后的那两步:净化,然后回来打立体标记。**只有这一处**。
+///
+/// 单条(`parse_molblock`)与整份 SDF(`read_sdf`)都走它。两处各写一遍的话,
+/// 迟早一边打了立体、另一边没打,而那种差别不报错。
+fn finish(got: omgkit_io::molblock::Molblock) -> Result<PyMolblock, String> {
     let mut mol = got.mol;
-    omgkit_chem::sanitize(&mut mol).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    omgkit_chem::sanitize(&mut mol).map_err(|e| e.to_string())?;
     // 净化**之后**才打得上:手性要知道中心有几个隐式氢,顺反要用对称等价类。
     // 两个函数自己认出三维就整个不做,绑定这一层不加判断 —— 加了的话,
     // "什么时候读得出立体"就有了两个住处。
@@ -382,6 +384,117 @@ fn parse_molblock(text: &str) -> PyResult<PyMolblock> {
         title: got.title,
         is_3d: got.is_3d,
     })
+}
+
+#[pyfunction]
+fn parse_molblock(text: &str) -> PyResult<PyMolblock> {
+    let got =
+        omgkit_io::molblock::read_v2000(text).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    finish(got).map_err(PyValueError::new_err)
+}
+
+/// SDF 里的一条记录。
+///
+/// **读不了的那条也在这里**,`error` 不是 `None`,`block` 是 `None` ——
+/// 见 `read_sdf` 的文档。
+#[pyclass(name = "SdfRecord", module = "omgkit")]
+pub struct PySdfRecord {
+    block: Option<PyMolblock>,
+    data: Vec<(String, String)>,
+    error: Option<String>,
+}
+
+#[pymethods]
+impl PySdfRecord {
+    /// 分子那一段。这条读不了时是 `None`。
+    #[getter]
+    fn block(&self) -> Option<PyMolblock> {
+        self.block.clone()
+    }
+
+    /// 数据字段,按文件里出现的顺序,`list[tuple[str, str]]`。
+    ///
+    /// **不是字典**:同名字段在真实文件里出现过(供应商把多次测量各写一行),
+    /// 换成字典会静默地只留最后一条。名字重不重是调用方的判断。
+    ///
+    /// 这条读不了时是空的。
+    #[getter]
+    fn data(&self) -> Vec<(String, String)> {
+        self.data.clone()
+    }
+
+    /// 这条读不了的原因;读得了时是 `None`。
+    #[getter]
+    fn error(&self) -> Option<String> {
+        self.error.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        match (&self.error, &self.block) {
+            (Some(e), _) => format!("<omgkit.SdfRecord 读不了:{e}>"),
+            (None, Some(b)) => format!(
+                "<omgkit.SdfRecord {} atoms, {} fields>",
+                b.mol.inner.num_atoms(),
+                self.data.len()
+            ),
+            (None, None) => "<omgkit.SdfRecord 空>".to_string(),
+        }
+    }
+}
+
+/// 逐条读一个 SDF(`.sdf` 文件的内容),返回 `list[SdfRecord]`。
+///
+/// # 读不了的那条**不抛异常,也不消失**
+///
+/// 抛异常会停在坏记录上,后面几千条一起丢掉;静默跳过会让**分母悄悄变小** ——
+/// 调用方数出来的条数与文件里的不符,而没有任何地方报错。两种都不行。
+///
+/// 所以每条都在返回的列表里占一个位置:读不了的那条 `error` 是一句话、
+/// `block` 是 `None`,后面的照读不误。怎么处理由调用方决定:
+///
+/// ```python
+/// for i, rec in enumerate(omgkit.read_sdf(text)):
+///     if rec.error:
+///         print(f"第 {i} 条读不了:{rec.error}")
+///         continue
+///     print(rec.block.mol.to_canonical_smiles(), rec.data)
+/// ```
+///
+/// 真实语料里这一档是有的:金属茂类配合物的键数超出 V2000 的表达能力,写出方
+/// 自己就换成了 V3000,而 V3000 这里明确拒收。
+///
+/// # 整份读进内存
+///
+/// 文本本来就整份在内存里(参数就是个 `str`),这里再把每条都解析出来。
+/// 超大文件(几十万条)的峰值内存要按这个估。
+///
+/// # 立体与 `parse_molblock` 同一条路
+///
+/// 每条都是"读 → 净化 → 回来打立体标记",与单条那个函数共用同一段代码。
+/// 三维文件同样眼下不读立体,理由见 `parse_molblock`。
+#[pyfunction]
+fn read_sdf(text: &str) -> Vec<PySdfRecord> {
+    omgkit_io::molblock::read_sdf(text)
+        .map(|rec| match rec {
+            Err(e) => PySdfRecord {
+                block: None,
+                data: Vec::new(),
+                error: Some(e.to_string()),
+            },
+            Ok(rec) => match finish(rec.block) {
+                Err(e) => PySdfRecord {
+                    block: None,
+                    data: rec.data,
+                    error: Some(e),
+                },
+                Ok(block) => PySdfRecord {
+                    block: Some(block),
+                    data: rec.data,
+                    error: None,
+                },
+            },
+        })
+        .collect()
 }
 
 #[pyfunction]
@@ -684,9 +797,11 @@ fn omgkit(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyReaction>()?;
     m.add_class::<PyOutcome>()?;
     m.add_class::<PyMolblock>()?;
+    m.add_class::<PySdfRecord>()?;
     m.add_function(wrap_pyfunction!(parse_smiles, m)?)?;
     m.add_function(wrap_pyfunction!(parse_smarts, m)?)?;
     m.add_function(wrap_pyfunction!(parse_reaction, m)?)?;
     m.add_function(wrap_pyfunction!(parse_molblock, m)?)?;
+    m.add_function(wrap_pyfunction!(read_sdf, m)?)?;
     Ok(())
 }

@@ -9,8 +9,8 @@ generated from the source, so they cannot drift away from the code.
     import omgkit
     ```
 
-    There are no submodules to reach into — the four parse functions and the
-    six classes below are the whole surface.
+    There are no submodules to reach into — the five reading functions and the
+    seven classes below are the whole surface.
 
 ## At a glance
 
@@ -20,12 +20,14 @@ generated from the source, so they cannot drift away from the code.
 | [`parse_smarts`](#omgkit.parse_smarts) | a [`Query`](#omgkit.Query) from a SMARTS pattern |
 | [`parse_reaction`](#omgkit.parse_reaction) | a [`Reaction`](#omgkit.Reaction) from a reaction SMARTS |
 | [`parse_molblock`](#omgkit.parse_molblock) | a [`Molblock`](#omgkit.Molblock) from the contents of a `.mol` file |
+| [`read_sdf`](#omgkit.read_sdf) | a list of [`SdfRecord`](#omgkit.SdfRecord) from the contents of an `.sdf` file |
 | [`Mol`](#omgkit.Mol) | a molecule — sanitize it, write it back out |
 | [`Query`](#omgkit.Query) | a substructure query — match it against a molecule |
 | [`Reaction`](#omgkit.Reaction) | a reaction template — run it on reactants |
 | [`Outcome`](#omgkit.Outcome) | one result of running a reaction |
 | [`Conformer`](#omgkit.Conformer) | a 3D structure — coordinates plus the molecule they belong to |
 | [`Molblock`](#omgkit.Molblock) | one record read from a `.mol`/`.sdf` file — molecule plus its coordinates |
+| [`SdfRecord`](#omgkit.SdfRecord) | one entry of an `.sdf` — that molblock, its data fields, or why it could not be read |
 
 ## 3D coordinates
 
@@ -109,6 +111,38 @@ contents of a `.mol` file, or one record of an `.sdf` up to its `$$$$`:
 Bonds the file marks as *explicitly unknown* — a crossed double bond, a wavy
 single bond — are left unassigned rather than being read off the drawing.
 
+## Reading `.sdf` files
+
+[`read_sdf`](#omgkit.read_sdf) reads every record of an SDF at once:
+
+```python
+for i, rec in enumerate(omgkit.read_sdf(open("library.sdf").read())):
+    if rec.error:
+        print(f"record {i}: {rec.error}")
+        continue
+    print(rec.block.mol.to_canonical_smiles(), dict(rec.data))
+```
+
+!!! warning "A record that cannot be read does not raise, and does not vanish"
+
+    Raising would stop at the bad record and throw away everything after it.
+    Skipping would make the count quietly smaller than the file's — the caller
+    counts records and gets a different number, with nothing anywhere reporting
+    it. So every record keeps its place in the list: a bad one has `error` set
+    to a sentence and `block` set to `None`, and the ones after it read fine.
+
+    Real files have these. A ferrocene-type complex has more bonds on the metal
+    than V2000 can express, so writers emit V3000 for it — and V3000 is refused
+    here rather than misread.
+
+`data` is a **list of pairs, not a dict**: repeated field names do occur (a
+vendor writing one line per measurement), and a dict would silently keep only
+the last. Values spanning several lines are joined with `\n`, and a line that
+*starts* with `>` inside a value is part of the value, not a new field.
+
+The whole file is parsed at once — budget peak memory accordingly for very
+large libraries.
+
 Writing a 2D molblock back out is not available from Python: choosing where the
 wedges go is part of the drawing layer, which the bindings do not carry.
 Writing a **3D** one is — see [`Conformer.to_molblock`](#omgkit.Conformer.to_molblock).
@@ -149,6 +183,8 @@ ValueError: unclosed branch
 ::: omgkit.parse_reaction
 
 ::: omgkit.parse_molblock
+
+::: omgkit.read_sdf
 
 ---
 
@@ -200,6 +236,14 @@ ValueError: unclosed branch
 
 ---
 
+## SdfRecord
+
+::: omgkit.SdfRecord
+    options:
+      members: true
+
+---
+
 ## Not yet exposed
 
 The Rust side has more than the Python side. These are reachable from Rust
@@ -211,5 +255,6 @@ today and are not yet wrapped:
 | `omgkit_io::smarts` writing | SMARTS output for molecules and reactions |
 | `omgkit_chem` individual stages | running one sanitization stage at a time |
 | `omgkit_io::molblock::write_v2000` with wedges | writing a **2D** molblock (needs the drawing layer to place the wedges) |
+| SDF **writing** | multi-record output with data fields — only single-record 3D output exists today |
 
 See the [Rust API](rust.md) if you need them.

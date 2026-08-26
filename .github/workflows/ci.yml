@@ -338,6 +338,12 @@ jobs:
       - name: 判官:读 molblock 的 Python 绑定(与 Rust 逐字符比)
         run: python harness/check_python_molblock.py "$RUNNER_TEMP/in.sdf" "$RUNNER_TEMP/read.txt"
 
+      # 读 SDF 的绑定:与 Rust 侧逐条比。切分的结果要一条不落地搬过来、数据字段
+      # 要保序、读不了的那条要留在它自己的位置上。最后一条最容易错,而错法特别
+      # 安静 —— 静默跳过之后条数变小,而没有任何地方报错。
+      - name: 判官:读 SDF 的 Python 绑定(与 Rust 逐条比)
+        run: python harness/check_python_sdf.py "$RUNNER_TEMP/data.sdf" "$RUNNER_TEMP/sdf.txt"
+
       # ---- 先前只在本地手动跑的那四条 ----
       #
       # **闸不进 CI 就不是闸。** 它们一直躺在 `harness/` 里,谁想起来谁跑一次。
