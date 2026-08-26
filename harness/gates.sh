@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 # 漏一处就是个不会报错的假数。CI 的头注释里记过同一个坑(那里原先写着
 # "四道闸门",而步骤早已加到八步)。这里由 `step` 计数,末尾自查:
 # 改了步骤忘了改 `TOTAL`,脚本最后一行会红。
-TOTAL=33
+TOTAL=34
 N=0
 step() {
     N=$((N + 1))
@@ -250,6 +250,21 @@ step "判官:规范化的自指不变量(不动点 + 幂等)"
 step "判官:写出的 molblock(外部实现从文件读回)"
 cargo run -q -p omgkit-conf --release --example dump_molblock3d -- harness/corpus/large.smi >"$WORK/blocks3d.sdf"
 "$PY" harness/check_molblock.py "$WORK/blocks3d.sdf"
+
+# **读 molblock:外部实现写的文件,我们读出来是不是同一个分子。**
+#
+# 与上一条对称:那条是"我们写、别人读",这条是"别人写、我们读"。两个方向都要跑
+# —— 写出侧与读取侧走的是完全不同的代码,一条绿说明不了另一条。
+#
+# 跨实现不能直接比规范串(两套算法给出的字符串本来就不一样),所以两边各写回
+# SMILES,统一交给外部实现判"是不是同一个分子"。
+#
+# 立体眼下不比:我方读取器还不给立体赋值(要用对称等价类,那在 L1 之上),
+# 判据把带立体的条数打出来,免得"零分歧"读起来像是立体也守住了。
+step "判官:读 molblock(外部实现写的文件)"
+"$PY" harness/check_molblock_read.py --write "$WORK/in.sdf" harness/corpus/large.smi
+cargo run -q -p omgkit-io --release --example read_molblock -- "$WORK/in.sdf" >"$WORK/read.txt"
+"$PY" harness/check_molblock_read.py --compare "$WORK/in.sdf" "$WORK/read.txt"
 
 step "判官:配位几何的排列分组(与外部实现逐组比)"
 "$PY" harness/check_stereo_perm.py

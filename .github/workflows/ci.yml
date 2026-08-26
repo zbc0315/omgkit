@@ -278,6 +278,14 @@ jobs:
           cargo run -q -p omgkit-conf --release --example dump_molblock3d -- harness/corpus/large.smi > "$RUNNER_TEMP/blocks3d.sdf"
           python harness/check_molblock.py "$RUNNER_TEMP/blocks3d.sdf"
 
+      # 与上一条对称:那条是"我们写、别人读",这条是"别人写、我们读"。
+      # 写出侧与读取侧走的是完全不同的代码,一条绿说明不了另一条。
+      - name: 判官:读 molblock(外部实现写的文件)
+        run: |
+          python harness/check_molblock_read.py --write "$RUNNER_TEMP/in.sdf" harness/corpus/large.smi
+          cargo run -q -p omgkit-io --release --example read_molblock -- "$RUNNER_TEMP/in.sdf" > "$RUNNER_TEMP/read.txt"
+          python harness/check_molblock_read.py --compare "$RUNNER_TEMP/in.sdf" "$RUNNER_TEMP/read.txt"
+
       - name: 判官:配位几何的排列分组(与外部实现逐组比)
         run: python harness/check_stereo_perm.py
 

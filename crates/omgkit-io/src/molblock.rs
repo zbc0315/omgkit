@@ -245,3 +245,299 @@ pub fn write_v2000(mol: &MolBuilder, rec: &Record) -> Result<String, WriteError>
     out.push_str("M  END\n");
     Ok(out)
 }
+
+// ---------------------------------------------------------------------------
+// 读取
+// ---------------------------------------------------------------------------
+
+/// 读不了的原因。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadError {
+    /// 行数不够(头三行 + 计数行 + 原子块 + 键块)。
+    Truncated {
+        /// 缺的是哪一段
+        what: &'static str,
+    },
+    /// 计数行读不出原子数/键数。
+    BadCounts,
+    /// V3000。本模块只做 V2000 —— 认出来并明确报错,好过把它当 V2000 硬读。
+    V3000,
+    /// 某一行的格式不对。
+    BadLine {
+        /// 行号(从 0 数)
+        line: usize,
+        /// 哪儿不对
+        what: &'static str,
+    },
+    /// 不认识的元素符号。
+    UnknownElement {
+        /// 行号
+        line: usize,
+        /// 读到的符号
+        symbol: String,
+    },
+    /// 键的类型不在 1..=4。查询用的 5..=8 这里不收 —— 它们不是分子。
+    BadBondType {
+        /// 行号
+        line: usize,
+        /// 读到的值
+        got: i32,
+    },
+}
+
+impl core::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Truncated { what } => write!(f, "molblock 截断了:缺{what}"),
+            Self::BadCounts => write!(f, "计数行读不出原子数与键数"),
+            Self::V3000 => write!(f, "这是 V3000,本模块只读 V2000"),
+            Self::BadLine { line, what } => write!(f, "第 {line} 行{what}"),
+            Self::UnknownElement { line, symbol } => {
+                write!(f, "第 {line} 行:不认识的元素符号 `{symbol}`")
+            }
+            Self::BadBondType { line, got } => {
+                write!(f, "第 {line} 行:键类型 {got} 不在 1..=4(5..=8 是查询用的)")
+            }
+        }
+    }
+}
+
+/// 读出来的东西。
+///
+/// **立体化学不在 `mol` 里。** 二维图的立体靠 [`wedges`](Self::wedges),三维的
+/// 靠 [`coords`](Self::coords) —— 两者都要在更上一层赋值(赋值要用对称等价类,
+/// 那在 L1 之上)。这里把两样都如实交出来,而不是悄悄给一个没有立体的分子。
+#[derive(Debug, Clone)]
+pub struct Molblock {
+    /// 第一行的标题。
+    pub title: String,
+    /// 分子。**未净化**:价键没算、环没感知、芳香性没感知。
+    pub mol: MolBuilder,
+    /// 逐原子坐标。二维图的 `z` 是 0。
+    pub coords: Vec<[f64; 3]>,
+    /// 逐键的楔形。
+    pub wedges: Vec<BondWedge>,
+    /// 坐标是不是三维的(有任何一个 `z` 不为 0)。
+    ///
+    /// 二维和三维的立体读法完全不同,而文件里没有哪个字段直说 —— 只能这么判,
+    /// 与 RDKit 同法。
+    pub is_3d: bool,
+}
+
+/// 取固定列的一段并去掉空白。列超出行尾时给空串 —— molblock 允许行尾截断。
+fn field(line: &str, from: usize, to: usize) -> &str {
+    let b = line.as_bytes();
+    if from >= b.len() {
+        return "";
+    }
+    let end = to.min(b.len());
+    // 只在 ASCII 边界上切;molblock 是 ASCII 格式,非 ASCII 只可能出现在标题里
+    line.get(from..end).unwrap_or("").trim()
+}
+
+fn parse_i32(s: &str) -> Option<i32> {
+    if s.is_empty() {
+        Some(0)
+    } else {
+        s.parse().ok()
+    }
+}
+
+/// 读一条 V2000 molblock。到 `M  END` 为止,后面的东西(SDF 的数据字段、
+/// `$$$$`)一概不看。
+///
+/// # Errors
+///
+/// 截断、计数行读不出、V3000、某行格式不对、元素不认识、键类型不在 1..=4。
+#[allow(clippy::too_many_lines)]
+pub fn read_v2000(text: &str) -> Result<Molblock, ReadError> {
+    // **`\r` 要去掉。** 真实文件多半来自 Windows,留着 `\r` 会让最后一个字段
+    // 带上它 —— 元素符号 `C\r` 查不到,而错误信息里看不出多了什么。
+    let lines: Vec<&str> = text.lines().map(|l| l.trim_end_matches('\r')).collect();
+    if lines.len() < 4 {
+        return Err(ReadError::Truncated { what: "头四行" });
+    }
+    let counts = lines[3];
+    if counts.contains("V3000") {
+        return Err(ReadError::V3000);
+    }
+    let na = parse_i32(field(counts, 0, 3)).ok_or(ReadError::BadCounts)?;
+    let nb = parse_i32(field(counts, 3, 6)).ok_or(ReadError::BadCounts)?;
+    let (na, nb) = (
+        usize::try_from(na).map_err(|_| ReadError::BadCounts)?,
+        usize::try_from(nb).map_err(|_| ReadError::BadCounts)?,
+    );
+    if lines.len() < 4 + na + nb {
+        return Err(ReadError::Truncated {
+            what: "原子块或键块",
+        });
+    }
+
+    let mut mol = MolBuilder::with_capacity(na, nb);
+    let mut coords = Vec::with_capacity(na);
+    // 原子块里那个旧电荷码,先记着 —— **只有在没有任何 `M  CHG` 行时才作数**。
+    let mut legacy_charge = vec![0i8; na];
+    let mut legacy_iso = vec![0i16; na];
+
+    for k in 0..na {
+        let ln = 4 + k;
+        let line = lines[ln];
+        let bad = |what| ReadError::BadLine { line: ln, what };
+        let x: f64 = field(line, 0, 10).parse().map_err(|_| bad("x 读不出来"))?;
+        let y: f64 = field(line, 10, 20).parse().map_err(|_| bad("y 读不出来"))?;
+        let z: f64 = field(line, 20, 30).parse().map_err(|_| bad("z 读不出来"))?;
+        let sym = field(line, 31, 34);
+        let el = element::by_symbol(sym).ok_or_else(|| ReadError::UnknownElement {
+            line: ln,
+            symbol: sym.to_string(),
+        })?;
+        let idx = mol.add_atom(el.atomic_num);
+
+        // 旧电荷码:0 无、1 = +3、2 = +2、3 = +1、4 = 双线态自由基、5 = −1、
+        // 6 = −2、7 = −3。这个编码常年被写错,所以只在没有 `M  CHG` 时才用。
+        legacy_charge[k] = match parse_i32(field(line, 36, 39)).unwrap_or(0) {
+            1 => 3,
+            2 => 2,
+            3 => 1,
+            5 => -1,
+            6 => -2,
+            7 => -3,
+            _ => 0,
+        };
+        // 质量差:相对该元素**最常见同位素**的差值。0 表示不指定。
+        let mass_diff = parse_i32(field(line, 34, 36)).unwrap_or(0);
+        if mass_diff != 0 {
+            legacy_iso[k] = i16::try_from(i32::from(el.common_isotope) + mass_diff).unwrap_or(0);
+        }
+        // 价键字段:0 = 按默认价补氢;15 = 零价;1..=14 = 总价钉死。
+        let valence = parse_i32(field(line, 48, 51)).unwrap_or(0);
+        if valence != 0 {
+            if let Some(a) = mol.atom_mut(idx) {
+                a.flags.insert(AtomFlags::NO_IMPLICIT);
+            }
+        }
+        coords.push([x, y, z]);
+    }
+
+    let mut wedges = Vec::with_capacity(nb);
+    for k in 0..nb {
+        let ln = 4 + na + k;
+        let line = lines[ln];
+        let bad = |what| ReadError::BadLine { line: ln, what };
+        let a = parse_i32(field(line, 0, 3)).ok_or_else(|| bad("第一个原子号读不出来"))?;
+        let b = parse_i32(field(line, 3, 6)).ok_or_else(|| bad("第二个原子号读不出来"))?;
+        let t = parse_i32(field(line, 6, 9)).ok_or_else(|| bad("键类型读不出来"))?;
+        let stereo = parse_i32(field(line, 9, 12)).unwrap_or(0);
+        let (a, b) = (
+            usize::try_from(a - 1).map_err(|_| bad("原子号越界"))?,
+            usize::try_from(b - 1).map_err(|_| bad("原子号越界"))?,
+        );
+        if a >= na || b >= na {
+            return Err(bad("原子号越界"));
+        }
+        let order = match t {
+            1 => BondOrder::Single,
+            2 => BondOrder::Double,
+            3 => BondOrder::Triple,
+            4 => BondOrder::Aromatic,
+            got => return Err(ReadError::BadBondType { line: ln, got }),
+        };
+        let (a, b) = (
+            u32::try_from(a).map_err(|_| bad("原子号越界"))?,
+            u32::try_from(b).map_err(|_| bad("原子号越界"))?,
+        );
+        mol.add_bond(a, b, order)
+            .map_err(|_| bad("这根键建不起来"))?;
+        // 楔形的**窄端就是第一个原子** —— 与写出侧同一条规则
+        wedges.push(match stereo {
+            1 => BondWedge::Up { narrow: a },
+            6 => BondWedge::Down { narrow: a },
+            _ => BondWedge::Plain,
+        });
+    }
+
+    // 属性块。**`M  CHG` / `M  ISO` 一出现,原子块里那两个旧字段整体作废** ——
+    // 规范就是这么定的,而"两处都读、后者覆盖前者"会在只写了一部分原子的文件上
+    // 给出错的电荷。
+    let mut saw_chg = false;
+    let mut saw_iso = false;
+    let mut chg: Vec<(usize, i8)> = Vec::new();
+    let mut iso: Vec<(usize, i16)> = Vec::new();
+    let mut rad: Vec<(usize, u8)> = Vec::new();
+    for line in &lines[4 + na + nb..] {
+        if line.starts_with("M  END") {
+            break;
+        }
+        let tag = field(line, 0, 6);
+        if !matches!(tag, "M  CHG" | "M  ISO" | "M  RAD") {
+            continue;
+        }
+        let n = parse_i32(field(line, 6, 9)).unwrap_or(0).max(0);
+        for e in 0..usize::try_from(n).unwrap_or(0) {
+            let at = parse_i32(field(line, 9 + e * 8, 13 + e * 8)).unwrap_or(0);
+            let v = parse_i32(field(line, 13 + e * 8, 17 + e * 8)).unwrap_or(0);
+            let Ok(at) = usize::try_from(at - 1) else {
+                continue;
+            };
+            if at >= na {
+                continue;
+            }
+            match tag {
+                "M  CHG" => {
+                    saw_chg = true;
+                    chg.push((at, i8::try_from(v).unwrap_or(0)));
+                }
+                "M  ISO" => {
+                    saw_iso = true;
+                    iso.push((at, i16::try_from(v).unwrap_or(0)));
+                }
+                _ => rad.push((at, u8::try_from(radical_electrons(v)).unwrap_or(0))),
+            }
+        }
+    }
+    for k in 0..na {
+        let Some(a) = mol.atom_mut(u32::try_from(k).unwrap_or(0)) else {
+            continue;
+        };
+        if !saw_chg {
+            a.formal_charge = legacy_charge[k];
+        }
+        if !saw_iso {
+            a.isotope = u16::try_from(legacy_iso[k]).unwrap_or(0);
+        }
+    }
+    for (at, v) in chg {
+        if let Some(a) = mol.atom_mut(u32::try_from(at).unwrap_or(0)) {
+            a.formal_charge = v;
+        }
+    }
+    for (at, v) in iso {
+        if let Some(a) = mol.atom_mut(u32::try_from(at).unwrap_or(0)) {
+            a.isotope = u16::try_from(v).unwrap_or(0);
+        }
+    }
+    for (at, v) in rad {
+        if let Some(a) = mol.atom_mut(u32::try_from(at).unwrap_or(0)) {
+            a.num_radical_electrons = v;
+        }
+    }
+
+    let is_3d = coords.iter().any(|p| p[2].abs() > 1e-9);
+    Ok(Molblock {
+        title: (*lines.first().unwrap_or(&"")).to_string(),
+        mol,
+        coords,
+        wedges,
+        is_3d,
+    })
+}
+
+/// `M  RAD` 的编码 → 未成对电子数。1 = 双线态(1 个)、2 = 单线态(2 个)、
+/// 3 = 三线态(2 个)。
+fn radical_electrons(code: i32) -> i32 {
+    match code {
+        1 | 2 => code.min(2),
+        3 => 2,
+        _ => 0,
+    }
+}
