@@ -168,8 +168,8 @@ const MAX_NONFINITE: u64 = 0;
 /// 表里没有的语料回落到 [`FALLBACK`] 那组粗闸,并且**打印一行说它没被钉住** ——
 /// 静默回落等于给新语料免检。
 const PINNED: &[(&str, [f64; 4])] = &[
-    ("large", [0.026, 0.148, 0.353, 0.257]),
-    ("hard", [0.074, 0.818, 3.335, 0.052]),
+    ("large", [0.007, 0.134, 0.344, 0.068]),
+    ("hard", [0.000, 0.777, 3.335, 0.052]),
 ];
 
 /// 棘轮倍数。2 倍与 1-2 / 1-3 先前对**约束语料**的余量(2.0 / 1.8 倍)同一个尺度。
@@ -287,6 +287,9 @@ fn main() {
     // ---- 几何:先前**只有 150 个分子的判官在看**,全语料这边一条都没有 ----
     let mut viol = [(0u64, 0u64); 5];
     let (mut n_broken_bond, mut n_cross_mol, mut n_pierce_mol) = (0u64, 0u64, 0u64);
+    let mut n_unconverged = 0u64;
+    let mut unconverged_cases: Vec<String> = Vec::new();
+    let mut worst_grad = 0.0f64;
     let mut n_pierce_intact = 0u64;
     let mut pierce_intact_cases: Vec<String> = Vec::new();
     let (mut n_cross, mut worst_over) = (0u64, 0.0f64);
@@ -424,6 +427,15 @@ fn main() {
             viol[k].0 += bad;
             viol[k].1 += tot;
         }
+        // **精修没收敛的分子单独数。** 只看平均误差看不见它:端到端判据报的是
+        // 全语料平均(5.9e1 → 6.4e-4),一个卡在 4e-2 的分子淹在平均里。
+        if !conf.converged {
+            n_unconverged += 1;
+            worst_grad = worst_grad.max(conf.grad_norm);
+            if unconverged_cases.len() < 6 {
+                unconverged_cases.push(smi.to_string());
+            }
+        }
         let bonds_broken = v[1].0 > 0;
         if bonds_broken {
             n_broken_bond += 1;
@@ -511,6 +523,13 @@ fn main() {
             viol[c].0,
             pct(viol[c].0, viol[c].1)
         );
+    }
+    println!(
+        "    **精修没收敛**的分子 {n_unconverged}({:.2}%);最大梯度范数 {worst_grad:.3e}",
+        pct(n_unconverged, n_conf)
+    );
+    if !unconverged_cases.is_empty() {
+        println!("    没收敛的例子:{}", unconverged_cases.join("  "));
     }
     println!(
         "    **至少断一根键**的分子 {n_broken_bond}({:.2}%);最坏越界 {worst_over:.2} Å  {worst_case}",
