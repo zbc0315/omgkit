@@ -57,7 +57,7 @@ pub fn read_chirality(
     omgkit_io::wedge::chirality_from_wedges(mol, &xyz, wedges, a)
 }
 
-use crate::geom::{side_of, Point2};
+use crate::geom::Point2;
 
 /// 楔形指派的结果。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -257,6 +257,11 @@ fn candidate_bonds(
 ///
 /// 用的是键自己记的**参照原子**([`BondData::stereo_atoms`]),不涉及 CIP ——
 /// 与 [`BondStereo::Cis`] / [`BondStereo::Trans`] 的定义一致。
+///
+/// "同侧算顺"这条符号约定在
+/// [`omgkit_io::stereo::cis_trans_from_points`],这里只把点递过去 ——
+/// 读 molblock 那条路问的是同一个几何问题,约定各写一份的话两条路会给出
+/// 一对相反的顺反,而且各自自洽。
 #[must_use]
 pub fn read_bond_stereo(mol: &MolBuilder, coords: &[Point2], bond: u32) -> Option<BondStereo> {
     let b = &mol.bonds()[bond as usize];
@@ -264,17 +269,11 @@ pub fn read_bond_stereo(mol: &MolBuilder, coords: &[Point2], bond: u32) -> Optio
     if ra == BondData::NO_STEREO_ATOM || rb == BondData::NO_STEREO_ATOM {
         return None;
     }
-    let (pa, pb) = (coords[b.begin as usize], coords[b.end as usize]);
-    let sa = side_of(pa, pb, coords[ra as usize]);
-    let sb = side_of(pa, pb, coords[rb as usize]);
-    if sa.abs() < 1e-9 || sb.abs() < 1e-9 {
-        return None; // 参照原子落在双键轴上,读不出来
-    }
-    Some(if sa * sb > 0.0 {
-        BondStereo::Cis
-    } else {
-        BondStereo::Trans
-    })
+    let p = |a: u32| {
+        let q = coords[a as usize];
+        [q.x, q.y]
+    };
+    omgkit_io::stereo::cis_trans_from_points(p(b.begin), p(b.end), p(ra), p(rb))
 }
 
 /// 把几何画反了的双键掰回来:把一侧的子树沿双键轴整体镜像。

@@ -29,12 +29,17 @@ fn main() {
                     match omgkit_chem::pipeline::sanitize(&mut m) {
                         Err(e) => format!("<净化不了:{e}>"),
                         Ok(()) => {
-                            // **净化之后**才打手性标记:判一个中心要知道它有几个
-                            // 隐式氢,而那一栏是净化算出来的。
+                            // **净化之后**才打立体标记:手性要知道中心有几个隐式
+                            // 氢,顺反要用对称等价类 —— 两样都是净化之后才算得准。
                             let _ = omgkit_io::wedge::assign_chirality_2d(
                                 &mut m,
                                 &block.coords,
                                 &block.wedges,
+                            );
+                            let _ = omgkit_io::stereo::assign_bond_stereo_2d(
+                                &mut m,
+                                &block.coords,
+                                &block.unknown_stereo,
                             );
                             omgkit_io::canon::canonical_smiles(&m).smiles
                         }

@@ -259,8 +259,9 @@ cargo run -q -p omgkit-conf --release --example dump_molblock3d -- harness/corpu
 # 跨实现不能直接比规范串(两套算法给出的字符串本来就不一样),所以两边各写回
 # SMILES,统一交给外部实现判"是不是同一个分子"。
 #
-# 立体眼下不比:我方读取器还不给立体赋值(要用对称等价类,那在 L1 之上),
-# 判据把带立体的条数打出来,免得"零分歧"读起来像是立体也守住了。
+# 立体分三档比:完全一致 / 只差双键顺反 / 骨架对但四面体不同。后两档各配上限,
+# 而且两个方向都卡(少读、多读、读反,一律落进对应那一档)。上限为 0 的那一档
+# 单看是空断言,所以参照侧"有多少条带立体"也一起打出来并配下限。
 step "判官:读 molblock(外部实现写的文件)"
 "$PY" harness/check_molblock_read.py --write "$WORK/in.sdf" harness/corpus/large.smi
 cargo run -q -p omgkit-io --release --example read_molblock -- "$WORK/in.sdf" >"$WORK/read.txt"

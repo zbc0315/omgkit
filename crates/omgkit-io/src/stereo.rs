@@ -337,17 +337,42 @@ fn end_is_stereogenic(mol: &MolBuilder, end: u32, other: u32, classes: &[u32]) -
     }
 }
 
-/// `end` 上除通往 `other` 之外、带方向的键。
+/// 双键的 `end` 这一端,哪些邻居可以充当**参照原子**。返回 `(原子, 键)`。
 ///
-/// 承载方向的键**不一定是单键**:双键挂在芳香环外时(`[H]/N=c/1\\nc[nH]s1`),
-/// 指方向的是那两条芳香环键。只排除双键本身。
-fn directional_bonds_at(mol: &MolBuilder, end: u32, other: u32) -> Vec<u32> {
+/// 参照可以经由**非单键**到达:双键挂在芳香环外时(`[H]/N=c/1\\nc[nH]s1`),
+/// 担这个角色的是那两条芳香环键。只排除双键 —— `C=C=C` 那种累积双键的
+/// "另一侧"本身又是一根双键,它定的是轴手性([`ChiralTag::Allene`](omgkit_core::ChiralTag::Allene)),
+/// 不是顺反。
+///
+/// # 为什么这条筛选只能有一处
+///
+/// 从方向键感知(`/` `\\`)与从二维坐标反读([`assign_bond_stereo_2d`])问的是
+/// 同一件事:这一端拿谁当参照。两处各写一份的话,一条路认下的参照另一条路
+/// 认不下 —— 于是同一个分子读进来、写出去,顺反悄悄换了个参照系。
+///
+/// # 排除双键这一条**没有判据碰得到**
+///
+/// 拿掉它,语料级判据与单元测试全绿 —— 两条路各有一层挡在前面:
+///
+/// * 二维那条路,真实的丙二烯画出来是**直线**,那根双键的另一端正好落在轴上,
+///   [`cis_trans_from_points`] 先一步判"读不出来";
+/// * SMILES 那条路,`/` `\\` 按语法只写在单键/芳香键上,双键身上根本不会有方向。
+///
+/// 也就是说这一条挡的是**两条路都到不了**的输入。留着是因为它写明了
+/// "累积双键定的是轴手性、不是顺反";但它守住了什么,眼下没人量得出来 ——
+/// 照实记,免得全绿被读成"这一条也验过了"。
+fn reference_neighbours(mol: &MolBuilder, end: u32, other: u32) -> Vec<(u32, u32)> {
     mol.neighbors(end)
         .filter(|&(o, _)| o != other)
-        .filter(|&(_, bi)| {
-            let b = mol.bonds()[bi as usize];
-            b.direction != BondDirection::None && b.order != BondOrder::Double
-        })
+        .filter(|&(_, bi)| mol.bonds()[bi as usize].order != BondOrder::Double)
+        .collect()
+}
+
+/// `end` 上除通往 `other` 之外、带方向的键。
+fn directional_bonds_at(mol: &MolBuilder, end: u32, other: u32) -> Vec<u32> {
+    reference_neighbours(mol, end, other)
+        .into_iter()
+        .filter(|&(_, bi)| mol.bonds()[bi as usize].direction != BondDirection::None)
         .map(|(_, bi)| bi)
         .collect()
 }
@@ -457,6 +482,157 @@ fn outward_direction(
             };
             (o, dir)
         })
+}
+
+/// 参照原子落在双键轴上多近就算"读不出来"。单位是坐标单位的平方(叉积)。
+///
+/// 卡在纯粹的退化上:二维图里参照原子共线是布局病态,不是化学。留一条窄缝
+/// 是为了让浮点噪声不至于把同侧判成异侧。
+const AXIS_TOL: f64 = 1e-9;
+
+/// `z` 大到多少就算"这不是一张平面图"。单位是**坐标单位**,与 [`AXIS_TOL`]
+/// 那个面积量不是一回事,所以另立一个常数 —— 数值撞在一起是巧合。
+/// 与 `molblock` 读取器判 `is_3d` 用的是同一条线。
+const FLAT_TOL: f64 = 1e-9;
+
+/// 两个参照原子在双键两侧还是同侧 —— **同侧为顺**。判不出来返回 `None`。
+///
+/// 只吃四个点,不吃分子:调用方各自挑好参照原子之后,剩下的就是一道平面几何。
+///
+/// # 这条符号约定只能有一处实现
+///
+/// 画图那边把画反了的双键掰回来(`omgkit_depict::stereo::read_bond_stereo`),
+/// 读文件这边从坐标反读顺反([`assign_bond_stereo_2d`]) —— 两处问的是同一个
+/// 几何问题。各写一份的话,一处判顺、另一处判反,**而且两边各自自洽**:
+/// 画出来的图和从图里读回来的分子是一对相反的顺反,谁也不报错。
+#[must_use]
+pub fn cis_trans_from_points(
+    begin: [f64; 2],
+    end: [f64; 2],
+    ref_begin: [f64; 2],
+    ref_end: [f64; 2],
+) -> Option<BondStereo> {
+    let (dx, dy) = (end[0] - begin[0], end[1] - begin[1]);
+    let side = |p: [f64; 2]| dx * (p[1] - begin[1]) - dy * (p[0] - begin[0]);
+    let (sa, sb) = (side(ref_begin), side(ref_end));
+    if sa.abs() < AXIS_TOL || sb.abs() < AXIS_TOL {
+        return None;
+    }
+    Some(if sa * sb > 0.0 {
+        BondStereo::Cis
+    } else {
+        BondStereo::Trans
+    })
+}
+
+/// 从二维坐标反读一根双键的顺反,连同挑中的参照原子一起给出。
+fn cis_trans_at(
+    mol: &MolBuilder,
+    coords: &[[f64; 3]],
+    unknown: &[bool],
+    di: u32,
+    classes: &[u32],
+) -> Option<(BondStereo, [u32; 2])> {
+    let db = *mol.bonds().get(di as usize)?;
+    if db.order != BondOrder::Double || db.flags.contains(BondFlags::AROMATIC) {
+        return None;
+    }
+    // 什么算立体源,与方向键那条路是同一套:小环、已有标注两条来自
+    // `would_annotate`,两端能否区分取代基那条来自 `informative_directions`
+    // (`would_annotate` 通过它的筛选结果间接用上)。各写一遍的话,同一根键
+    // 从 SMILES 进来标、从文件进来不标。
+    if in_small_ring(mol, di) {
+        return None;
+    }
+    if stereo_atoms_are_valid(mol, di) {
+        return None;
+    }
+    if !end_is_stereogenic(mol, db.begin, db.end, classes)
+        || !end_is_stereogenic(mol, db.end, db.begin, classes)
+    {
+        return None;
+    }
+    // 文件明说这根键的立体未知(交叉双键)—— 坐标照样画得出一个确定的样子,
+    // 照读就等于把"作者说不知道"改写成"作者说是顺式"。
+    //
+    // 切片短了一截时按"未知"处理:那一档不标,总数当场掉下来;反过来按
+    // "已知"兜底的话,少传的信息会变成静默多标出来的立体。
+    let unsure = |bi: u32| unknown.get(bi as usize).copied().unwrap_or(true);
+    if unsure(di) {
+        return None;
+    }
+
+    let xy = |a: u32| -> Option<[f64; 2]> {
+        let p = coords.get(a as usize)?;
+        Some([p[0], p[1]])
+    };
+    // 参照按存储序挑第一个合格邻居。挑哪个不改变分子 —— 换一个参照只是换一套
+    // 坐标系,顺反的值跟着挑中的那个一起变。
+    let first = |end: u32, other: u32| {
+        reference_neighbours(mol, end, other)
+            .into_iter()
+            .find(|&(_, bi)| !unsure(bi))
+            .map(|(o, _)| o)
+    };
+    let (ra, rb) = (first(db.begin, db.end)?, first(db.end, db.begin)?);
+    let stereo = cis_trans_from_points(xy(db.begin)?, xy(db.end)?, xy(ra)?, xy(rb)?)?;
+    Some((stereo, [ra, rb]))
+}
+
+/// 从**二维坐标**反读双键顺反,写入 `stereo` 与 `stereo_atoms`。返回标注的根数。
+///
+/// `unknown` 按键下标索引,标出输入里**明说立体未知**的键(molblock 键块第四列
+/// 的交叉双键 `3`、波浪单键 `4`)。没有这类信息时传一个全 `false` 的切片。
+///
+/// # 与 [`perceive_bond_stereo`] 的分工:同一个问题,两种输入
+///
+/// SMILES 把顺反写在方向键(`/` `\`)上,molblock 把它画在坐标里 —— **图里
+/// 没有方向键可读**。两条路只在"参照原子从哪来"上不同:那边是携带方向的那根
+/// 键,这边是按存储序挑的第一个合格邻居。什么算立体源(小环、芳香、两端能否
+/// 区分取代基)由 `reference_neighbours` / [`stereo_atoms_are_valid`] 与
+/// `end_is_stereogenic` 共用,两条路一模一样。
+///
+/// # 前置条件:先净化
+///
+/// 要用对称等价类判"这一端的两个取代基分不分得开",而等价类要芳香性定下来
+/// 才算得准。刚从文件读出来的分子还没有,那时调这个函数,芳香环外的双键会
+/// 被当成普通双键。顺序与 [`crate::wedge::assign_chirality_2d`] 一样:
+/// **读文件(L1)→ 净化(L2)→ 回来打标记(L1)**。
+///
+/// # 只管二维,而且**当场认出三维就整个不做**
+///
+/// 三维坐标投到 xy 平面上照样算得出"同侧/异侧",而那个答案与分子无关 ——
+/// 一根真正的反式双键投影下来完全可能落成同侧。这与手性那一侧不对称:三维
+/// molblock 的楔形一般是空的,[`crate::wedge::assign_chirality_2d`] 自然什么
+/// 也标不出来;顺反这一侧不拦的话给出的是**错的答案**,不是空答案。
+///
+/// 所以任何一个 `z` 不为零就整个不做,返回 0。三维的顺反在扭转角里,是另一
+/// 条路。
+///
+/// # 波浪单键这一档只有单元测试守着
+///
+/// 交叉双键在语料里有 625 根,判据踩得实。波浪单键**一根都没有** ——
+/// 外部实现给这批分子写出的立体码只有 `0`/`1`/`3`/`6`。也就是说这一档只有
+/// 单元测试,没有语料级判据。照实记下来,免得"全绿"被读成两档都验过了。
+pub fn assign_bond_stereo_2d(mol: &mut MolBuilder, coords: &[[f64; 3]], unknown: &[bool]) -> usize {
+    if coords.iter().any(|p| p[2].abs() > FLAT_TOL) {
+        return 0;
+    }
+    let classes = symmetry_classes(mol);
+    let found: Vec<(u32, BondStereo, [u32; 2])> = (0..mol.num_bonds())
+        .filter_map(|di| {
+            let di = u32::try_from(di).ok()?;
+            cis_trans_at(mol, coords, unknown, di, &classes).map(|(s, a)| (di, s, a))
+        })
+        .collect();
+    let n = found.len();
+    for (di, stereo, atoms) in found {
+        if let Some(mut b) = mol.bond_mut(di) {
+            b.set_stereo(stereo);
+            b.set_stereo_atoms(atoms);
+        }
+    }
+    n
 }
 
 /// 参照原子仍然合法吗 —— 两个下标都在范围内,且确实是该双键两端的邻居。
@@ -772,6 +948,147 @@ pub fn normalized_stereo_refs(mol: &MolBuilder, priority: &[u32]) -> Option<MolB
 mod tests {
     use super::*;
     use crate::smiles;
+
+    /// 走产品那条路读一张二维图:文本 → `read_v2000` → 净化 → 反读顺反。
+    ///
+    /// 自己拼 `MolBuilder` 会绕开读取器与净化,量的就是另一件事了。
+    fn ez_from_block(block: &str) -> (usize, String) {
+        let got = crate::molblock::read_v2000(block).expect("读 molblock");
+        let mut m = got.mol;
+        omgkit_chem::pipeline::sanitize(&mut m).expect("净化");
+        let n = assign_bond_stereo_2d(&mut m, &got.coords, &got.unknown_stereo);
+        (n, crate::canon::canonical_smiles(&m).smiles)
+    }
+
+    /// 同一个分子**从 SMILES 那条路**进来的规范串。
+    ///
+    /// 拿它当靶子,而不是把某个具体的规范串写死在测试里:后者会在规范化算法
+    /// 稍一改动时变红,而那时代码并没有错。这里要钉的是"文件那条路与 SMILES
+    /// 那条路读出同一个分子"。跨实现那一侧由 `harness/check_molblock_read.py`
+    /// 守着。
+    fn ez_from_smiles(smi: &str) -> String {
+        let mut m = smiles::parse(smi).unwrap_or_else(|e| panic!("{smi}: {}", e.render()));
+        omgkit_chem::pipeline::sanitize(&mut m).expect("净化");
+        perceive_bond_stereo(&mut m);
+        crate::canon::canonical_smiles(&m).smiles
+    }
+
+    const TRANS_DIFLUOROETHENE: &str = "\
+F/C=C/F
+     RDKit          2D
+
+  4  3  0  0  0  0  0  0  0  0999 V2000
+   -1.9796   -0.1365    0.0000 F   0  0  0  0  0  0  0  0  0  0  0  0
+   -0.5994    0.4508    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    0.5994   -0.4508    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    1.9796    0.1365    0.0000 F   0  0  0  0  0  0  0  0  0  0  0  0
+  1  2  1  0
+  2  3  2  0
+  3  4  1  0
+M  END
+";
+
+    /// 图上画着反式,读出来就得是反式 —— 顺反的**值**读对了,不只是"读到了"。
+    #[test]
+    fn a_trans_double_bond_is_read_as_trans() {
+        let (n, smi) = ez_from_block(TRANS_DIFLUOROETHENE);
+        assert_eq!(n, 1, "该标一根");
+        assert_eq!(smi, ez_from_smiles("F/C=C/F"));
+    }
+
+    /// **交叉双键(键块第四列 `3`)是"作者说不知道"**,不是"作者没写"。
+    ///
+    /// 坐标照样画得出一个确定的样子 —— 照读就等于替作者把话说死。语料里
+    /// 外部实现写出 625 根这样的键,一根都不该被读成构型。
+    #[test]
+    fn a_crossed_double_bond_is_not_read_as_a_configuration() {
+        let crossed = TRANS_DIFLUOROETHENE.replace("  2  3  2  0", "  2  3  2  3");
+        assert_ne!(crossed, TRANS_DIFLUOROETHENE, "键块那一行没改到");
+        let (n, smi) = ez_from_block(&crossed);
+        assert_eq!(n, 0, "不该标");
+        assert_eq!(smi, ez_from_smiles("FC=CF"));
+    }
+
+    /// **波浪单键(键块第四列 `4`)**同样是"作者说不知道",挨着它的那根双键
+    /// 读不出构型。
+    ///
+    /// 语料里一根波浪键都没有 —— 这一档只有这个测试守着。
+    #[test]
+    fn a_wavy_single_bond_blocks_its_neighbouring_double_bond() {
+        let wavy = TRANS_DIFLUOROETHENE.replace("  1  2  1  0", "  1  2  1  4");
+        assert_ne!(wavy, TRANS_DIFLUOROETHENE, "键块那一行没改到");
+        let (n, smi) = ez_from_block(&wavy);
+        assert_eq!(n, 0, "不该标");
+        assert_eq!(smi, ez_from_smiles("FC=CF"));
+    }
+
+    /// 三维坐标整个不做 —— 投影到 xy 平面上算出来的"同侧"与分子无关。
+    #[test]
+    fn three_dimensional_coordinates_are_refused_outright() {
+        let lifted = TRANS_DIFLUOROETHENE.replace(
+            "    1.9796    0.1365    0.0000 F",
+            "    1.9796    0.1365    1.2000 F",
+        );
+        assert_ne!(lifted, TRANS_DIFLUOROETHENE, "原子块那一行没改到");
+        let (n, _) = ez_from_block(&lifted);
+        assert_eq!(n, 0, "三维不该走这条路");
+    }
+
+    /// 一端挂着两个相同的取代基 —— 交换它们是自同构,这根键没有顺反可言。
+    ///
+    /// **这一档语料级判据够不着**:写出侧的 `informative_directions` 会把这根
+    /// 噪声方向再滤掉一次,于是标错了也看不出来。所以钉在这里。
+    #[test]
+    fn an_end_with_two_identical_substituents_is_not_a_stereo_source() {
+        let (n, _) = ez_from_block(
+            "\
+CC=C(Cl)Cl
+     RDKit          2D
+
+  5  4  0  0  0  0  0  0  0  0999 V2000
+   -2.0785    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+   -0.7794    0.7500    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    0.5196   -0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    1.8187    0.7500    0.0000 Cl  0  0  0  0  0  0  0  0  0  0  0  0
+    0.5196   -1.5000    0.0000 Cl  0  0  0  0  0  0  0  0  0  0  0  0
+  1  2  1  0
+  2  3  2  0
+  3  4  1  0
+  3  5  1  0
+M  END
+",
+        );
+        assert_eq!(n, 0, "1,1-二氯丙烯没有顺反");
+    }
+
+    /// 累积双键不记顺反。
+    ///
+    /// **钉的是结论,不是理由。** 真正拦住它的是几何:丙二烯画出来是直线,
+    /// 那根双键的另一端正好落在轴上,[`cis_trans_from_points`] 判"读不出来"。
+    /// `reference_neighbours` 里排除双键那一条即使拿掉,这个测试照样绿 ——
+    /// 见那个函数的文档。
+    #[test]
+    fn cumulated_double_bonds_are_not_cis_trans() {
+        let (n, _) = ez_from_block(
+            "\
+FC=C=CF
+     RDKit          2D
+
+  5  4  0  0  0  0  0  0  0  0999 V2000
+   -2.2500    0.7794    0.0000 F   0  0  0  0  0  0  0  0  0  0  0  0
+   -1.5000   -0.5196    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+   -0.0000   -0.5196    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    1.5000   -0.5196    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    2.2500    0.7794    0.0000 F   0  0  0  0  0  0  0  0  0  0  0  0
+  1  2  1  0
+  2  3  2  0
+  3  4  2  0
+  4  5  1  0
+M  END
+",
+        );
+        assert_eq!(n, 0, "丙二烯型的两根双键都不是顺反");
+    }
 
     fn genuine(smi: &str) -> Vec<u32> {
         let m = smiles::parse(smi).unwrap_or_else(|e| panic!("{smi}: {}", e.render()));

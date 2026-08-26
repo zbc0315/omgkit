@@ -12,11 +12,16 @@
 优先级)、同位素(质量差 → 质量数)、自由基(`M RAD` 的编码)、价键字段
 (不读的话 `[CH]` 会被按默认价补成 `[CH3]`)。
 
-# 立体化学眼下**不比**
+# 立体化学分三档比
 
-我方的读取器还不给立体赋值(二维靠楔形、三维靠坐标,两者都要用对称等价类,
-那在 L1 之上)。所以这里两侧都把立体抹掉再比,并且**把带立体的条数打出来** ——
-免得"零分歧"读起来像是立体也守住了。那一档补上之后这个开关就该去掉。
+一档"完全一致",一档"只差双键顺反",一档"骨架对、四面体不同"。分开是因为
+"顺反读错了"与"手性读错了"是两件事,混成一档的话前者会把后者盖住。
+
+两档各有上限(`MAX_EZ_ONLY` / `MAX_CHIRAL_DIFF`),而且**两个方向都卡** ——
+少读一个、多读一个、读反一个,一律落进对应那一档。
+
+上限为 0 的那一档单看是空断言,所以参照侧"有多少条带立体"也一起打出来并配
+下限:参照侧一条都没有时,零分歧说明不了任何事。
 
 用法:
 
@@ -40,12 +45,18 @@ RDLogger.DisableLog("rdApp.*")
 # 这一档一旦变多,要么语料变了,要么该把 V3000 也读起来了,两种都得有人看见。
 MAX_V3000 = 3
 
-# **只差双键顺反**的条数上限。
+# **只差双键顺反**的条数上限。**两个方向都卡在这里**:我方少读一根、多读一根、
+# 或者读反一根,三种都落进这一档(`no_ez` 把两侧的顺反一起抹掉再比,剩下的
+# 差别只可能来自顺反本身)。
 #
-# 我方眼下不从二维坐标反读顺反:那要先给每根候选双键挑参照原子(molblock 里
-# 没有方向键,挑法与 SMILES 那条路不同),是单独一块活。实测 365 条 ——
-# 钉在这里,不假装守住了。补上之后这个数该掉到 0。
-MAX_EZ_ONLY = 365
+# 先前是 365 —— 那时我方根本不从坐标反读顺反。现在读了,实测 0。
+MAX_EZ_ONLY = 0
+
+# 参照侧**认得出顺反**的分子条数下限。
+#
+# `MAX_EZ_ONLY = 0` 单看是个空断言:参照侧一根顺反都没有的话,这一档永远是 0,
+# 而判据会照常打印"逐条一致"。实测 366 条 —— 贴着现值留了余量。
+MIN_EZ_MOLECULES = 300
 
 # **四面体也不一样**的条数上限。
 #
@@ -144,7 +155,7 @@ def compare(blocks_path, ours_path, min_checked):
         ours[lineno] = got
 
     same = diff = unreadable = skipped = with_stereo = v3000 = 0
-    ez_only = chiral_diff = 0
+    ez_only = chiral_diff = with_ez = 0
     failures = []
     for lineno, smi, block in blocks(blocks_path):
         got = ours.get(lineno)
@@ -168,6 +179,14 @@ def compare(blocks_path, ours_path, min_checked):
             continue
         if any(a.GetChiralTag() != Chem.ChiralType.CHI_UNSPECIFIED for a in ref.GetAtoms()):
             with_stereo += 1
+        # **`STEREOANY` 不算。** 交叉双键(键块第四列 `3`)在参照侧读成
+        # `STEREOANY` —— 那是"作者说不知道",两侧都不该有构型。把它算进来的话,
+        # 只含交叉双键的分子会把下限撑起来,而顺反那一档照样是空的。
+        if any(
+            b.GetStereo() not in (Chem.BondStereo.STEREONONE, Chem.BondStereo.STEREOANY)
+            for b in ref.GetBonds()
+        ):
+            with_ez += 1
         raw = Chem.MolToSmiles(ref)
         want = canon(raw, drop_stereo=False)
         mine = canon(got, drop_stereo=False)
@@ -177,8 +196,11 @@ def compare(blocks_path, ours_path, min_checked):
         elif mine == want:
             same += 1
         elif no_ez(got) == no_ez(raw):
-            # 只差双键顺反 —— 我方还没读那一档
+            # 只差双键顺反 —— 少读、多读、读反,三种都在这里
             ez_only += 1
+            failures.append(
+                f"第 {lineno} 行 {smi}:骨架对、顺反不同 —— 我方 {mine},外部 {want}"
+            )
         elif canon(got, drop_stereo=True) == canon(raw, drop_stereo=True):
             # 骨架一样,四面体也不同 —— 桥环那一档
             chiral_diff += 1
@@ -193,8 +215,9 @@ def compare(blocks_path, ours_path, min_checked):
           f"外部实现自己读不了 {skipped}")
     print(f"  外部实现写成了 V3000、我方明确拒收的 {v3000} 条(上限 {MAX_V3000})")
     print(f"  只差双键顺反 {ez_only} 条(上限 {MAX_EZ_ONLY});"
-          f"四面体也不同 {chiral_diff} 条(上限 {MAX_CHIRAL_DIFF});"
-          f"外部实现认为带立体的 {with_stereo} 条")
+          f"四面体也不同 {chiral_diff} 条(上限 {MAX_CHIRAL_DIFF})")
+    print(f"  参照侧带四面体的 {with_stereo} 条;带顺反的 {with_ez} 条"
+          f"(下限 {MIN_EZ_MOLECULES})")
     if failures:
         for f in failures[:8]:
             print(f"  ✗ {f}")
@@ -211,6 +234,10 @@ def compare(blocks_path, ours_path, min_checked):
     if v3000 > MAX_V3000:
         print(f"\nV3000 那一档涨到 {v3000} 条,超过上限 {MAX_V3000} —— "
               "要么语料变了,要么该把 V3000 也读起来了")
+        return 1
+    if with_ez < MIN_EZ_MOLECULES:
+        print(f"\n参照侧只有 {with_ez} 条带顺反,低于下限 {MIN_EZ_MOLECULES} —— "
+              "顺反那一档被喂空了,它的零分歧说明不了任何事")
         return 1
     if same < min_checked:
         print(f"\n只比过 {same} 条,低于下限 {min_checked} —— 判据被喂空了")

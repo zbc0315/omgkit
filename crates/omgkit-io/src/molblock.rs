@@ -294,9 +294,11 @@ impl core::fmt::Display for ReadError {
 
 /// 读出来的东西。
 ///
-/// **立体化学不在 `mol` 里。** 二维图的立体靠 [`wedges`](Self::wedges),三维的
-/// 靠 [`coords`](Self::coords) —— 两者都要在更上一层赋值(赋值要用对称等价类,
-/// 那在 L1 之上)。这里把两样都如实交出来,而不是悄悄给一个没有立体的分子。
+/// **立体化学不在 `mol` 里。** 二维图的手性靠 [`wedges`](Self::wedges)、顺反靠
+/// [`coords`](Self::coords),三维的两样都靠坐标;哪根键**明说不知道**则记在
+/// [`unknown_stereo`](Self::unknown_stereo) 里。三样都要在净化之后才赋得上
+/// (要用对称等价类与隐式氢数)。这里把它们如实交出来,而不是悄悄给一个
+/// 没有立体的分子。
 #[derive(Debug, Clone)]
 pub struct Molblock {
     /// 第一行的标题。
@@ -307,6 +309,18 @@ pub struct Molblock {
     pub coords: Vec<[f64; 3]>,
     /// 逐键的楔形。
     pub wedges: Vec<BondWedge>,
+    /// 逐键:文件**明说这根键的立体未知**吗。
+    ///
+    /// 键块第四列的交叉双键(`3`,"顺反都有可能")与波浪单键(`4`)。两者都不是
+    /// "没写立体",是**写明了不知道** —— 而坐标照样画得出一个确定的样子。
+    /// 不把这一位交出去,上一层从坐标反读时会把"作者说不知道"改写成
+    /// "作者说是顺式"。
+    ///
+    /// **眼下只有顺反那一侧用它**([`crate::stereo::assign_bond_stereo_2d`])。
+    /// 手性那一侧([`crate::wedge::assign_chirality_2d`])还没接上:一个中心
+    /// 身上同时有实楔形和波浪键时,它照读不误,而外部实现会判"未知"。
+    /// 语料里一根波浪键都没有,所以这一档量不出来 —— 记在这里,不假装没有。
+    pub unknown_stereo: Vec<bool>,
     /// 坐标是不是三维的(有任何一个 `z` 不为 0)。
     ///
     /// 二维和三维的立体读法完全不同,而文件里没有哪个字段直说 —— 只能这么判,
@@ -410,6 +424,7 @@ pub fn read_v2000(text: &str) -> Result<Molblock, ReadError> {
     }
 
     let mut wedges = Vec::with_capacity(nb);
+    let mut unknown_stereo = Vec::with_capacity(nb);
     for k in 0..nb {
         let ln = 4 + na + k;
         let line = lines[ln];
@@ -444,6 +459,7 @@ pub fn read_v2000(text: &str) -> Result<Molblock, ReadError> {
             6 => Wedge::Down { narrow: a },
             _ => Wedge::None,
         });
+        unknown_stereo.push(matches!(stereo, 3 | 4));
     }
 
     // 属性块。**`M  CHG` / `M  ISO` 一出现,原子块里那两个旧字段整体作废** ——
@@ -518,6 +534,7 @@ pub fn read_v2000(text: &str) -> Result<Molblock, ReadError> {
         mol,
         coords,
         wedges,
+        unknown_stereo,
         is_3d,
     })
 }
