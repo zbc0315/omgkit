@@ -32,8 +32,8 @@
 //! 还说自己对的"分开 —— 两者不是一回事。
 //!
 //! 没有四面体中心的分子直接跳过。
-use omgkit_core::BondOrder;
 use omgkit_depict::{generate, render::drawn_orders, stereo::Wedge, style::Style};
+use omgkit_io::molblock::{write_v2000, BondWedge, Record};
 
 fn main() {
     let path = std::env::args()
@@ -74,57 +74,33 @@ fn main() {
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        println!();
-        println!("omgkit");
-        println!();
-        println!(
-            "{:>3}{:>3}  0  0  0  0  0  0  0  0999 V2000",
-            m.num_atoms(),
-            m.num_bonds()
-        );
-        for (i, a) in m.atoms().iter().enumerate() {
-            let p = d.coords[i];
-            let sym = omgkit_core::element::by_atomic_num(a.atomic_num).map_or("*", |e| e.symbol);
-            println!(
-                "{:>10.4}{:>10.4}{:>10.4} {sym:<3} 0  0  0  0  0  0  0  0  0  0  0  0",
-                p.x, p.y, 0.0
-            );
-        }
-        for (bi, b) in m.bonds().iter().enumerate() {
-            // **窄端必须写成键的第一个原子** —— molblock 的立体标记是这么定义的。
-            // 写反了,楔形描述的就是另一头那个原子的构型。
-            let (first, second, code) = match d.wedges[bi] {
-                Wedge::Up { narrow } => {
-                    let o = if narrow == b.begin { b.end } else { b.begin };
-                    (narrow, o, 1)
-                }
-                Wedge::Down { narrow } => {
-                    let o = if narrow == b.begin { b.end } else { b.begin };
-                    (narrow, o, 6)
-                }
-                Wedge::None => (b.begin, b.end, 0),
-            };
-            // 芳香键要按凯库勒式写 —— molblock 的 4 号键级各家读法不一
-            let ord = match orders[bi] {
-                BondOrder::Double => 2,
-                BondOrder::Triple => 3,
-                _ => 1,
-            };
-            println!(
-                "{:>3}{:>3}{ord:>3}{code:>3}  0  0  0",
-                first + 1,
-                second + 1
-            );
-        }
-        for (i, a) in m.atoms().iter().enumerate() {
-            if a.formal_charge != 0 {
-                println!("M  CHG  1{:>4}{:>4}", i + 1, a.formal_charge);
-            }
-            if a.isotope != 0 {
-                println!("M  ISO  1{:>4}{:>4}", i + 1, a.isotope);
+        // **格式化只有一份。** 计数行、原子块的价键字段、`M CHG`/`M ISO`/`M RAD`、
+        // "窄端必须是键的第一个原子"这条规则,全在 `omgkit_io::molblock` 里 ——
+        // 这里只负责把二维坐标与楔形翻过去。先前这个例子自己写了一份格式化,
+        // 而三维那条路要再写一份,两份必然分家。
+        let coords: Vec<[f64; 3]> = d.coords.iter().map(|p| [p.x, p.y, 0.0]).collect();
+        let wedges: Vec<BondWedge> = d
+            .wedges
+            .iter()
+            .map(|w| match *w {
+                Wedge::Up { narrow } => BondWedge::Up { narrow },
+                Wedge::Down { narrow } => BondWedge::Down { narrow },
+                Wedge::None => BondWedge::Plain,
+            })
+            .collect();
+        let rec = Record {
+            title: "",
+            coords: &coords,
+            wedges: &wedges,
+            orders: &orders,
+        };
+        match write_v2000(m, &rec) {
+            Ok(block) => print!("{block}"),
+            Err(e) => {
+                eprintln!("第 {lineno} 行 {smi} 写不出来:{e}");
+                continue;
             }
         }
-        println!("M  END");
         println!("$$$$");
     }
 }

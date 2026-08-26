@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 # 漏一处就是个不会报错的假数。CI 的头注释里记过同一个坑(那里原先写着
 # "四道闸门",而步骤早已加到八步)。这里由 `step` 计数,末尾自查:
 # 改了步骤忘了改 `TOTAL`,脚本最后一行会红。
-TOTAL=32
+TOTAL=33
 N=0
 step() {
     N=$((N + 1))
@@ -238,6 +238,19 @@ step "判官:规范化的自指不变量(不动点 + 幂等)"
 # 注意它有个盲区:分组看不见"给配体全局换个名字"。所以每一族里都放了几种
 # 写法(起笔位置、环的书写方向),把被换的那两个配体的角色拆开 —— 变异实测
 # 见 `harness/README.md`。
+# **写出的 molblock 交出去之后还是不是同一个分子。**
+#
+# `verify_stereo.py` 走的是 JSONL:原子表与坐标以数组交出去,判官在 Python 里
+# 自己拼一个 RDKit 分子 —— 那条路把**文件格式本身**整个绕开了。计数行、原子块的
+# 价键字段、`M CHG`/`M ISO`/`M RAD`、键块的字段宽度,全都没有人读过。
+#
+# 这一条走文件。接进来的当天就抓到一条:芳香键落进"其余按单键",噻吩写出去
+# 读回来是四氢噻吩,642 条里 448 条不符。写出器现在遇到芳香键直接报错,
+# 由调用方先凯库勒化。
+step "判官:写出的 molblock(外部实现从文件读回)"
+cargo run -q -p omgkit-conf --release --example dump_molblock3d -- harness/corpus/large.smi >"$WORK/blocks3d.sdf"
+"$PY" harness/check_molblock.py "$WORK/blocks3d.sdf"
+
 step "判官:配位几何的排列分组(与外部实现逐组比)"
 "$PY" harness/check_stereo_perm.py
 # 这一档**换 RDKit 版本会翻结论**:2022.09.5 与 2025.09.2 对同一批查询给出相反

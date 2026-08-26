@@ -382,6 +382,36 @@ class ConformerTests(unittest.TestCase):
         orders = {o for _, _, o in conf.mol.bonds}
         self.assertTrue(orders <= {1.0, 1.5, 2.0, 3.0, 4.0, 0.0}, orders)
 
+    def test_molblock_is_written_and_is_deterministic(self):
+        """写出的 molblock 要能读、要每次相同(第二行不许写时间戳)。"""
+        smi = "C[C@H](N)c1ccc(O)cc1"
+        a = omgkit.parse_smiles(smi).conformer().to_molblock(title=smi)
+        b = omgkit.parse_smiles(smi).conformer().to_molblock(title=smi)
+        self.assertEqual(a, b, "两次写出不同 —— 多半是写了时间戳")
+        lines = a.splitlines()
+        self.assertEqual(lines[0], smi, "第一行是标题")
+        self.assertRegex(lines[3], r"^ *\d+ *\d+ .*V2000$", "第四行是计数行")
+        self.assertTrue(a.rstrip().endswith("M  END"))
+        # 计数行报的原子数要与真实原子数一致 —— 挤出格的计数行别人读进去是
+        # 另一个分子
+        conf = omgkit.parse_smiles(smi).conformer()
+        self.assertEqual(int(lines[3][:3]), conf.mol.num_atoms)
+        self.assertEqual(int(lines[3][3:6]), conf.mol.num_bonds)
+
+    def test_molblock_has_no_aromatic_bond_code(self):
+        """molblock 里没有"芳香键"这回事 —— 写出前必须凯库勒化。
+
+        4 号键级各家读法不一,而按单键写更糟:噻吩读回来会成四氢噻吩,
+        而且一声不响。这条判据钉的就是那次实测(642 条里 448 条不符)。
+        """
+        blk = omgkit.parse_smiles("c1ccsc1").conformer().to_molblock()
+        counts = blk.splitlines()[3]
+        n_atoms, n_bonds = int(counts[:3]), int(counts[3:6])
+        bond_lines = blk.splitlines()[4 + n_atoms : 4 + n_atoms + n_bonds]
+        orders = [int(ln[6:9]) for ln in bond_lines]
+        self.assertNotIn(4, orders, "写出了 4 号(芳香)键级")
+        self.assertIn(2, orders, "凯库勒化之后该有双键")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

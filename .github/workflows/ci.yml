@@ -270,6 +270,14 @@ jobs:
       # (72 / 2400 / 21600 种写法),进了源码之后就没有任何东西再核对它 ——
       # 这一条把"量"这件事本身放进 CI。比的是**分组**(哪些写法落到同一个分子)
       # 而不是字符串:两个实现的规范串本来就不一样,该一致的是谁和谁同分子。
+      # 写出的 molblock 交出去之后还是不是同一个分子。JSONL 那条判据把文件格式
+      # 整个绕开了(判官自己拼 RDKit 分子);这一条走文件,读的正是计数行、
+      # 原子块的价键字段、M CHG/M ISO/M RAD、键块的字段宽度。
+      - name: 判官:写出的 molblock(外部实现从文件读回)
+        run: |
+          cargo run -q -p omgkit-conf --release --example dump_molblock3d -- harness/corpus/large.smi > "$RUNNER_TEMP/blocks3d.sdf"
+          python harness/check_molblock.py "$RUNNER_TEMP/blocks3d.sdf"
+
       - name: 判官:配位几何的排列分组(与外部实现逐组比)
         run: python harness/check_stereo_perm.py
 

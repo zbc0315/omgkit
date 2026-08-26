@@ -238,6 +238,39 @@ impl PyConformer {
         self.conf.chiral_ok
     }
 
+    /// 写成 V2000 molblock(`.mol` 文件的内容),末尾带 `M  END`。
+    ///
+    /// 拼 `.sdf` 时每条后面接数据字段和 `$$$$`:
+    ///
+    /// ```python
+    /// with open("out.sdf", "w") as f:
+    ///     for smi in smiles_list:
+    ///         conf = omgkit.parse_smiles(smi).conformer()
+    ///         f.write(conf.to_molblock(title=smi))
+    ///         f.write("$$$$\n")
+    /// ```
+    ///
+    /// **芳香键会先凯库勒化** —— molblock 里没有"芳香键"这回事,留着它写出去
+    /// 要么歧义、要么被读成饱和环。凯库勒化失败(比如芳香体系里有通配原子)时
+    /// 抛 `ValueError`,不写一个读回来是另一个分子的文件。
+    ///
+    /// 第二行写的是程序名,**不写时间戳** —— 同一个分子每次写出都逐字节相同。
+    #[pyo3(signature = (title = ""))]
+    fn to_molblock(&self, title: &str) -> PyResult<String> {
+        let mut kek = self.mol.inner.clone();
+        omgkit_chem::kekulize(&mut kek)
+            .map_err(|e| PyValueError::new_err(format!("凯库勒化失败:{e}")))?;
+        let orders: Vec<_> = kek.bonds().iter().map(|b| b.order).collect();
+        let rec = omgkit_io::molblock::Record {
+            title,
+            coords: &self.conf.coords,
+            wedges: &[],
+            orders: &orders,
+        };
+        omgkit_io::molblock::write_v2000(&self.mol.inner, &rec)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "<omgkit.Conformer atoms={} energy={:.3e} converged={} chiral={}/{}>",

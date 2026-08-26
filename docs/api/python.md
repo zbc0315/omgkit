@@ -52,6 +52,25 @@ configure; the same molecule always comes back with the same coordinates.
 distance bounds contradict each other (about 1 molecule in 8831 on a drug-like
 corpus). The message says which.
 
+### Saving it
+
+[`Conformer.to_molblock()`](#omgkit.Conformer.to_molblock) gives you the
+contents of a `.mol` file. An `.sdf` is those records separated by `$$$$`:
+
+```python
+with open("out.sdf", "w") as f:
+    for smi in ["CCO", "C[C@H](N)C(=O)O"]:
+        conf = omgkit.parse_smiles(smi).conformer()
+        f.write(conf.to_molblock(title=smi))
+        f.write("$$$$\n")
+```
+
+Aromatic bonds are kekulized on the way out — a molblock has no aromatic bond
+type, and writing one as a single bond would turn thiophene into
+tetrahydrothiophene without saying so. The second line of the block is the
+program name with **no timestamp**, so writing the same molecule twice gives
+byte-identical output.
+
 ## Errors
 
 Every parse function raises `ValueError` on malformed input.

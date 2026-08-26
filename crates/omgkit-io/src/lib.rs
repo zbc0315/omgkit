@@ -25,6 +25,7 @@
 
 pub mod canon;
 pub mod error;
+pub mod molblock;
 pub mod smarts;
 pub mod smiles;
 pub mod stereo;
