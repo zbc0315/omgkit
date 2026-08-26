@@ -832,12 +832,49 @@ fn noise_direction_bonds_are_dropped() {
     }
 }
 
-/// 丙二烯轴手性(`@AL`)**尚未写出**。
+/// **写出器认得哪些立体信息 —— 这张表是唯一的答案。**
 ///
-/// 这条断言把"尚未实现"钉成显式事实 —— 免得将来实现了却没人发现输出里
-/// 其实一直没有这些信息。`@SP`/`@TB`/`@OH` 先前也在这张名单上,现在都写得出来了,
-/// 见 [`coordination_stereo_round_trips`]。
+/// 立这张表是因为同一件事栽过三次:某一类立体做完了,而别处的注释还写着
+/// "尚未写出"。散文复述能力,就会有复述与事实分家的那一天
+/// (实测:`write.rs` 的 `write()` 文档在配位几何做完两块之后还写着"配位几何
+/// 尚未";`roundtrip_smiles.rs` 里"`@AL` 尚未写出"那段一直压在"`@AL` 写得出来"
+/// 上面)。所以别处的文档只**指向这里**,不再自己复述。
 ///
+/// 每一行要么给出必须出现的标记,要么是 `None` —— 后者表示"这个标记表达不
+/// 出来,应当整个丢掉",各自钉在下面点名的那条判据里。
+#[test]
+fn writer_writes_every_stereo_class() {
+    for (name, smi, marker) in [
+        ("四面体(`@` / `@@`)", "N[C@H](O)F", Some("@")),
+        ("四面体(`@TH1`)", "N[C@TH1H](O)F", Some("@")),
+        ("双键顺反(方向键)", "F/C=C/F", Some("/")),
+        ("平面四方(`@SP`)", "[Pt@SP1](Cl)(Br)(N)P", Some("@SP")),
+        ("三角双锥(`@TB`)", "[P@TB1](F)(Cl)(Br)(I)S", Some("@TB")),
+        ("八面体(`@OH`)", "[Co@OH1](F)(Cl)(Br)(I)(S)P", Some("@OH")),
+        ("配位几何缺一个顶点", "[Pt@SP1](Cl)(Br)N", Some("@SP")),
+        ("丙二烯(`@AL`)", "NC(Br)=[C@AL1]=C(O)F", Some("@AL")),
+        ("丙二烯(写成中心上的 `@`)", "NC(Br)=[C@]=C(O)F", Some("@AL")),
+        // 以下几档**表达不出来**,写出整个丢掉。丢掉是老实的。
+        ("配位几何缺两个顶点", "[Pt@SP1](N)O", None),
+        ("`@AL` 不在丙二烯中心上", "N[C@AL1]=C=C(O)F", None),
+        ("更长的累积双键", "NC(Br)=C=[C@AL1]=C=C(O)F", None),
+    ] {
+        let m = smiles::parse(smi).unwrap_or_else(|e| panic!("{smi}: {}", e.render()));
+        let w = smiles::write(&m).smiles;
+        match marker {
+            Some("/") => assert!(
+                w.contains('/') || w.contains('\\'),
+                "{name}:{smi} 写成了 {w},方向键没了"
+            ),
+            Some(mark) => assert!(w.contains(mark), "{name}:{smi} 写成了 {w},没有 {mark}"),
+            None => assert!(
+                !w.contains('@') && !w.contains('/') && !w.contains('\\'),
+                "{name}:{smi} 写成了 {w} —— 这一档表达不出来,应当整个丢掉"
+            ),
+        }
+    }
+}
+
 /// 丙二烯型轴手性(`@AL`)写得出来,而且**往返之后还是同一个分子**。
 ///
 /// 它与配位几何不是一回事:立体信息属于**一根轴**,四个配体来自累积双键

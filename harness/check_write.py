@@ -50,24 +50,16 @@ PARAMS = Chem.SmilesParserParams()
 PARAMS.removeHs = False
 
 
-# 尚未写出的两类立体信息。差别**仅限于**其中之一时不算失败,而是分桶计数:
-# 它们是已登记的缺口,不是结构错误。做完之后用 --strict 收紧。
-NOT_YET_WRITTEN = {
-    "双键立体": lambda m: [
-        (b.SetStereo(Chem.BondStereo.STEREONONE), b.SetBondDir(Chem.BondDir.NONE))
-        for b in m.GetBonds()
-    ],
-    "配位几何立体": lambda m: [
-        a.SetChiralTag(Chem.ChiralType.CHI_UNSPECIFIED)
-        for a in m.GetAtoms()
-        if a.GetChiralTag()
-        in (
-            Chem.ChiralType.CHI_SQUAREPLANAR,
-            Chem.ChiralType.CHI_TRIGONALBIPYRAMIDAL,
-            Chem.ChiralType.CHI_OCTAHEDRAL,
-        )
-    ],
-}
+# 尚未写出的立体类别 —— **现在一个都没有,所以这里是空的。**
+#
+# 差别仅限于名单里某一类时不算失败,而是分桶计数(已登记的缺口,不是结构错误)。
+# 先前这里登记着"双键立体"与"配位几何立体"两项;两者都写得出来之后名单清空,
+# 于是加不加 `--strict` 是一回事。
+#
+# **名单留着,但它只能往绿的方向拨,所以必须配一道闸。** 那道闸就是
+# `--strict`:`harness/gates.sh` 与 CI 的三处调用全都带着它,往名单里加一项
+# 换不来绿。真要登记新的一类,先把闸摘掉才行 —— 那是个显式动作,看得见。
+NOT_YET_WRITTEN = {}
 
 
 #: 语料里允许有几行**没真正被比对到**。

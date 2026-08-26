@@ -101,7 +101,8 @@ pub enum WriteStyle {
 
 /// 按原子存储顺序写出 SMILES。
 ///
-/// 四面体手性与双键方向键会写出;配位几何尚未 —— 见 [`write_with_priority`]。
+/// 立体信息会写出。**能写哪些不在这里复述** —— 唯一的答案是
+/// `tests/roundtrip_smiles.rs` 里的 `writer_writes_every_stereo_class`。
 #[must_use]
 pub fn write(mol: &MolBuilder) -> Written {
     let priority: Vec<u32> = (0..mol.num_atoms() as u32).collect();
@@ -412,10 +413,11 @@ fn emit(mol: &MolBuilder, dfs: &Dfs, style: WriteStyle) -> Written {
 /// 关键在于 `p'` 用的是**当前分子**的存储序,而不是重新解析之后的存储序 ——
 /// 后者未知,但两处的差值恰好与 `p'` 相消。
 ///
-/// # 只处理四面体
+/// # 三条路
 ///
-/// 配位几何(`@SP`/`@TB`/`@OH`)的排列序号换参照系要走查找表,属于 L6;
-/// 在那之前它们不写出。丙二烯的轴手性同理。
+/// 配位几何(`@SP`/`@TB`/`@OH`)的排列序号按该多面体的转动群换参照系,
+/// 丙二烯轴手性按两端四个配体的宇称换 —— 两条都在函数开头先岔出去,
+/// 只有四面体走下面这段"数一次对换就翻转"的路。
 fn output_chiral_tag(
     mol: &MolBuilder,
     atom: u32,
