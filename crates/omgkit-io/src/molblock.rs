@@ -328,7 +328,7 @@ pub struct Molblock {
     /// "作者说是顺式"。
     ///
     /// **眼下只有顺反那一侧用它**([`crate::stereo::assign_bond_stereo_2d`])。
-    /// 手性那一侧([`crate::wedge::assign_chirality_2d`])还没接上:一个中心
+    /// 手性那一侧([`crate::stereo::assign_chirality_2d`])还没接上:一个中心
     /// 身上同时有实楔形和波浪键时,它照读不误,而外部实现会判"未知"。
     /// 语料里一根波浪键都没有,所以这一档量不出来 —— 记在这里,不假装没有。
     pub unknown_stereo: Vec<bool>,

@@ -361,11 +361,10 @@ impl PyMolblock {
 /// 把顺反感知并进来是同一个理由:绑定层是给人直接用的,把必须成对的两步拆开
 /// 就是个陷阱。
 ///
-/// # 三维文件眼下不读立体
+/// # 二维三维都读立体
 ///
-/// 三维的立体在坐标本身里,是另一条路,还没做。`is_3d` 为真时交回来的分子
-/// **没有任何立体标记** —— 不是"这个分子没有立体",是"这一档还没实现"。
-/// 二维那条路(楔形定手性、坐标定顺反)是通的。
+/// 二维靠楔形定手性、靠平面投影定顺反;三维靠有符号体积定手性、靠二面角定顺反。
+/// 走哪条由坐标自己说了算(有任何一个 `z` 不为零就是三维),调用方不必分。
 /// 读出来之后的那两步:净化,然后回来打立体标记。**只有这一处**。
 ///
 /// 单条(`parse_molblock`)与整份 SDF(`read_sdf`)都走它。两处各写一遍的话,
@@ -376,8 +375,13 @@ fn finish(got: omgkit_io::molblock::Molblock) -> Result<PyMolblock, String> {
     // 净化**之后**才打得上:手性要知道中心有几个隐式氢,顺反要用对称等价类。
     // 两个函数自己认出三维就整个不做,绑定这一层不加判断 —— 加了的话,
     // "什么时候读得出立体"就有了两个住处。
-    let _ = omgkit_io::wedge::assign_chirality_2d(&mut mol, &got.coords, &got.wedges);
+    let _ = omgkit_io::stereo::assign_chirality_2d(&mut mol, &got.coords, &got.wedges);
     let _ = omgkit_io::stereo::assign_bond_stereo_2d(&mut mol, &got.coords, &got.unknown_stereo);
+    // 三维那两个。四个 `assign_*` 各自认出维数,不合的那一对返回 0 ——
+    // 由它们自己判、而不是在这里 `if is_3d`,是为了让"什么时候读得出立体"
+    // 只有一个住处。
+    let _ = omgkit_io::stereo::assign_chirality_3d(&mut mol, &got.coords);
+    let _ = omgkit_io::stereo::assign_bond_stereo_3d(&mut mol, &got.coords, &got.unknown_stereo);
     Ok(PyMolblock {
         mol: PyMol { inner: mol },
         coords: got.coords,

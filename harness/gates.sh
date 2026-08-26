@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 # 漏一处就是个不会报错的假数。CI 的头注释里记过同一个坑(那里原先写着
 # "四道闸门",而步骤早已加到八步)。这里由 `step` 计数,末尾自查:
 # 改了步骤忘了改 `TOTAL`,脚本最后一行会红。
-TOTAL=37
+TOTAL=38
 N=0
 step() {
     N=$((N + 1))
@@ -281,6 +281,18 @@ step "判官:读 SDF(多条记录、数据字段、坏记录不吞掉后面的)"
 "$PY" harness/check_sdf.py --write "$WORK/data.sdf" harness/corpus/large.smi
 cargo run -q -p omgkit-io --release --example read_sdf -- "$WORK/data.sdf" >"$WORK/sdf.txt"
 "$PY" harness/check_sdf.py --compare "$WORK/data.sdf" "$WORK/sdf.txt"
+
+# **读三维 molblock:立体全在坐标里。** 与上面二维那条是两条路 —— 那边手性靠
+# 楔形、顺反靠平面投影;这边手性靠有符号体积、顺反靠二面角,没有一行代码是共用的。
+#
+# 真值不是原始 SMILES:嵌出来的构象可能与原串的立体不符,拿原串当真值等于把
+# 嵌入的毛病算到读取头上。所以真值是"外部实现自己从这份坐标读出来的东西"。
+#
+# 变异实测:号翻过来、三维不认交叉双键(555 条红)、兄弟方向键不反号(18 条)。
+step "判官:读三维 molblock(立体从坐标反读)"
+"$PY" harness/check_molblock3d_read.py --write "$WORK/data3d.sdf" harness/corpus/large.smi
+cargo run -q -p omgkit-io --release --example read_sdf -- "$WORK/data3d.sdf" >"$WORK/sdf3d.txt"
+"$PY" harness/check_molblock3d_read.py --compare "$WORK/data3d.sdf" "$WORK/sdf3d.txt"
 
 step "判官:配位几何的排列分组(与外部实现逐组比)"
 "$PY" harness/check_stereo_perm.py

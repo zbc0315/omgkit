@@ -395,6 +395,51 @@ mod tests {
         );
     }
 
+    /// **写出去的号与读回来的标记必须是同一套。**
+    ///
+    /// 生成构型时 [`Center::sign`] 说"这个中心的中心基点体积该是正的";
+    /// 读三维文件时 `omgkit_io::stereo::assign_chirality_3d` 从同一个体积反推标记。
+    /// 两处各标定一次的话,自己生成的构型交给自己读回来会变成对映体 ——
+    /// 而两边各自都"自洽",谁也不报错。
+    ///
+    /// 这里拿一个真分子走完整条路:生成坐标 → 读回标记 → 与原标记比。
+    #[test]
+    fn 写出去的号与读回来的标记是同一套() {
+        use omgkit_core::ChiralTag;
+
+        for smi in [
+            "C[C@H](N)O",
+            "C[C@@H](N)O",
+            "N[C@@H](C)C(=O)O",
+            "O[C@H]1CC[C@@H](N)CC1",
+        ] {
+            // `conformer_for` 就地补显式氢,所以原标记要在它**之后**取 ——
+            // 那时 `mol` 的原子表才与 `conf.coords` 对得上。
+            let mut mol = omgkit_io::smiles::parse(smi).expect("解析");
+            let conf = crate::pipeline::conformer_for(&mut mol).expect("生成构型");
+            let want: Vec<ChiralTag> = mol.atoms().iter().map(|a| a.chiral_tag).collect();
+
+            let mut read = mol.clone();
+            for a in 0..u32::try_from(read.num_atoms()).expect("原子数") {
+                if let Some(at) = read.atom_mut(a) {
+                    at.chiral_tag = ChiralTag::Unspecified;
+                }
+            }
+            let n = omgkit_io::stereo::assign_chirality_3d(&mut read, &conf.coords);
+            assert!(n > 0, "{smi}:一个中心都没读出来");
+            for (i, w) in want.iter().enumerate() {
+                if matches!(w, ChiralTag::Cw | ChiralTag::Ccw) {
+                    assert_eq!(
+                        read.atoms()[i].chiral_tag,
+                        *w,
+                        "{smi}:第 {i} 个原子写出去是 {w:?},读回来是 {:?} —— 两处约定对不上",
+                        read.atoms()[i].chiral_tag
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn 镜像把每个体积都变号() {
         let t = reference_tetrahedron();

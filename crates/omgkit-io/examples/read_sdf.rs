@@ -28,12 +28,21 @@ fn main() {
                     Err(e) => format!("<净化不了:{e}>"),
                     Ok(()) => {
                         // 与 `read_molblock` 同一条顺序:净化之后才打立体标记。
-                        let _ = omgkit_io::wedge::assign_chirality_2d(
+                        let _ = omgkit_io::stereo::assign_chirality_2d(
                             &mut m,
                             &rec.block.coords,
                             &rec.block.wedges,
                         );
                         let _ = omgkit_io::stereo::assign_bond_stereo_2d(
+                            &mut m,
+                            &rec.block.coords,
+                            &rec.block.unknown_stereo,
+                        );
+                        // 三维那两个:四个 `assign_*` 各自认出维数,不合的那一对返回 0。
+                        // 由它们自己判、而不是在这里 `if is_3d`,是为了让"什么时候读得出立体"
+                        // 只有一个住处。
+                        let _ = omgkit_io::stereo::assign_chirality_3d(&mut m, &rec.block.coords);
+                        let _ = omgkit_io::stereo::assign_bond_stereo_3d(
                             &mut m,
                             &rec.block.coords,
                             &rec.block.unknown_stereo,

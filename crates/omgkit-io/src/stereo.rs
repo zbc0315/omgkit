@@ -53,7 +53,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use omgkit_core::{BondData, BondDirection, BondFlags, BondOrder, BondStereo, MolBuilder};
+use omgkit_core::{
+    BondData, BondDirection, BondFlags, BondOrder, BondStereo, ChiralTag, MolBuilder,
+};
+
+use crate::wedge::Wedge;
 
 use crate::canon::symmetry_classes;
 
@@ -341,7 +345,7 @@ fn end_is_stereogenic(mol: &MolBuilder, end: u32, other: u32, classes: &[u32]) -
 ///
 /// 参照可以经由**非单键**到达:双键挂在芳香环外时(`[H]/N=c/1\\nc[nH]s1`),
 /// 担这个角色的是那两条芳香环键。只排除双键 —— `C=C=C` 那种累积双键的
-/// "另一侧"本身又是一根双键,它定的是轴手性([`ChiralTag::Allene`](omgkit_core::ChiralTag::Allene)),
+/// "另一侧"本身又是一根双键,它定的是轴手性([`ChiralTag::Allene`]),
 /// 不是顺反。
 ///
 /// # 为什么这条筛选只能有一处
@@ -484,6 +488,193 @@ fn outward_direction(
         })
 }
 
+/// 按楔形给分子里每个读得出构型的中心打上手性标记,返回打了几个。
+///
+/// # 必须在**净化之后**调
+///
+/// 判一个中心要先知道它有几个氢([`crate::wedge::chirality_from_wedges`] 的 `(3, 1)` 那一支
+/// 就是"三根键 + 一个隐式氢"),而隐式氢数是净化算出来的。刚从文件读出来的
+/// 分子那一栏还是 0 —— 那时调这个函数,带隐式氢的中心会被整档漏掉,
+/// 而且一声不响。
+///
+/// 顺序因此是:**读文件(L1)→ 净化(L2)→ 回来打标记(L1)**。跨层来回一趟
+/// 看着别扭,但把净化搬进 L1 是更坏的选择,而把这一步搬进 L2 会让"楔形怎么读"
+/// 有两个住处。
+///
+/// # 只管二维
+///
+/// 三维 molblock 的立体在**坐标本身**里,楔形一般是空的 —— 那一档这里一个也
+/// 打不出来,得另走一条路。名字里带 `_2d` 就是为了不让人误以为它两种都管。
+///
+/// # 认出三维就整个不做
+///
+/// "楔形一般是空的"只是**一般**。三维文件里偶尔留着楔形字段,那时
+/// [`crate::wedge::chirality_from_wedges`] 会把 z 一丢、按 xy 投影算体积 —— 算得出一个答案,
+/// 而那个答案与分子无关。空答案可以接受,错答案不行,所以任何一个 `z` 不为零
+/// 就返回 0。这与顺反那一侧
+/// ([`crate::stereo::assign_bond_stereo_2d`])是同一条线。
+#[must_use]
+pub fn assign_chirality_2d(mol: &mut MolBuilder, coords: &[[f64; 3]], wedges: &[Wedge]) -> usize {
+    if coords.iter().any(|p| p[2].abs() > FLAT_TOL) {
+        return 0;
+    }
+    let mut n = 0;
+    for a in 0..u32::try_from(mol.num_atoms()).unwrap_or(0) {
+        let Some(tag) = crate::wedge::chirality_from_wedges(mol, coords, wedges, a) else {
+            continue;
+        };
+        if let Some(at) = mol.atom_mut(a) {
+            at.chiral_tag = tag;
+            n += 1;
+        }
+    }
+    n
+}
+
+/// 从**三维坐标**给每个四面体中心打上手性标记,返回打了几个。
+///
+/// 坐标是平的(所有 `z` 都是 0)时一个也不打 —— 那是二维图,走
+/// [`assign_chirality_2d`]。四个 `assign_*` 都按这条线分工。
+///
+/// # 号的约定:**以中心原子为基点**,正是 `@`(逆时针)
+///
+/// 体积取 `det[l₀−c, l₁−c, l₂−c]`,三个配体按**存储顺序**的前三个。
+/// 这与 `omgkit_conf::chiral::center_volume` 是同一个量、同一个号 ——
+/// 那边把它标定过:`@` 对应正、`@@` 对应负,真实构象上 127/127 与 120/120。
+/// 两处的一致由 `omgkit-conf` 里的
+/// `the_center_volume_convention_agrees_with_reading_it_back` 钉住。
+///
+/// **不用四配体那个行列式**(`det[l₁−l₀, l₂−l₀, l₃−l₀]`,楔形那条路在用)。
+/// 它完全不看中心原子在哪:中心被挤到配体四面体外面(伞形翻转)时它一点不变,
+/// 而真实构型已经翻了。读真实三维结构必须用中心基点这个 —— RDKit 的
+/// `assignChiralTypesFrom3D` 同此。
+///
+/// # 三配位 + 隐式氢 / 孤对:用同样的三个点
+///
+/// 那一档的槽位约定是 `[n₀, 看不见的那个, n₁, n₂]`。把看不见的那个从槽位 1
+/// 挪到槽位 3 是个 3-轮换(**偶置换,号不变**),于是前三个槽位就是
+/// `n₀, n₁, n₂` —— 与四配位那一档同一个式子。看不见的配体在哪不必知道。
+///
+/// # 三个方向张不出体积就不打,而这把尺量的是**没归一化**的体积
+///
+/// 单位是 Å³。楔形那条路量的是**单位**方向的三重积(那边的坐标以键长为单位),
+/// 这条路不是:三维文件的坐标就是 Å,而外部实现的三维立体感知也按 Å³ 卡同一个
+/// `0.1`。两边用同一把尺才谈得上"别人读得回来" —— 换成归一化的话,几乎压平的
+/// 中心两边判得不一样。实测语料里正好有一个:亚砜的 S 嵌得几乎共面,
+/// 单位三重积 −0.061(我方会拒),原始体积 0.268(外部实现照读)。
+///
+/// 压平的中心是真实存在的,那时构型无从谈起,猜一个就是编。
+///
+/// # 只打**真手性中心**,而且分两趟打
+///
+/// 三维坐标给每个 sp3 原子都算得出一个号 —— 甲基、亚甲基一个不落。那些号不是
+/// 立体化学,是噪声,而且**有害**:[`genuine_tetrahedral`] 判"支路里有没有别的
+/// 中心"时会把噪声当成中心,于是叔丁基那种明摆着不是中心的原子被判成真中心
+/// (实测就撞上了)。
+///
+/// 可光按"邻居两两分得开"去筛又太狠:环上那种**两条支路组成相同、靠彼此才
+/// 成立**的中心会被一起筛掉(4-取代环己烷上那一对)。实测这么筛,语料的分歧
+/// 从 17 条涨到 85 条。
+///
+/// 所以按 [`genuine_tetrahedral`] 那条规矩来,只是**从上往下削**而不是从下往上补:
+///
+/// 1. 几何算得出号的原子先全当候选;
+/// 2. 反复剔掉"有一对等价邻居、而那两条支路里没有别的候选"的;
+/// 3. 削到不再变为止。
+///
+/// 从下往上补是行不通的:环上那种**两个中心互相依赖**的(1,4-二取代环己烷
+/// 那一对)谁也当不了种子,补法一个都补不出来 —— 实测那样分歧从 17 涨到 47。
+/// 从上往下削则天然处理它:两个互为对方支路里的候选,谁也削不掉。
+///
+/// 削法对噪声同样有效,而且是逐层的:甲基先掉(两条支路是死路),叔丁基跟着掉
+/// (它的等价支路里只剩已经掉了的甲基)。
+#[must_use]
+pub fn assign_chirality_3d(mol: &mut MolBuilder, coords: &[[f64; 3]]) -> usize {
+    if !coords.iter().any(|p| p[2].abs() > FLAT_TOL) {
+        return 0;
+    }
+    let classes = symmetry_classes(mol);
+    let na = u32::try_from(mol.num_atoms()).unwrap_or(0);
+    // 几何先算好:哪些原子的坐标定得出一个号。是不是真中心是另一回事。
+    let from_geometry: Vec<Option<ChiralTag>> = (0..na)
+        .map(|a| chirality_from_coords(mol, coords, a))
+        .collect();
+
+    let mut tagged: Vec<bool> = from_geometry.iter().map(Option::is_some).collect();
+    // 只有"有一对等价邻居"的才可能被削掉,其余无条件成立 —— 先挑出来,
+    // 免得每一轮都把全部原子重算一遍等价对。
+    let mut shaky: Vec<(u32, u32, u32)> = (0..na)
+        .filter(|&a| tagged[a as usize])
+        .filter_map(|a| equivalent_neighbour_pair(mol, a, &classes).map(|(x, y)| (a, x, y)))
+        .collect();
+    loop {
+        let before = shaky.len();
+        let mut doomed = Vec::new();
+        shaky.retain(|&(a, x, y)| {
+            if branch_has_other_stereocentre(mol, a, x, y, &tagged) {
+                true
+            } else {
+                doomed.push(a);
+                false
+            }
+        });
+        for a in doomed {
+            tagged[a as usize] = false;
+        }
+        if shaky.len() == before {
+            break;
+        }
+    }
+
+    let mut n = 0;
+    for a in 0..na {
+        if !tagged[a as usize] {
+            continue;
+        }
+        let Some(tag) = from_geometry[a as usize] else {
+            continue;
+        };
+        if let Some(at) = mol.atom_mut(a) {
+            at.chiral_tag = tag;
+            n += 1;
+        }
+    }
+    n
+}
+
+/// 一个中心在三维坐标上的构型。判不出来返回 `None`。
+fn chirality_from_coords(mol: &MolBuilder, coords: &[[f64; 3]], a: u32) -> Option<ChiralTag> {
+    let nbrs: Vec<u32> = mol.neighbors(a).map(|(n, _)| n).collect();
+    let hs = crate::wedge::total_hs(mol, a);
+    // 与楔形那条路同一套资格判断:四根键、或三根键 + 一个看不见的第四配体
+    // (隐式氢,或亚砜/膦上那对孤对)。
+    match (nbrs.len(), hs) {
+        (4, 0) => {}
+        (3, 1) => {}
+        (3, 0) if crate::wedge::has_lone_pair(mol, a) => {}
+        _ => return None,
+    }
+
+    let c = *coords.get(a as usize)?;
+    let mut dirs = [[0.0_f64; 3]; 3];
+    for (k, d) in dirs.iter_mut().enumerate() {
+        let p = *coords.get(*nbrs.get(k)? as usize)?;
+        // **不归一化** —— 见 `assign_chirality_3d` 里那把尺的理由。
+        *d = [p[0] - c[0], p[1] - c[1], p[2] - c[2]];
+    }
+    let (u, v, w) = (dirs[0], dirs[1], dirs[2]);
+    let vol = u[0] * (v[1] * w[2] - v[2] * w[1]) - u[1] * (v[0] * w[2] - v[2] * w[0])
+        + u[2] * (v[0] * w[1] - v[1] * w[0]);
+    if vol.abs() <= crate::wedge::ZERO_VOLUME_TOL {
+        return None;
+    }
+    Some(if vol > 0.0 {
+        ChiralTag::Ccw
+    } else {
+        ChiralTag::Cw
+    })
+}
+
 /// 参照原子落在双键轴上多近就算"读不出来"。单位是坐标单位的平方(叉积)。
 ///
 /// 卡在纯粹的退化上:二维图里参照原子共线是布局病态,不是化学。留一条窄缝
@@ -525,14 +716,17 @@ pub fn cis_trans_from_points(
     })
 }
 
-/// 从二维坐标反读一根双键的顺反,连同挑中的参照原子一起给出。
-fn cis_trans_at(
+/// 这根双键是不是立体源,是的话两侧各挑一个参照原子。
+///
+/// **只管资格与参照,不碰几何** —— 二维那条路(投影同侧/异侧)与三维那条路
+/// (二面角)接在它后面。资格判断各写一遍的话,同一根键会在一种坐标下算立体源、
+/// 另一种下不算,而那种差别不报错。
+fn stereo_candidate(
     mol: &MolBuilder,
-    coords: &[[f64; 3]],
     unknown: &[bool],
     di: u32,
     classes: &[u32],
-) -> Option<(BondStereo, [u32; 2])> {
+) -> Option<[u32; 2]> {
     let db = *mol.bonds().get(di as usize)?;
     if db.order != BondOrder::Double || db.flags.contains(BondFlags::AROMATIC) {
         return None;
@@ -561,11 +755,6 @@ fn cis_trans_at(
     if unsure(di) {
         return None;
     }
-
-    let xy = |a: u32| -> Option<[f64; 2]> {
-        let p = coords.get(a as usize)?;
-        Some([p[0], p[1]])
-    };
     // 参照按存储序挑第一个合格邻居。挑哪个不改变分子 —— 换一个参照只是换一套
     // 坐标系,顺反的值跟着挑中的那个一起变。
     let first = |end: u32, other: u32| {
@@ -574,9 +763,36 @@ fn cis_trans_at(
             .find(|&(_, bi)| !unsure(bi))
             .map(|(o, _)| o)
     };
-    let (ra, rb) = (first(db.begin, db.end)?, first(db.end, db.begin)?);
-    let stereo = cis_trans_from_points(xy(db.begin)?, xy(db.end)?, xy(ra)?, xy(rb)?)?;
-    Some((stereo, [ra, rb]))
+    Some([first(db.begin, db.end)?, first(db.end, db.begin)?])
+}
+
+/// 走一遍所有双键,把算得出来的顺反写进 `stereo` 与 `stereo_atoms`。
+///
+/// `geometry` 拿到 `(双键起点, 双键终点, begin 侧参照, end 侧参照)` 四个原子号,
+/// 给出顺/反或者"读不出来"。
+fn assign_bond_stereo(
+    mol: &mut MolBuilder,
+    unknown: &[bool],
+    geometry: impl Fn(u32, u32, u32, u32) -> Option<BondStereo>,
+) -> usize {
+    let classes = symmetry_classes(mol);
+    let found: Vec<(u32, BondStereo, [u32; 2])> = (0..mol.num_bonds())
+        .filter_map(|di| {
+            let di = u32::try_from(di).ok()?;
+            let [ra, rb] = stereo_candidate(mol, unknown, di, &classes)?;
+            let db = *mol.bonds().get(di as usize)?;
+            let stereo = geometry(db.begin, db.end, ra, rb)?;
+            Some((di, stereo, [ra, rb]))
+        })
+        .collect();
+    let n = found.len();
+    for (di, stereo, atoms) in found {
+        if let Some(mut b) = mol.bond_mut(di) {
+            b.set_stereo(stereo);
+            b.set_stereo_atoms(atoms);
+        }
+    }
+    n
 }
 
 /// 从**二维坐标**反读双键顺反,写入 `stereo` 与 `stereo_atoms`。返回标注的根数。
@@ -596,14 +812,14 @@ fn cis_trans_at(
 ///
 /// 要用对称等价类判"这一端的两个取代基分不分得开",而等价类要芳香性定下来
 /// 才算得准。刚从文件读出来的分子还没有,那时调这个函数,芳香环外的双键会
-/// 被当成普通双键。顺序与 [`crate::wedge::assign_chirality_2d`] 一样:
+/// 被当成普通双键。顺序与 [`assign_chirality_2d`] 一样:
 /// **读文件(L1)→ 净化(L2)→ 回来打标记(L1)**。
 ///
 /// # 只管二维,而且**当场认出三维就整个不做**
 ///
 /// 三维坐标投到 xy 平面上照样算得出"同侧/异侧",而那个答案与分子无关 ——
 /// 一根真正的反式双键投影下来完全可能落成同侧。这与手性那一侧不对称:三维
-/// molblock 的楔形一般是空的,[`crate::wedge::assign_chirality_2d`] 自然什么
+/// molblock 的楔形一般是空的,[`assign_chirality_2d`] 自然什么
 /// 也标不出来;顺反这一侧不拦的话给出的是**错的答案**,不是空答案。
 ///
 /// 所以任何一个 `z` 不为零就整个不做,返回 0。三维的顺反在扭转角里,是另一
@@ -618,21 +834,80 @@ pub fn assign_bond_stereo_2d(mol: &mut MolBuilder, coords: &[[f64; 3]], unknown:
     if coords.iter().any(|p| p[2].abs() > FLAT_TOL) {
         return 0;
     }
-    let classes = symmetry_classes(mol);
-    let found: Vec<(u32, BondStereo, [u32; 2])> = (0..mol.num_bonds())
-        .filter_map(|di| {
-            let di = u32::try_from(di).ok()?;
-            cis_trans_at(mol, coords, unknown, di, &classes).map(|(s, a)| (di, s, a))
-        })
-        .collect();
-    let n = found.len();
-    for (di, stereo, atoms) in found {
-        if let Some(mut b) = mol.bond_mut(di) {
-            b.set_stereo(stereo);
-            b.set_stereo_atoms(atoms);
-        }
+    let xy = |a: u32| coords.get(a as usize).map(|p| [p[0], p[1]]);
+    assign_bond_stereo(mol, unknown, |b, e, ra, rb| {
+        cis_trans_from_points(xy(b)?, xy(e)?, xy(ra)?, xy(rb)?)
+    })
+}
+
+/// 两个参照原子绕双键轴**转到了同一边还是对面** —— 同一边为顺。
+///
+/// 判不出来(某个参照几乎与双键轴共线)返回 `None`。
+///
+/// 只吃四个点,不吃分子 —— 与 [`cis_trans_from_points`] 分工相同,那个是二维
+/// 投影,这个是二面角。
+///
+/// # 没有"接近 90° 就不判"的死区
+///
+/// 二面角正好 90° 的双键在化学上没有顺反可言,可**文件里不会有** ——
+/// 双键是平面的。留一条死区反而会在几何本来就无意义的地方与外部实现分歧
+/// (它按 90° 一刀切,没有死区)。所以这里也只看符号,另外挡住真正的退化:
+/// 参照与轴共线时垂直分量为零,那时"哪一边"根本不成立。
+#[must_use]
+pub fn cis_trans_from_torsion(
+    begin: [f64; 3],
+    end: [f64; 3],
+    ref_begin: [f64; 3],
+    ref_end: [f64; 3],
+) -> Option<BondStereo> {
+    let sub = |p: [f64; 3], q: [f64; 3]| [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+    let dot = |p: [f64; 3], q: [f64; 3]| p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+
+    let axis = sub(end, begin);
+    let n2 = dot(axis, axis);
+    if n2 < FLAT_TOL {
+        return None; // 双键两端重合
     }
-    n
+    // 各自去掉沿轴的分量,剩下的就是"绕轴指向哪边"
+    let perp = |v: [f64; 3]| {
+        let k = dot(v, axis) / n2;
+        [v[0] - k * axis[0], v[1] - k * axis[1], v[2] - k * axis[2]]
+    };
+    let (pa, pb) = (perp(sub(ref_begin, begin)), perp(sub(ref_end, end)));
+    let (la, lb) = (dot(pa, pa).sqrt(), dot(pb, pb).sqrt());
+    if la < FLAT_TOL || lb < FLAT_TOL {
+        return None; // 参照与轴共线(累积双键那一档就是这样)
+    }
+    let cos = dot(pa, pb) / (la * lb);
+    if cos.abs() < FLAT_TOL {
+        return None;
+    }
+    Some(if cos > 0.0 {
+        BondStereo::Cis
+    } else {
+        BondStereo::Trans
+    })
+}
+
+/// 从**三维坐标**反读双键顺反,写入 `stereo` 与 `stereo_atoms`。返回标注的根数。
+///
+/// 与 [`assign_bond_stereo_2d`] 的分工只在几何那一步:那边看两个参照在双键
+/// 两侧还是同侧(平面投影),这边看它们绕轴的**二面角**。什么算立体源、
+/// 参照原子怎么挑,两边共用 `stereo_candidate` —— 各写一遍的话,同一根键在
+/// 二维文件里算立体源、在三维文件里不算,而那种差别不报错。
+///
+/// 坐标是平的(所有 `z` 都是 0)时一根也不标:那是二维图,投影下来两个参照的
+/// 二面角只会是 0° 或 180°,算得出答案但那是二维那条路的答案,该由它来给。
+///
+/// `unknown` 的含义见 [`assign_bond_stereo_2d`]。
+pub fn assign_bond_stereo_3d(mol: &mut MolBuilder, coords: &[[f64; 3]], unknown: &[bool]) -> usize {
+    if !coords.iter().any(|p| p[2].abs() > FLAT_TOL) {
+        return 0;
+    }
+    let at = |a: u32| coords.get(a as usize).copied();
+    assign_bond_stereo(mol, unknown, |b, e, ra, rb| {
+        cis_trans_from_torsion(at(b)?, at(e)?, at(ra)?, at(rb)?)
+    })
 }
 
 /// 参照原子仍然合法吗 —— 两个下标都在范围内,且确实是该双键两端的邻居。
@@ -733,6 +1008,55 @@ pub fn directions_for_writing(mol: &MolBuilder) -> WritingDirections {
         let same = stereo == BondStereo::Cis;
         adj.entry(r1.bond).or_default().push((r1, r2, same));
         adj.entry(r2.bond).or_default().push((r2, r1, same));
+    }
+
+    // **同一个原子上的两根方向键必须反号。**
+    //
+    // 一个双键端只有两个取代基,它们分处双键两侧 —— 两根方向键都朝外指同一
+    // 个方向的话,读串的人只能得到"两个取代基在同一侧",几何上不成立。
+    //
+    // # 这一条不是多余的,而且它管的是共轭
+    //
+    // 一根双键的参照原子挑哪个不影响分子,可**挑法一变,方向符号就落到另一根
+    // 键上**。共轭链里中间那根单键同时是两根双键的候选参照:两边都挑它,一根
+    // 键就够了(先前一直是这个样子);其中一根改挑别的取代基,那个端点上就
+    // 冒出**两根**方向键 —— 而 BFS 只按"双键"连边,压根不知道这两根有关系,
+    // 于是各自算各自的,同号了也没人拦。
+    //
+    // 实测:三维语料里补过显式氢的分子改变了规范秩,参照挑法跟着变,当场
+    // 撞上这一档 —— `[N-]/C=N/C(C#N)=C(\N)C#N` 那一族的顺反被外部实现整个丢掉
+    // (它读到自相矛盾的一对方向,只能放弃)。隐式氢那条路上碰不到,因为那时
+    // 秩恰好让两边都挑中共用的那根键。
+    // **按双键的端点收,不按参照键的锚点收。** 一根参照键锚在哪一端是它作为
+    // 某根双键的参照时的角色;而它同时**碰着**另一根双键的端点,在那里它就是
+    // 一根"这一端的方向键",要与那一端的另一根方向键反号。共轭链里冲突正是
+    // 这么出来的:共用单键锚在前一根双键那侧,冲突却在后一根双键的端点上。
+    let refbonds: BTreeSet<u32> = constraints
+        .iter()
+        .flat_map(|&(r1, r2, _)| [r1.bond, r2.bond])
+        .collect();
+    for di in 0..mol.num_bonds() as u32 {
+        if !stereo_atoms_are_valid(mol, di) {
+            continue;
+        }
+        let db = mol.bonds()[di as usize];
+        for end in [db.begin, db.end] {
+            let here: Vec<Ref> = mol
+                .neighbors(end)
+                .filter(|&(_, bi)| bi != di && refbonds.contains(&bi))
+                .map(|(_, bi)| Ref {
+                    bond: bi,
+                    anchor: end,
+                })
+                .collect();
+            for i in 0..here.len() {
+                for j in i + 1..here.len() {
+                    let (a, b) = (here[i], here[j]);
+                    adj.entry(a.bond).or_default().push((a, b, false));
+                    adj.entry(b.bond).or_default().push((b, a, false));
+                }
+            }
+        }
     }
 
     // 存储参照系(相对键自己的 begin → end)下的方向
@@ -917,11 +1241,26 @@ pub fn normalized_stereo_refs(mol: &MolBuilder, priority: &[u32]) -> Option<MolB
     let mut out = mol.clone();
     for di in targets {
         let db = mol.bonds()[di as usize];
+        // **先挑非氢的,再按规范秩。** 方向符号落在哪根键上,由参照挑在哪一侧
+        // 决定;落在一个显式氢上的话,那个符号就挂在一个**随时会被删掉**的原子上。
+        //
+        // 实测:补过显式氢的共轭多烯,方向全落在氢上之后,外部实现按默认设置
+        // (解析时去显式氢)读回来会翻掉一根双键 —— `C/C=C/C=C\C` 读成
+        // `C/C=C/C=C/C`。同一个串让它**保留氢**去读又是对的,所以我方的编码
+        // 并不违规,只是**易碎**:它把立体挂在了别人会丢掉的原子上。外部实现
+        // 自己写显式氢时把方向放在重原子键上,扛得住去氢。
+        //
+        // 二维/隐式氢的分子里根本没有氢原子,这一条不改变任何东西 ——
+        // 语料 8825 条逐条一致的结果照旧。
         let pick = |end: u32, partner: u32| {
+            let key = |other: &u32| {
+                let h = u8::from(mol.atoms()[*other as usize].atomic_num == 1);
+                (h, priority[*other as usize])
+            };
             mol.neighbors(end)
                 .map(|(other, _)| other)
                 .filter(|&other| other != partner)
-                .min_by_key(|&other| priority[other as usize])
+                .min_by_key(key)
         };
         let (Some(x), Some(y)) = (pick(db.begin, db.end), pick(db.end, db.begin)) else {
             continue;
@@ -1032,6 +1371,92 @@ M  END
         assert_ne!(lifted, TRANS_DIFLUOROETHENE, "原子块那一行没改到");
         let (n, _) = ez_from_block(&lifted);
         assert_eq!(n, 0, "三维不该走这条路");
+    }
+
+    /// 补上显式氢之后,**参照原子不许挑到氢头上**。
+    ///
+    /// 挑到氢,方向符号就落在一个"别人随手会删掉"的原子上。实测:外部实现按
+    /// 默认设置(解析时去显式氢)读回来会翻掉一根双键 —— `C/C=C/C=C\\C` 读成
+    /// `C/C=C/C=C/C`。同一个串让它保留氢去读又是对的,所以我方的编码并不违规,
+    /// 只是把立体挂在了会被丢掉的原子上。
+    #[test]
+    fn a_reference_atom_is_never_a_hydrogen_when_a_heavy_one_exists() {
+        let mut m = smiles::parse("C/C=C/C=C\\C").expect("解析");
+        omgkit_chem::pipeline::sanitize(&mut m).expect("净化");
+        perceive_bond_stereo(&mut m);
+        let ranks = crate::canon::classed_ranks(&m);
+        omgkit_chem::add_explicit_hs(&mut m, &ranks);
+        let pr = crate::canon::canonical_ranks(&m);
+        let norm = normalized_stereo_refs(&m, &pr).expect("有双键要规范化");
+        let mut checked = 0;
+        for b in norm.bonds() {
+            if !matches!(b.stereo, BondStereo::Cis | BondStereo::Trans) {
+                continue;
+            }
+            for r in b.stereo_atoms {
+                assert_ne!(
+                    norm.atoms()[r as usize].atomic_num,
+                    1,
+                    "参照挑到了氢:{:?}",
+                    b.stereo_atoms
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 4, "该查两根双键、四个参照");
+    }
+
+    /// **同一个双键端上的两根方向键必须反号。**
+    ///
+    /// 一个双键端只有两个取代基,它们分处双键两侧;两根方向键朝外指同一个方向
+    /// 的话,读串的人只能得到"两个取代基在同一侧",几何上不成立。
+    ///
+    /// 共轭链里才出得来:中间那根单键同时是两根双键的候选参照,一根双键改挑了
+    /// 别的取代基,那个端点上就冒出两根方向键 —— 而约束图先前只按双键连边,
+    /// 压根不知道这两根有关系。外部实现读到自相矛盾的一对,只能把整根双键的
+    /// 立体丢掉。
+    #[test]
+    fn two_direction_bonds_at_one_end_never_point_the_same_way() {
+        for smi in [
+            "N#CCc1ccc([N-]/C=N/C(C#N)=C(\\N)C#N)cc1",
+            "C/C=C/C=C\\C",
+            "F/C=C/C=C/F",
+            "CCOC(=O)/C([O-])=C(C#N)\\C=N\\c1ccccc1",
+        ] {
+            let mut m = smiles::parse(smi).unwrap_or_else(|e| panic!("{smi}: {}", e.render()));
+            omgkit_chem::pipeline::sanitize(&mut m).expect("净化");
+            perceive_bond_stereo(&mut m);
+            let ranks = crate::canon::classed_ranks(&m);
+            omgkit_chem::add_explicit_hs(&mut m, &ranks);
+            let pr = crate::canon::canonical_ranks(&m);
+            let norm = normalized_stereo_refs(&m, &pr).unwrap_or(m);
+            let d = directions_for_writing(&norm);
+            for a in 0..u32::try_from(norm.num_atoms()).expect("原子数") {
+                let out: Vec<(u32, BondDirection)> = norm
+                    .neighbors(a)
+                    .filter(|&(_, bi)| d.dirs[bi as usize] != BondDirection::None)
+                    .filter(|&(_, bi)| norm.bonds()[bi as usize].order != BondOrder::Double)
+                    .map(|(_, bi)| {
+                        let b = norm.bonds()[bi as usize];
+                        let dir = if b.begin == a {
+                            d.dirs[bi as usize]
+                        } else {
+                            d.dirs[bi as usize].flipped()
+                        };
+                        (bi, dir)
+                    })
+                    .collect();
+                for i in 0..out.len() {
+                    for j in i + 1..out.len() {
+                        assert_ne!(
+                            out[i].1, out[j].1,
+                            "{smi}:原子 {a} 上的键 {} 与 {} 朝外同号",
+                            out[i].0, out[j].0
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// 一端挂着两个相同的取代基 —— 交换它们是自同构,这根键没有顺反可言。

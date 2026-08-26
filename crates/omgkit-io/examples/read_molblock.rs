@@ -31,12 +31,21 @@ fn main() {
                         Ok(()) => {
                             // **净化之后**才打立体标记:手性要知道中心有几个隐式
                             // 氢,顺反要用对称等价类 —— 两样都是净化之后才算得准。
-                            let _ = omgkit_io::wedge::assign_chirality_2d(
+                            let _ = omgkit_io::stereo::assign_chirality_2d(
                                 &mut m,
                                 &block.coords,
                                 &block.wedges,
                             );
                             let _ = omgkit_io::stereo::assign_bond_stereo_2d(
+                                &mut m,
+                                &block.coords,
+                                &block.unknown_stereo,
+                            );
+                            // 三维那两个:四个 `assign_*` 各自认出维数,不合的那一对返回 0。
+                            // 由它们自己判、而不是在这里 `if is_3d`,是为了让"什么时候读得出立体"
+                            // 只有一个住处。
+                            let _ = omgkit_io::stereo::assign_chirality_3d(&mut m, &block.coords);
+                            let _ = omgkit_io::stereo::assign_bond_stereo_3d(
                                 &mut m,
                                 &block.coords,
                                 &block.unknown_stereo,

@@ -14,10 +14,14 @@
 //!
 //! [`chirality_from_wedges`] **只看几何**,不看 `chiral_tag`。它与 depict 的
 //! `assign_wedges` 合起来是一次往返;单独看,它回答的是"图上画出来的构型是什么"。
+//!
+//! # 打标记那几个入口不在这里
+//!
+//! `assign_*` 四个(二维/三维 × 手性/顺反)全在 [`crate::stereo`]。本模块只管
+//! **楔形这个字段怎么读**;"给分子打立体标记"是另一件事,而它有四个口,分散在
+//! 两个模块里的话,下一个人只会找到其中一半。
 
 use omgkit_core::{ChiralTag, MolBuilder};
-
-use crate::stereo::FLAT_TOL;
 
 /// 一根键的楔形指派。**窄端在立体中心**,宽端在另一头 —— 这是画结构式的通例:
 /// 楔形描述的是"从这个中心看出去",窄端标出了那个中心。
@@ -62,7 +66,7 @@ impl Wedge {
 /// 单位是**键长的立方**。数值取自 RDKit `Chirality.cpp` 的 `ZERO_VOLUME_TOL`,
 /// 照抄是因为**我们导出的 molblock 就是交给它读的** —— 两边用同一把尺,
 /// "别人读得回来"才谈得上。
-const ZERO_VOLUME_TOL: f64 = 0.1;
+pub(crate) const ZERO_VOLUME_TOL: f64 = 0.1;
 
 enum Ligand {
     Atom(u32, u32),
@@ -70,7 +74,7 @@ enum Ligand {
 }
 
 /// 总氢数。两个字段互斥,相加即总数 —— 全仓一致的约定。
-fn total_hs(mol: &MolBuilder, atom: u32) -> u8 {
+pub(crate) fn total_hs(mol: &MolBuilder, atom: u32) -> u8 {
     let a = mol.atoms()[atom as usize];
     a.num_explicit_hs.saturating_add(a.num_implicit_hs)
 }
@@ -86,7 +90,7 @@ fn total_hs(mol: &MolBuilder, atom: u32) -> u8 {
 /// 乱画,漏了如实进 `unwedged`。
 ///
 /// 带正电的不算:季铵、锍盐上没有孤对,四个配体全在,走 `(4, 0)` 那一支。
-fn has_lone_pair(mol: &MolBuilder, a: u32) -> bool {
+pub(crate) fn has_lone_pair(mol: &MolBuilder, a: u32) -> bool {
     // **表在 `omgkit-core`,这里不再自己写一份。** `omgkit-conf` 抽手性中心时
     // 要问同一个问题(三个邻居也算数),两处各写一份迟早分岔,
     // 而分岔的表现是一半的中心画对了、另一半摆错了。
@@ -270,52 +274,8 @@ pub fn chirality_from_wedges(
     }
 }
 
-/// 按楔形给分子里每个读得出构型的中心打上手性标记,返回打了几个。
-///
-/// # 必须在**净化之后**调
-///
-/// 判一个中心要先知道它有几个氢([`chirality_from_wedges`] 的 `(3, 1)` 那一支
-/// 就是"三根键 + 一个隐式氢"),而隐式氢数是净化算出来的。刚从文件读出来的
-/// 分子那一栏还是 0 —— 那时调这个函数,带隐式氢的中心会被整档漏掉,
-/// 而且一声不响。
-///
-/// 顺序因此是:**读文件(L1)→ 净化(L2)→ 回来打标记(L1)**。跨层来回一趟
-/// 看着别扭,但把净化搬进 L1 是更坏的选择,而把这一步搬进 L2 会让"楔形怎么读"
-/// 有两个住处。
-///
-/// # 只管二维
-///
-/// 三维 molblock 的立体在**坐标本身**里,楔形一般是空的 —— 那一档这里一个也
-/// 打不出来,得另走一条路。名字里带 `_2d` 就是为了不让人误以为它两种都管。
-///
-/// # 认出三维就整个不做
-///
-/// "楔形一般是空的"只是**一般**。三维文件里偶尔留着楔形字段,那时
-/// [`chirality_from_wedges`] 会把 z 一丢、按 xy 投影算体积 —— 算得出一个答案,
-/// 而那个答案与分子无关。空答案可以接受,错答案不行,所以任何一个 `z` 不为零
-/// 就返回 0。这与顺反那一侧
-/// ([`crate::stereo::assign_bond_stereo_2d`])是同一条线。
-#[must_use]
-pub fn assign_chirality_2d(mol: &mut MolBuilder, coords: &[[f64; 3]], wedges: &[Wedge]) -> usize {
-    if coords.iter().any(|p| p[2].abs() > FLAT_TOL) {
-        return 0;
-    }
-    let mut n = 0;
-    for a in 0..u32::try_from(mol.num_atoms()).unwrap_or(0) {
-        let Some(tag) = chirality_from_wedges(mol, coords, wedges, a) else {
-            continue;
-        };
-        if let Some(at) = mol.atom_mut(a) {
-            at.chiral_tag = tag;
-            n += 1;
-        }
-    }
-    n
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     /// 一张画着楔形的二维图,以及把同一张图的某个 `z` 抬起来之后的样子。
     const WEDGED: &str = "\
@@ -337,7 +297,7 @@ M  END
         let got = crate::molblock::read_v2000(block).expect("读 molblock");
         let mut m = got.mol;
         omgkit_chem::pipeline::sanitize(&mut m).expect("净化");
-        assign_chirality_2d(&mut m, &got.coords, &got.wedges)
+        crate::stereo::assign_chirality_2d(&mut m, &got.coords, &got.wedges)
     }
 
     /// 二维那张图读得出中心 —— 这是下一条测试的对照,少了它"三维读不出"
