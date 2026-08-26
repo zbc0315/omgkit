@@ -9,10 +9,12 @@
 //! .venv/bin/python harness/verify_stereo.py /tmp/ours.jsonl
 //! ```
 //!
-//! **进不了 CI**(CI 机器上没有 RDKit),所以它不是闸,是**闸的设计验证**:
-//! 能进 CI 的那一条是 `conformer_oracle` 里的"真值口径"——
-//! 中心与配体序取自基准、在我们交付的坐标上复算体积。这里跑一遍是为了确认
-//! 那一条确实盯住了该盯的东西。
+//! **它在 CI 里**(`external` 那个 job 装了 RDKit),`harness/gates.sh` 与
+//! `.github/workflows/ci.yml` 都跑它 —— 这段先前写着"进不了 CI(CI 机器上没有
+//! RDKit)",那是接进去之前的话。
+//!
+//! 与它互补的是 `conformer_oracle` 里的"真值口径"(中心与配体序取自基准、
+//! 在我们交付的坐标上复算体积):那一条不需要 RDKit,连 `gates` 这个 job 也跑。
 //!
 //! 实测(`large.smi` 里带立体标记的分子,2026-08-20):
 //!

@@ -1,7 +1,27 @@
-"""Re-verify the RDKit ETKDGv3 baseline numbers quoted in the design (section 1):
-   total 86.5 s / mean 9.8 ms / slowest 8.11 s / 46 failures / 1 C++ exception.
-Single process, seed 0xf00d, AddHs, as measure_params.py does.
+#!/usr/bin/env python3
+"""参照实现(RDKit ETKDGv3)在同一份语料上的失败率与耗时。
+
+# 这个脚本为什么必须能跑
+
+**0.52%** 是这个项目的头号参照:`omgkit-conf/examples/feasibility.rs` 里那条
+硬闸(`MAX_INFEASIBLE_FRAC`)就是照着它定的,注释里写着"要赢的正是 RDKit
+那 0.52% 的失败率"。一个**量不出来的参照**等于一句传说 ——
+先前这里的语料路径写死成一个早已删掉的 worktree 的绝对路径
+(`.claude/worktrees/agent-…/harness/corpus/large.smi`),脚本一行都跑不了,
+那个 0.52% 从此没法复核。
+
+# 这个数**跟 RDKit 版本走**
+
+ETKDG 每个版本都在改。所以这里把版本打在最前面,引用这个数的地方也要连版本
+一起写。仓库钉的是 `harness/requirements.lock` 里那一个。
+
+用法:
+
+    python3 harness/baseline_rdkit_etkdg.py [语料.smi]
+
+口径与 `measure_params.py` 一致:单进程、`AddHs`、ETKDGv3、种子 0xf00d。
 """
+import pathlib
 import sys
 import time
 
@@ -10,49 +30,68 @@ from rdkit.Chem import AllChem
 
 RDLogger.DisableLog("rdApp.*")
 
-CORPUS = "/Users/tom/Projects/momega/omgkit/.claude/worktrees/agent-a92e349554d652a6b/harness/corpus/large.smi"
+DEFAULT_CORPUS = pathlib.Path(__file__).resolve().parent / "corpus" / "large.smi"
 
-smis = []
-for line in open(CORPUS):
-    line = line.strip()
-    if line and not line.startswith("#"):
-        smis.append(line.split("\t")[0])
-print(f"corpus lines (non-comment): {len(smis)}", flush=True)
 
-fail = 0
-exc = 0
-parse_fail = 0
-times = []
-worst = []
-t0 = time.time()
-for i, smi in enumerate(smis):
-    m = Chem.MolFromSmiles(smi)
-    if m is None:
-        parse_fail += 1
-        continue
-    mh = Chem.AddHs(m)
-    p = AllChem.ETKDGv3()
-    p.randomSeed = 0xF00D
-    t = time.time()
-    try:
-        rc = AllChem.EmbedMolecule(mh, p)
-        if rc < 0:
+def main() -> int:
+    corpus = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_CORPUS
+    if not corpus.is_file():
+        print(f"语料不在:{corpus}", file=sys.stderr)
+        return 1
+    print(f"外部实现:RDKit {Chem.rdBase.rdkitVersion}")
+    print(f"语料:{corpus}")
+
+    smis = []
+    for line in corpus.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            smis.append(line.split("\t")[0])
+    print(f"语料行(去注释):{len(smis)}", flush=True)
+
+    fail = exc = parse_fail = 0
+    times = []
+    worst = []
+    t0 = time.time()
+    for i, smi in enumerate(smis):
+        m = Chem.MolFromSmiles(smi)
+        if m is None:
+            parse_fail += 1
+            continue
+        mh = Chem.AddHs(m)
+        p = AllChem.ETKDGv3()
+        p.randomSeed = 0xF00D
+        t = time.time()
+        try:
+            if AllChem.EmbedMolecule(mh, p) < 0:
+                fail += 1
+        except Exception as e:  # noqa: BLE001
+            exc += 1
             fail += 1
-    except Exception as e:  # noqa: BLE001
-        exc += 1
-        fail += 1
-        print(f"  EXCEPTION on #{i}: {smi[:70]}\n     {str(e)[:200]}", flush=True)
-    dt = time.time() - t
-    times.append(dt)
-    worst.append((dt, smi))
-tot = time.time() - t0
-times.sort()
-print(f"total wall: {tot:.1f} s   embeds: {len(times)}   "
-      f"mean {1000*sum(times)/len(times):.1f} ms   median {1000*times[len(times)//2]:.1f} ms")
-print(f"p99 {1000*times[int(0.99*len(times))]:.0f} ms   max {times[-1]:.2f} s")
-print(f"parse failures: {parse_fail}   embed failures: {fail} "
-      f"({100.0*fail/len(times):.2f}%)   C++ exceptions: {exc}")
-worst.sort(key=lambda w: -w[0])
-print("slowest 5:")
-for dt, smi in worst[:5]:
-    print(f"   {dt:.2f} s  {smi[:80]}")
+            print(f"  第 {i} 条抛异常:{smi[:70]}\n     {str(e)[:200]}", flush=True)
+        times.append(time.time() - t)
+        worst.append((times[-1], smi))
+    tot = time.time() - t0
+
+    if not times:
+        print("一个分子都没嵌 —— 语料是空的?", file=sys.stderr)
+        return 1
+    times.sort()
+    mean_ms = 1000 * sum(times) / len(times)
+    print(
+        f"墙钟合计 {tot:.1f} s;嵌入 {len(times)} 个;"
+        f"平均 {mean_ms:.1f} ms;中位 {1000 * times[len(times) // 2]:.1f} ms"
+    )
+    print(f"p99 {1000 * times[int(0.99 * len(times))]:.0f} ms;最慢 {times[-1]:.2f} s")
+    print(
+        f"解析失败 {parse_fail};嵌入失败 {fail}"
+        f"({100.0 * fail / len(times):.2f}%);C++ 异常 {exc}"
+    )
+    worst.sort(key=lambda w: -w[0])
+    print("最慢的 5 个:")
+    for dt, smi in worst[:5]:
+        print(f"   {dt:.2f} s  {smi[:80]}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
