@@ -299,6 +299,12 @@ jobs:
       - name: 判官:Python 绑定
         run: python harness/test_python.py
 
+      # 构型生成的绑定:与 Rust 侧逐位比。绑定只做翻译,可翻译本身也会错,
+      # 而那种错只有 Python 用户碰得到。两侧同一个 `pipeline::conformer_for`、
+      # 全程无随机数,所以"逐位相同"是可以要求的。
+      - name: 判官:构型生成的 Python 绑定(与 Rust 逐位比)
+        run: python harness/check_python_conformer.py "$RUNNER_TEMP/ours.jsonl"
+
       # ---- 先前只在本地手动跑的那四条 ----
       #
       # **闸不进 CI 就不是闸。** 它们一直躺在 `harness/` 里,谁想起来谁跑一次。

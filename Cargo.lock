@@ -290,6 +290,7 @@ name = "omgkit-py"
 version = "0.0.1"
 dependencies = [
  "omgkit-chem",
+ "omgkit-conf",
  "omgkit-core",
  "omgkit-io",
  "omgkit-match",

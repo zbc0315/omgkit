@@ -324,6 +324,64 @@ class ByproductsAreOptOutAndLabelled(unittest.TestCase):
         self.assertEqual(len(out.discarded[0]), 1, "羧基那个羟基氧被丢掉了")
 
 
+class ConformerTests(unittest.TestCase):
+    """三维构型的翻译层。化学正确性由 Rust 侧那一套守着,这里盯翻译特有的失效。"""
+
+    def test_conformer_does_not_touch_the_input_mol(self):
+        """生成会补显式氢 —— 补在**副本**上,不能改到调用方手里那个分子。"""
+        m = omgkit.parse_smiles("CCO")
+        before = m.num_atoms
+        conf = m.conformer()
+        self.assertEqual(m.num_atoms, before, "原分子被改了")
+        self.assertGreater(conf.mol.num_atoms, before, "构型里应当带上显式氢")
+
+    def test_coords_line_up_with_the_conformers_own_mol(self):
+        """坐标对应的是 `conf.mol` 的原子表,不是原分子的 —— 这是最容易翻错的一处。"""
+        conf = omgkit.parse_smiles("CCO").conformer()
+        self.assertEqual(len(conf.coords), conf.mol.num_atoms)
+        for p in conf.coords:
+            self.assertEqual(len(p), 3)
+            for v in p:
+                self.assertIsInstance(v, float)
+
+    def test_same_molecule_gives_the_same_coordinates(self):
+        """全程无随机数 —— 同一个分子每次都给同一组坐标。"""
+        smi = "C[C@H](N)C(=O)O"
+        a = omgkit.parse_smiles(smi).conformer()
+        b = omgkit.parse_smiles(smi).conformer()
+        self.assertEqual(a.coords, b.coords)
+
+    def test_chirality_is_reported_and_correct(self):
+        """手性中心的账要报出来,而且交付坐标上必须号对。"""
+        conf = omgkit.parse_smiles("C[C@H](N)C(=O)O").conformer()
+        self.assertEqual(conf.chiral_total, 1)
+        self.assertEqual(conf.chiral_ok, conf.chiral_total)
+
+    def test_failure_keeps_the_reason(self):
+        """失败要抛 `ValueError`,而且**带上具体原因** —— 翻成一句笼统的话等于把
+        排查线索丢掉。"""
+        thorium = (
+            "CC1=[O+][Th]234([O+]=C(C)C1)([O+]=C(C)CC(=[O+]2)C)"
+            "([O+]=C(C)CC(=[O+]3)C)[O+]=C(C)CC(=[O+]4)C"
+        )
+        with self.assertRaises(ValueError) as cm:
+            omgkit.parse_smiles(thorium).conformer()
+        self.assertIn("界矩阵", str(cm.exception))
+
+    def test_bonds_and_charges_are_plain_python(self):
+        """`bonds` / `formal_charges` 要是普通 list —— `Vec<u8>` 会被 PyO3 特判成
+        `bytes`,那种错很安静(索引出来仍是 int,长度也对,类型却错了)。"""
+        conf = omgkit.parse_smiles("[NH3+]CC(=O)[O-]").conformer()
+        self.assertIsInstance(conf.mol.bonds, list)
+        self.assertIsInstance(conf.mol.formal_charges, list)
+        self.assertEqual(len(conf.mol.bonds), conf.mol.num_bonds)
+        self.assertEqual(len(conf.mol.formal_charges), conf.mol.num_atoms)
+        self.assertIn(1, conf.mol.formal_charges)
+        self.assertIn(-1, conf.mol.formal_charges)
+        # 键级是数值:单键 1.0、芳香 1.5、双键 2.0
+        orders = {o for _, _, o in conf.mol.bonds}
+        self.assertTrue(orders <= {1.0, 1.5, 2.0, 3.0, 4.0, 0.0}, orders)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -10,7 +10,7 @@ generated from the source, so they cannot drift away from the code.
     ```
 
     There are no submodules to reach into — the three parse functions and the
-    four classes below are the whole surface.
+    five classes below are the whole surface.
 
 ## At a glance
 
@@ -23,6 +23,34 @@ generated from the source, so they cannot drift away from the code.
 | [`Query`](#omgkit.Query) | a substructure query — match it against a molecule |
 | [`Reaction`](#omgkit.Reaction) | a reaction template — run it on reactants |
 | [`Outcome`](#omgkit.Outcome) | one result of running a reaction |
+| [`Conformer`](#omgkit.Conformer) | a 3D structure — coordinates plus the molecule they belong to |
+
+## 3D coordinates
+
+[`Mol.conformer()`](#omgkit.Mol.conformer) turns a molecule into one 3D
+structure. It is deterministic — no random seed, no retries you have to
+configure; the same molecule always comes back with the same coordinates.
+
+```pycon
+>>> import omgkit
+>>> conf = omgkit.parse_smiles("C[C@H](N)C(=O)O").conformer()
+>>> conf
+<omgkit.Conformer atoms=13 energy=0.000e0 converged=True chiral=1/1>
+>>> conf.mol.num_atoms          # 13, not 6 — generation adds explicit hydrogens
+13
+>>> conf.coords[0]
+(-1.191..., -0.899..., -0.073...)
+```
+
+!!! warning "The coordinates belong to `conf.mol`, not to the molecule you called it on"
+
+    Generation needs explicit hydrogens, so it works on a copy and adds them
+    there. Your molecule is left untouched; `conf.coords` lines up with
+    `conf.mol`, which has more atoms.
+
+`ValueError` is raised when the molecule cannot be sanitized, or when its
+distance bounds contradict each other (about 1 molecule in 8831 on a drug-like
+corpus). The message says which.
 
 ## Errors
 
@@ -88,6 +116,14 @@ ValueError: unclosed branch
 ## Outcome
 
 ::: omgkit.Outcome
+    options:
+      members: true
+
+---
+
+## Conformer
+
+::: omgkit.Conformer
     options:
       members: true
 

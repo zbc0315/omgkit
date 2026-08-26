@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 # 漏一处就是个不会报错的假数。CI 的头注释里记过同一个坑(那里原先写着
 # "四道闸门",而步骤早已加到八步)。这里由 `step` 计数,末尾自查:
 # 改了步骤忘了改 `TOTAL`,脚本最后一行会红。
-TOTAL=31
+TOTAL=32
 N=0
 step() {
     N=$((N + 1))
@@ -256,6 +256,14 @@ step "判官:产物侧手性的四种指令"
 "$PY" harness/check_product_chirality.py
 step "判官:Python 绑定"
 "$PY" harness/test_python.py
+
+# **构型生成的绑定:与 Rust 侧逐位比。** 绑定那一层"只做翻译",可翻译本身也会
+# 错(原子表对不上、坐标错位、忘了生成时补过显式氢),而那种错只有 Python 用户
+# 碰得到,Rust 侧的判据一概盖不到。两侧调的是同一个 `pipeline::conformer_for`、
+# 全程无随机数,所以"逐位相同"是可以要求的。
+# 变异实测:让绑定返回补氢**之前**那份分子(一个很自然的错),642 条里 641 条红。
+step "判官:构型生成的 Python 绑定(与 Rust 逐位比)"
+"$PY" harness/check_python_conformer.py "$WORK/ours.jsonl"
 
 # ---- 先前只在本地手动跑的那几条 ----
 #

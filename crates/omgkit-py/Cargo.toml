@@ -30,6 +30,7 @@ omgkit-core = { path = "../omgkit-core", version = "0.0.1" }
 omgkit-io = { path = "../omgkit-io", version = "0.0.1" }
 omgkit-chem = { path = "../omgkit-chem", version = "0.0.1" }
 omgkit-match = { path = "../omgkit-match", version = "0.0.1" }
+omgkit-conf = { path = "../omgkit-conf", version = "0.0.1" }
 
 # 0.27 是 MSRV 还在 1.74 的最后一档,正好压在工作区的 1.75 之下 ——
 # 0.28 起要 1.83,用它就得为绑定一个 crate 抬高整个工作区的 MSRV。

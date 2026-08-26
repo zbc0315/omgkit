@@ -111,6 +111,53 @@ impl PyMol {
         omgkit_chem::remove_hs(&mut self.inner)
     }
 
+    /// 逐原子的形式电荷,按存储顺序。返回 `list[int]`。
+    #[getter]
+    fn formal_charges(&self) -> Vec<i16> {
+        self.inner
+            .atoms()
+            .iter()
+            .map(|a| i16::from(a.formal_charge))
+            .collect()
+    }
+
+    /// 逐键的 `(起点, 终点, 键级)`,按存储顺序。返回 `list[tuple[int, int, float]]`。
+    ///
+    /// 键级是**数值**:单键 1.0、芳香 1.5、双键 2.0、三键 3.0、四重 4.0、
+    /// 未指定 0.0(配位键按 1.0 记)。这是 `BondOrder::as_double()` 的值 ——
+    /// 不在绑定层另发明一套编号,那种编号只有 Python 这边有,Rust 侧的判据
+    /// 一概盖不到。
+    #[getter]
+    fn bonds(&self) -> Vec<(u32, u32, f64)> {
+        self.inner
+            .bonds()
+            .iter()
+            .map(|b| (b.begin, b.end, f64::from(b.order.as_double())))
+            .collect()
+    }
+
+    /// 生成一个三维构型。
+    ///
+    /// **不改动本分子**:内部先深拷贝一份,在那一份上净化、感知顺反、补显式氢,
+    /// 再生成。所以返回的 [`Conformer`](PyConformer) 里那个 `mol` 的原子数通常
+    /// 比这里多(多出来的是氢),而 `coords` 对应的是**它**的原子表,不是这个。
+    ///
+    /// 走的是 Rust 侧的 `omgkit_conf::pipeline::conformer_for` —— 那五步的顺序
+    /// 与理由都在库里,绑定这一层一步化学都不做。
+    ///
+    /// 全程无随机数:同一个分子每次都给同一组坐标。
+    ///
+    /// 净化过不去、界矩阵自相矛盾时抛 `ValueError`。
+    fn conformer(&self) -> PyResult<PyConformer> {
+        let mut mol = self.inner.clone();
+        let conf = omgkit_conf::pipeline::conformer_for(&mut mol)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(PyConformer {
+            mol: PyMol { inner: mol },
+            conf,
+        })
+    }
+
     /// 深拷贝。
     fn copy(&self) -> Self {
         self.clone()
@@ -126,6 +173,84 @@ impl PyMol {
 }
 
 /// 解析 SMILES。解析失败时抛 `ValueError`,消息里带插字号视图指出出错位置。
+/// 一个三维构型。
+///
+/// 由 `Mol.conformer()` 产出。里面既有坐标,也有**坐标对应的
+/// 那个分子** —— 生成时补了显式氢,原子表与原分子不是同一份。
+#[pyclass(name = "Conformer", module = "omgkit")]
+pub struct PyConformer {
+    mol: PyMol,
+    conf: omgkit_conf::pipeline::Conformer,
+}
+
+#[pymethods]
+impl PyConformer {
+    /// 坐标对应的那个分子(补过显式氢的那一份)。
+    #[getter]
+    fn mol(&self) -> PyMol {
+        self.mol.clone()
+    }
+
+    /// 逐原子的 `(x, y, z)`,单位 Å,顺序与 [`mol`](Self::mol) 的原子表一致。
+    #[getter]
+    fn coords(&self) -> Vec<(f64, f64, f64)> {
+        self.conf
+            .coords
+            .iter()
+            .map(|p| (p[0], p[1], p[2]))
+            .collect()
+    }
+
+    /// 精修之后的误差函数值。0 表示所有距离都落进了界内。
+    #[getter]
+    fn energy(&self) -> f64 {
+        self.conf.energy
+    }
+
+    /// 精修**之前**的误差函数值 —— 与 [`energy`](Self::energy) 一起看才知道精修干了多少活。
+    #[getter]
+    fn energy_before(&self) -> f64 {
+        self.conf.energy_before
+    }
+
+    /// 精修有没有收敛(梯度降到阈值以下)。
+    #[getter]
+    fn converged(&self) -> bool {
+        self.conf.converged
+    }
+
+    /// 精修迭代了多少次。
+    #[getter]
+    fn iterations(&self) -> usize {
+        self.conf.iterations
+    }
+
+    /// 手性中心总数。
+    #[getter]
+    fn chiral_total(&self) -> usize {
+        self.conf.chiral_total
+    }
+
+    /// 其中在交付坐标上号正确的个数。**应当等于
+    /// [`chiral_total`](Self::chiral_total)** —— 不等就是把某个中心摆成了对映体。
+    #[getter]
+    fn chiral_ok(&self) -> usize {
+        self.conf.chiral_ok
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<omgkit.Conformer atoms={} energy={:.3e} converged={} chiral={}/{}>",
+            self.conf.coords.len(),
+            self.conf.energy,
+            // Rust 的 bool 打出来是 true/false;这是给 Python 看的 repr
+            if self.conf.converged { "True" } else { "False" },
+            self.conf.chiral_ok,
+            self.conf.chiral_total
+        )
+    }
+}
+
 #[pyfunction]
 fn parse_smiles(smiles: &str) -> PyResult<PyMol> {
     match omgkit_io::smiles::parse(smiles) {
@@ -421,6 +546,7 @@ fn parse_reaction(smarts: &str) -> PyResult<PyReaction> {
 fn omgkit(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<PyMol>()?;
+    m.add_class::<PyConformer>()?;
     m.add_class::<PyQuery>()?;
     m.add_class::<PyReaction>()?;
     m.add_class::<PyOutcome>()?;

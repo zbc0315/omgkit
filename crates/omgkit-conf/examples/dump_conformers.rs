@@ -53,14 +53,10 @@ fn main() {
         let Ok(mut mol) = omgkit_io::smiles::parse(smi) else {
             continue;
         };
-        if omgkit_chem::pipeline::sanitize(&mut mol).is_err() {
+        // 净化 → 感知顺反 → 补显式氢 → 抽中心,配方在库里只有一份
+        let Ok(centers) = omgkit_conf::pipeline::prepare(&mut mol) else {
             continue;
-        }
-        // 不折算的话双键顺反整档丢掉,见 `pipeline::conformer` 的前置条件那一节
-        omgkit_io::stereo::perceive_bond_stereo(&mut mol);
-        let r = omgkit_io::canon::classed_ranks(&mol);
-        omgkit_chem::add_explicit_hs(&mut mol, &r);
-        let centers = omgkit_conf::chiral::centers(&mol);
+        };
         // **有手性中心 or 有双键顺反,两者之一就收。** 先前这里只看 `centers`,
         // 于是上面刚放宽的那 331 个"只有 `/` `\`"的分子又在这儿被滤掉了 ——
         // 放宽一道闸而下一道还卡着,等于没放宽。

@@ -35,7 +35,9 @@ use crate::smooth::{triangle_smooth, Bounds, SmoothError};
 use omgkit_core::MolBuilder;
 
 /// 生成构型时失败的原因。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// **不再 `Copy`**:`Sanitize` 那一档要把净化的具体原因带上(哪个原子超价),
+// 而那是有分配的。翻成一句笼统的"生成失败"等于把排查线索丢掉。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConformerError {
     /// 界矩阵自相矛盾 —— 连一张自洽的距离表都拿不出来。
     Infeasible {
@@ -44,6 +46,22 @@ pub enum ConformerError {
     },
     /// 嵌入那一步的输入坏了(非有限数、特征分解不收敛)。这不该发生。
     Embed(crate::embed::EmbedError),
+    /// 净化过不去 —— 只有 [`conformer_for`] 会给出它。
+    Sanitize(omgkit_chem::SanitizeError),
+}
+
+impl core::fmt::Display for ConformerError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Infeasible { pair } => write!(
+                f,
+                "界矩阵自相矛盾:原子 {} 与 {} 之间的上下界交空",
+                pair.0, pair.1
+            ),
+            Self::Embed(e) => write!(f, "嵌入失败:{e:?}"),
+            Self::Sanitize(e) => write!(f, "净化失败:{e}"),
+        }
+    }
 }
 
 /// 一个构型,外加"它有多好"的账。
@@ -146,6 +164,51 @@ fn broken_bonds_of(x: &[f64], mol: &MolBuilder, b: &Bounds) -> usize {
 /// 400 与 RDKit 第一段极小化的 `field->minimize(400, ...)` 同量级。
 /// 到了上限不算失败 —— 给出当前坐标并把残差报出来。
 pub const MAX_REFINE_ITER: usize = 400;
+
+/// 从一个**刚解析出来**的分子直接拿到构型。
+///
+/// # 这五步的顺序不能换
+///
+/// 1. **净化** —— 后面全部依赖价键、环、芳香性;
+/// 2. **感知双键顺反** —— 不做的话 `bounds::stereo_path_torsion` 一次都不发力,
+///    顺反整档退回自由旋转(语料里 954 根方向键、404 根双键立体);
+/// 3. **补显式氢** —— 氢参与界矩阵,少了它摆出来的是另一个分子。插入顺序按
+///    规范秩定,保证同一个分子在哪儿跑都给同一组坐标;
+/// 4. **抽手性中心** —— 必须在补氢**之后**,三配位中心的第四格才落得下;
+/// 5. 生成([`conformer`])。
+///
+/// # 为什么它得在库里,而不是每个调用方各抄一遍
+///
+/// 这个配方先前在 `examples/feasibility.rs`、`examples/dump_conformers.rs`、
+/// `examples/bench_conformers.rs`、`tests/small_molecule_geometry.rs` 里各写了
+/// 一份,而 Python 绑定还要再写一份 —— 绑定那一层的规矩是"只做翻译,不做化学",
+/// 一份抄在那里的配方是整个项目里唯一没有 Rust 判据覆盖的一块。
+///
+/// **`mol` 会被就地改掉**(净化、补氢),返回的坐标对应改完之后的原子表。
+///
+/// # Errors
+///
+/// 净化失败、界矩阵自相矛盾,或嵌入的输入坏掉。
+pub fn conformer_for(mol: &mut MolBuilder) -> Result<Conformer, ConformerError> {
+    let centers = prepare(mol)?;
+    conformer(mol, &centers)
+}
+
+/// [`conformer_for`] 的前四步:净化 → 感知双键顺反 → 补显式氢 → 抽手性中心。
+///
+/// 单独拿出来是给**要在中间插一脚**的调用方用的(比如"只导带立体标记的分子"
+/// 那种筛选)。顺序与理由见 [`conformer_for`]。
+///
+/// # Errors
+///
+/// 净化失败。
+pub fn prepare(mol: &mut MolBuilder) -> Result<Vec<Center>, ConformerError> {
+    omgkit_chem::pipeline::sanitize(mol).map_err(ConformerError::Sanitize)?;
+    omgkit_io::stereo::perceive_bond_stereo(mol);
+    let ranks = omgkit_io::canon::classed_ranks(mol);
+    omgkit_chem::add_explicit_hs(mol, &ranks);
+    Ok(chiral::centers(mol))
+}
 
 /// 给一个分子生成**一个**三维构型。
 ///

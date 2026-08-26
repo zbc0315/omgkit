@@ -41,14 +41,10 @@ fn main() {
             parse_fail += 1;
             continue;
         };
-        if omgkit_chem::pipeline::sanitize(&mut mol).is_err() {
+        let Ok(centers) = omgkit_conf::pipeline::prepare(&mut mol) else {
             parse_fail += 1;
             continue;
-        }
-        omgkit_io::stereo::perceive_bond_stereo(&mut mol);
-        let ranks = omgkit_io::canon::classed_ranks(&mol);
-        omgkit_chem::add_explicit_hs(&mut mol, &ranks);
-        let centers = omgkit_conf::chiral::centers(&mol);
+        };
 
         let t = Instant::now();
         let got = omgkit_conf::pipeline::conformer(&mol, &centers);

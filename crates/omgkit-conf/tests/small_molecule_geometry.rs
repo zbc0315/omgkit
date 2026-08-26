@@ -21,7 +21,7 @@
 //! 修法是 `pipeline` 里的确定性重试阶梯。这个文件是它的判据:**小分子的四档
 //! 越界必须是 0**。少了它,下一次动优化器就没人拦得住这一档退回去。
 
-use omgkit_conf::{bounds, chiral, pipeline, smooth};
+use omgkit_conf::{bounds, pipeline, smooth};
 
 /// 拿这些分子跑一遍,每一根键、每一对都必须落在界内(容差 0.1 Å)。
 ///
@@ -54,11 +54,7 @@ fn small_molecules_land_inside_their_bounds() {
         "CC(=O)O",
     ] {
         let mut mol = omgkit_io::smiles::parse(smi).unwrap_or_else(|e| panic!("{smi}: {e:?}"));
-        omgkit_chem::pipeline::sanitize(&mut mol).unwrap_or_else(|e| panic!("{smi}: {e}"));
-        let ranks = omgkit_io::canon::classed_ranks(&mol);
-        omgkit_chem::add_explicit_hs(&mut mol, &ranks);
-        let centers = chiral::centers(&mol);
-        let conf = pipeline::conformer(&mol, &centers)
+        let conf = pipeline::conformer_for(&mut mol)
             .unwrap_or_else(|e| panic!("{smi}:生成不出构型 {e:?}"));
 
         let (mut b, _) = bounds::build(&mol);
