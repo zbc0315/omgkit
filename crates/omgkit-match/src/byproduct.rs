@@ -233,6 +233,13 @@ pub struct CloseStats {
     /// 每成一根键就重算一次连通分量。眼下 `to_bond` 只有两三,看不出来;
     /// 它一旦随片段规模走,这就是一个平方项,而位点计数看不见。
     pub fragment_scans: u64,
+    /// 配对循环里"看过多少对空价"。是 [`site_visits`](Self::site_visits) 的一个子集,
+    /// 单独再数一份是为了让判据能直接断言**这一轮到底有几对**。
+    ///
+    /// 没有它的话,"连通分量重算是每根键一次、不是每对一次"这条性质就只能
+    /// 靠散文声称:一个只有一对空价的场景,两种写法给出的 `fragment_scans`
+    /// 一模一样,判据碰不到那一档而自己不知道。
+    pub pair_visits: u64,
 }
 
 /// 与 [`reconstruct`] 同一条路,外加工作量计数。
@@ -824,6 +831,7 @@ fn form_bonds(
         for (x, &i) in open_sites.iter().enumerate() {
             for &j in &open_sites[x + 1..] {
                 stats.site_visits += 1;
+                stats.pair_visits += 1;
                 if sites[i].opens == 0 || sites[j].opens == 0 {
                     continue;
                 }

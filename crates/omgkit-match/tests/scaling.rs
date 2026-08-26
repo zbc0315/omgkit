@@ -457,8 +457,8 @@ fn closing_byproducts_is_linear_in_fragment_size() {
         // 当场红,而 `site_visits` 纹丝不动(它记的是位点访问,不是图遍历)。
         //
         // **碰不到**:把重算搬进"按位点**对**"的循环。这个底物只有两处空价、
-        // 也就是**一对**,重算次数还是 1,变异实测退 0。要覆盖那一档得换一个
-        // 有 ≥3 处空价的离去片段,眼下没有 —— 写在这里,不假装守住了。
+        // 也就是**一对**(实测 `pair_visits` = 1),重算次数还是 1。那一档
+        // 现在由 `component_recompute_is_per_bond_not_per_pair` 守着。
         assert_eq!(
             st.fragment_scans, 1,
             "n={}:整个片段被走了 {} 遍。这个底物只成一根键,`form_bonds` 里那次\
@@ -512,4 +512,67 @@ fn closing_byproducts_is_linear_in_fragment_size() {
         })
         .collect();
     assert_pinned(&rows, WANT_SITE_VISITS, "收口");
+}
+
+/// **连通分量重算是"每成一根键一次",不是"每对空价一次"。**
+///
+/// 上面那条判据碰不到这一档,而且它自己不知道:`closing_byproducts_is_linear_in_fragment_size`
+/// 的底物只有**一对**空价(实测 `pair_visits` = 1),把 `components()` 搬进
+/// 按对的循环之后 `fragment_scans` 一点不变,变异实测退 0。
+///
+/// 这里换一个第一轮就有**三对**的场景:两条酯各留下一个"断一根键 + 让出一个氢"
+/// 的片段。实测 `pair_visits` = 3 + 1 = 4,`fragment_scans` = 2。
+/// 把重算搬进按对的循环,后者变成 4 —— 当场红。
+///
+/// **两条断言缺一不可。** 只钉 `fragment_scans` 的话,场景哪天退化回"每轮一对"
+/// 判据照样绿,而它守的那一档已经没了;`pair_visits` 那条就是这条判据自己的
+/// 区分力闸,它一掉到 2 就说明场景退化了。
+#[test]
+fn component_recompute_is_per_bond_not_per_pair() {
+    use omgkit_match::{byproduct, run_reactants};
+
+    let rxn = smarts::parse_reaction(
+        "[C:1](=[O:2])[O:3][CH2]C.[C:4](=[O:5])[O:6][CH2]C\
+         >>[C:1](=[O:2])[OH:3].[C:4](=[O:5])[OH:6]",
+    )
+    .expect("模板应能解析");
+    let mols: Vec<_> = ["CC(=O)OCCC", "CCC(=O)OCCCC"]
+        .iter()
+        .map(|smi| {
+            let mut m = smiles::parse(smi).expect("底物应能解析");
+            sanitize(&mut m).expect("应能净化");
+            m
+        })
+        .collect();
+    let inputs: Vec<_> = mols
+        .iter()
+        .map(|m| (m.clone(), MolProps::compute(m)))
+        .collect();
+    let outs = run_reactants(&rxn, &inputs, 1, false);
+    let outcome = outs.first().expect("应当出产物");
+
+    let (by, st) = byproduct::reconstruct_counted(&mols, outcome);
+    assert!(by.verdict.is_closed(), "这个场景应当收得了口");
+
+    // 质量守恒 —— 场景本身没走样
+    let heavy =
+        |m: &omgkit_core::MolBuilder| m.atoms().iter().filter(|a| a.atomic_num != 1).count();
+    assert_eq!(
+        outcome.products.iter().map(heavy).sum::<usize>()
+            + by.molecules.iter().map(heavy).sum::<usize>(),
+        mols.iter().map(heavy).sum::<usize>(),
+        "重原子数没守住"
+    );
+
+    assert_eq!(
+        st.pair_visits, 4,
+        "这个场景应当第一轮三对、第二轮一对。掉到 2 说明它退化成了'每轮一对',\
+         那正是上面那条判据碰不到的形状 —— 这条判据也就跟着碰不到了"
+    );
+    assert_eq!(
+        st.fragment_scans, 2,
+        "连通分量重算了 {} 次,而这里只成了两根键。等于 `pair_visits` 说明它被\
+         搬进了按对的循环 —— 那是个平方项",
+        st.fragment_scans
+    );
 }
