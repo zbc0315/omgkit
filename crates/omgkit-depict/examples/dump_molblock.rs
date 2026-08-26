@@ -32,8 +32,8 @@
 //! 还说自己对的"分开 —— 两者不是一回事。
 //!
 //! 没有四面体中心的分子直接跳过。
-use omgkit_depict::{generate, render::drawn_orders, stereo::Wedge, style::Style};
-use omgkit_io::molblock::{write_v2000, BondWedge, Record};
+use omgkit_depict::{generate, render::drawn_orders, style::Style};
+use omgkit_io::molblock::{write_v2000, Record};
 
 fn main() {
     let path = std::env::args()
@@ -79,19 +79,11 @@ fn main() {
         // 这里只负责把二维坐标与楔形翻过去。先前这个例子自己写了一份格式化,
         // 而三维那条路要再写一份,两份必然分家。
         let coords: Vec<[f64; 3]> = d.coords.iter().map(|p| [p.x, p.y, 0.0]).collect();
-        let wedges: Vec<BondWedge> = d
-            .wedges
-            .iter()
-            .map(|w| match *w {
-                Wedge::Up { narrow } => BondWedge::Up { narrow },
-                Wedge::Down { narrow } => BondWedge::Down { narrow },
-                Wedge::None => BondWedge::Plain,
-            })
-            .collect();
+        // 楔形两边是**同一个类型**(`omgkit_io::wedge::Wedge`),不用转换
         let rec = Record {
             title: "",
             coords: &coords,
-            wedges: &wedges,
+            wedges: &d.wedges,
             orders: &orders,
         };
         match write_v2000(m, &rec) {

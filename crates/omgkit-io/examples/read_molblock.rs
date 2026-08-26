@@ -28,7 +28,16 @@ fn main() {
                     let mut m = block.mol;
                     match omgkit_chem::pipeline::sanitize(&mut m) {
                         Err(e) => format!("<净化不了:{e}>"),
-                        Ok(()) => omgkit_io::canon::canonical_smiles(&m).smiles,
+                        Ok(()) => {
+                            // **净化之后**才打手性标记:判一个中心要知道它有几个
+                            // 隐式氢,而那一栏是净化算出来的。
+                            let _ = omgkit_io::wedge::assign_chirality_2d(
+                                &mut m,
+                                &block.coords,
+                                &block.wedges,
+                            );
+                            omgkit_io::canon::canonical_smiles(&m).smiles
+                        }
                     }
                 }
             };

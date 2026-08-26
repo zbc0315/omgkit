@@ -29,5 +29,6 @@ pub mod molblock;
 pub mod smarts;
 pub mod smiles;
 pub mod stereo;
+pub mod wedge;
 
 pub use error::{ParseError, ParseErrorKind, Result};

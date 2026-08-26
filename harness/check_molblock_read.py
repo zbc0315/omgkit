@@ -40,6 +40,26 @@ RDLogger.DisableLog("rdApp.*")
 # 这一档一旦变多,要么语料变了,要么该把 V3000 也读起来了,两种都得有人看见。
 MAX_V3000 = 3
 
+# **只差双键顺反**的条数上限。
+#
+# 我方眼下不从二维坐标反读顺反:那要先给每根候选双键挑参照原子(molblock 里
+# 没有方向键,挑法与 SMILES 那条路不同),是单独一块活。实测 365 条 ——
+# 钉在这里,不假装守住了。补上之后这个数该掉到 0。
+MAX_EZ_ONLY = 365
+
+# **四面体也不一样**的条数上限。
+#
+# 实测 5 条,全是桥环/稠环,而且**两个方向都有**:
+#
+# * 3 条我方少读一个中心 —— 二维布局退化时三个画出来的邻居张不出足够的体积,
+#   我方按设计判"这张图定不出构型"(见 `omgkit_io::wedge` 的 `ZERO_VOLUME_TOL`);
+# * 2 条我方多读一个 —— 桥头碳的构型由环系本身定死,外部实现的立体感知把这类
+#   "不是真立体中心"的标记摘掉,我方读的是纯几何。
+#
+# 所以这不是"我方保守",是**立体感知的边界不一样**。钉住是为了让它不悄悄变多;
+# 真要收敛得先把两边的"什么算真立体中心"对齐,那是另一块活。
+MAX_CHIRAL_DIFF = 5
+
 
 def write_blocks(out_path, corpus, limit):
     n = 0
@@ -77,18 +97,38 @@ def blocks(path):
             buf.append(line)
 
 
-def flat(smiles):
-    """抹掉立体、再去掉显式氢之后的规范串。读不了时给 None。
+def no_ez(smiles):
+    """只抹掉**双键顺反**、留着四面体的规范串。读不了时给 None。
 
-    **去氢那一步不能省。** 外部实现的 SMILES 解析器会保留"承载方向键的显式氢"
-    (`[H]/[O+]=c1…` 里那个 H 是一个原子),而我方眼下不读立体、写出的串没有
-    方向键,同一个氢就被合并进邻居 —— 两边原子数一个 9 一个 8,比出来是"不同的
-    分子",而那是**比法**造成的,不是读法。实测 8831 条里 26 条栽在这上面。
+    分档要分得开:"顺反没读"与"四面体读错了"是两件事,混在一档里的话前者会把
+    后者盖住 —— 而后者才是真的读错。
     """
     m = Chem.MolFromSmiles(smiles)
     if m is None:
         return None
-    Chem.RemoveStereochemistry(m)
+    for b in m.GetBonds():
+        b.SetStereo(Chem.BondStereo.STEREONONE)
+        b.SetBondDir(Chem.BondDir.NONE)
+    try:
+        m = Chem.RemoveHs(m)
+    except Exception:  # noqa: BLE001
+        return None
+    return Chem.MolToSmiles(m)
+
+
+def canon(smiles, drop_stereo):
+    """规范串。`drop_stereo` 为真时先抹掉立体。读不了时给 None。
+
+    **去显式氢那一步不能省。** 外部实现的 SMILES 解析器会保留"承载方向键的
+    显式氢"(`[H]/[O+]=c1…` 里那个 H 是一个原子),而两侧未必都写方向键 ——
+    同一个氢一边是原子、一边被合并进邻居,原子数一个 9 一个 8,比出来是
+    "不同的分子",而那是**比法**造成的,不是读法。实测 8831 条里 26 条栽在这上面。
+    """
+    m = Chem.MolFromSmiles(smiles)
+    if m is None:
+        return None
+    if drop_stereo:
+        Chem.RemoveStereochemistry(m)
     try:
         m = Chem.RemoveHs(m)
     except Exception:  # noqa: BLE001
@@ -104,6 +144,7 @@ def compare(blocks_path, ours_path, min_checked):
         ours[lineno] = got
 
     same = diff = unreadable = skipped = with_stereo = v3000 = 0
+    ez_only = chiral_diff = 0
     failures = []
     for lineno, smi, block in blocks(blocks_path):
         got = ours.get(lineno)
@@ -127,13 +168,23 @@ def compare(blocks_path, ours_path, min_checked):
             continue
         if any(a.GetChiralTag() != Chem.ChiralType.CHI_UNSPECIFIED for a in ref.GetAtoms()):
             with_stereo += 1
-        want = flat(Chem.MolToSmiles(ref))
-        mine = flat(got)
+        raw = Chem.MolToSmiles(ref)
+        want = canon(raw, drop_stereo=False)
+        mine = canon(got, drop_stereo=False)
         if mine is None:
             unreadable += 1
             failures.append(f"第 {lineno} 行 {smi}:我方写出的 `{got}` 外部实现读不了")
         elif mine == want:
             same += 1
+        elif no_ez(got) == no_ez(raw):
+            # 只差双键顺反 —— 我方还没读那一档
+            ez_only += 1
+        elif canon(got, drop_stereo=True) == canon(raw, drop_stereo=True):
+            # 骨架一样,四面体也不同 —— 桥环那一档
+            chiral_diff += 1
+            failures.append(
+                f"第 {lineno} 行 {smi}:骨架对、四面体不同 —— 我方 {mine},外部 {want}"
+            )
         else:
             diff += 1
             failures.append(f"第 {lineno} 行 {smi}:我方读成 {mine},外部实现读成 {want}")
@@ -141,14 +192,22 @@ def compare(blocks_path, ours_path, min_checked):
     print(f"读回来一致 {same};不一致 {diff};读不了/写不出 {unreadable};"
           f"外部实现自己读不了 {skipped}")
     print(f"  外部实现写成了 V3000、我方明确拒收的 {v3000} 条(上限 {MAX_V3000})")
-    print(f"  其中带立体标记的 {with_stereo} 条 —— **立体这一档眼下没比**"
-          f"(我方读取器还不赋值,见模块文档)")
+    print(f"  只差双键顺反 {ez_only} 条(上限 {MAX_EZ_ONLY});"
+          f"四面体也不同 {chiral_diff} 条(上限 {MAX_CHIRAL_DIFF});"
+          f"外部实现认为带立体的 {with_stereo} 条")
     if failures:
         for f in failures[:8]:
             print(f"  ✗ {f}")
     if diff or unreadable:
         print("\n读出来不是同一个分子。")
         return 1
+    for got_n, cap, what in [
+        (ez_only, MAX_EZ_ONLY, "只差双键顺反"),
+        (chiral_diff, MAX_CHIRAL_DIFF, "四面体也不同"),
+    ]:
+        if got_n > cap:
+            print(f"\n{what}的涨到 {got_n} 条,超过上限 {cap}")
+            return 1
     if v3000 > MAX_V3000:
         print(f"\nV3000 那一档涨到 {v3000} 条,超过上限 {MAX_V3000} —— "
               "要么语料变了,要么该把 V3000 也读起来了")

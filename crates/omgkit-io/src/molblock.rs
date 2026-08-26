@@ -27,6 +27,14 @@ use core::fmt::Write as _;
 
 use omgkit_core::{element, AtomFlags, BondOrder, MolBuilder};
 
+use crate::wedge::Wedge;
+
+/// 楔形。**与画图那边是同一个类型** —— 楔形是 molblock 键块第四列的字段,
+/// 语义只该有一份,见 [`crate::wedge`]。
+///
+/// 这个别名留着是因为"molblock 里的楔形"读起来比裸的 `Wedge` 清楚。
+pub type BondWedge = Wedge;
+
 /// V2000 计数行给原子数与键数各留 3 位。
 const V2000_LIMIT: usize = 999;
 
@@ -75,24 +83,6 @@ impl core::fmt::Display for WriteError {
             ),
         }
     }
-}
-
-/// 一根键在图上画成什么样。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BondWedge {
-    /// 普通实线
-    #[default]
-    Plain,
-    /// 实楔形:窄端那个原子在纸面,另一端朝观察者
-    Up {
-        /// 窄端所在的原子
-        narrow: u32,
-    },
-    /// 虚楔形:窄端那个原子在纸面,另一端背离观察者
-    Down {
-        /// 窄端所在的原子
-        narrow: u32,
-    },
 }
 
 /// 写一条 molblock 要的东西。
@@ -196,10 +186,10 @@ pub fn write_v2000(mol: &MolBuilder, rec: &Record) -> Result<String, WriteError>
         let wedge = rec.wedges.get(bi).copied().unwrap_or_default();
         // **窄端必须写成键的第一个原子。** 这条规则只在这里。
         let (first, second, code) = match wedge {
-            BondWedge::Plain => (b.begin, b.end, 0),
-            BondWedge::Up { narrow } | BondWedge::Down { narrow } => {
+            Wedge::None => (b.begin, b.end, 0),
+            Wedge::Up { narrow } | Wedge::Down { narrow } => {
                 let other = if narrow == b.begin { b.end } else { b.begin };
-                let code = if matches!(wedge, BondWedge::Up { .. }) {
+                let code = if matches!(wedge, Wedge::Up { .. }) {
                     1
                 } else {
                     6
@@ -450,9 +440,9 @@ pub fn read_v2000(text: &str) -> Result<Molblock, ReadError> {
             .map_err(|_| bad("这根键建不起来"))?;
         // 楔形的**窄端就是第一个原子** —— 与写出侧同一条规则
         wedges.push(match stereo {
-            1 => BondWedge::Up { narrow: a },
-            6 => BondWedge::Down { narrow: a },
-            _ => BondWedge::Plain,
+            1 => Wedge::Up { narrow: a },
+            6 => Wedge::Down { narrow: a },
+            _ => Wedge::None,
         });
     }
 
