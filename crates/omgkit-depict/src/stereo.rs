@@ -270,12 +270,6 @@ fn candidate_bonds(
     cands.into_iter().map(|c| c.5).collect()
 }
 
-/// 从坐标与楔形反读一个中心的手性。判不出来返回 `None`。
-///
-/// # 判据的口径
-///
-/// 这个函数**只看几何**,不看 `chiral_tag`。它与 [`assign_wedges`] 合起来是
-/// 一次往返;单独看,它是"图上画出来的构型是什么"的答案。
 /// 这个原子的第四个配体是不是一对**孤对电子**。
 ///
 /// 三配位的 S、Se、P、As 上那对孤对与隐式氢是同一件事:看不见,但占一个配体
@@ -302,6 +296,12 @@ fn has_lone_pair(mol: &MolBuilder, a: u32) -> bool {
 /// "别人读得回来"才谈得上。
 const ZERO_VOLUME_TOL: f64 = 0.1;
 
+/// 从坐标与楔形反读一个中心的手性。判不出来返回 `None`。
+///
+/// # 判据的口径
+///
+/// 这个函数**只看几何**,不看 `chiral_tag`。它与 [`assign_wedges`] 合起来是
+/// 一次往返;单独看,它是"图上画出来的构型是什么"的答案。
 #[must_use]
 pub fn read_chirality(
     mol: &MolBuilder,

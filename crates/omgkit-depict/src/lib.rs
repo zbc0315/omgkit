@@ -34,8 +34,6 @@
 //! 桥环、笼状体系在平面上没有好解,拥挤到一定程度的取代基也排不开。这些如实记在
 //! [`Depiction::degraded`] 与 [`Depiction::unresolved`] 里,不假装成功。
 
-#![allow(missing_docs)]
-
 /// 布局用的原子秩:**先按对称等价类,类内再按规范 SMILES 的输出次序**。
 ///
 /// 不是 [`canonical_ranks`](omgkit_io::canon::canonical_ranks) —— 那一个的

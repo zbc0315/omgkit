@@ -355,8 +355,11 @@ impl Label {
 pub enum LabelPlace {
     /// 横排,氢在符号的哪一侧
     Horizontal(HSide),
-    /// 竖排。`below` 为真时氢在符号**下面**。
-    Stacked { below: bool },
+    /// 竖排
+    Stacked {
+        /// 为真时氢在符号**下面**,否则在上面。
+        below: bool,
+    },
 }
 
 /// 这个原子的标签能不能竖排。
