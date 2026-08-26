@@ -286,6 +286,16 @@ jobs:
           cargo run -q -p omgkit-io --release --example read_molblock -- "$RUNNER_TEMP/in.sdf" > "$RUNNER_TEMP/read.txt"
           python harness/check_molblock_read.py --compare "$RUNNER_TEMP/in.sdf" "$RUNNER_TEMP/read.txt"
 
+      # 读 SDF(多条记录)。上一条每次只喂一条 molblock,记录边界整个绕开了;
+      # 这条多出来的是切分:`$$$$` 在哪、`M  END` 在哪、数据字段属于哪一条、
+      # 一条读不了之后后面还读不读得下去。条数先要对上 —— 静默跳过一条坏记录
+      # 会让分母悄悄变小,而"零分歧"在那时依然成立。
+      - name: 判官:读 SDF(多条记录、数据字段、坏记录不吞掉后面的)
+        run: |
+          python harness/check_sdf.py --write "$RUNNER_TEMP/data.sdf" harness/corpus/large.smi
+          cargo run -q -p omgkit-io --release --example read_sdf -- "$RUNNER_TEMP/data.sdf" > "$RUNNER_TEMP/sdf.txt"
+          python harness/check_sdf.py --compare "$RUNNER_TEMP/data.sdf" "$RUNNER_TEMP/sdf.txt"
+
       - name: 判官:配位几何的排列分组(与外部实现逐组比)
         run: python harness/check_stereo_perm.py
 

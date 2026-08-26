@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 # 漏一处就是个不会报错的假数。CI 的头注释里记过同一个坑(那里原先写着
 # "四道闸门",而步骤早已加到八步)。这里由 `step` 计数,末尾自查:
 # 改了步骤忘了改 `TOTAL`,脚本最后一行会红。
-TOTAL=35
+TOTAL=36
 N=0
 step() {
     N=$((N + 1))
@@ -266,6 +266,21 @@ step "判官:读 molblock(外部实现写的文件)"
 "$PY" harness/check_molblock_read.py --write "$WORK/in.sdf" harness/corpus/large.smi
 cargo run -q -p omgkit-io --release --example read_molblock -- "$WORK/in.sdf" >"$WORK/read.txt"
 "$PY" harness/check_molblock_read.py --compare "$WORK/in.sdf" "$WORK/read.txt"
+
+# **读 SDF(多条记录)。** 上一条每次只喂一条 molblock,记录边界整个绕开了。
+# 这条多出来的是**切分**:`$$$$` 在哪、`M  END` 在哪、数据字段属于哪一条、
+# 一条读不了之后后面还读不读得下去。
+#
+# 条数先要对上:我方每条都占一行(读不了的也占)。静默跳过一条坏记录会让分母
+# 悄悄变小,而"零分歧"在那时依然成立。语料里天然有这么一条(二茂铁,写出方
+# 自己换成了 V3000,我方拒收),它落在文件中间,后面几千条照读不误才算数。
+#
+# 变异实测:见 `>` 就开新字段 8830 条红;字段名取整行 8825 条红;
+# 读不了的静默跳过 —— 条数对不上,当场红。
+step "判官:读 SDF(多条记录、数据字段、坏记录不吞掉后面的)"
+"$PY" harness/check_sdf.py --write "$WORK/data.sdf" harness/corpus/large.smi
+cargo run -q -p omgkit-io --release --example read_sdf -- "$WORK/data.sdf" >"$WORK/sdf.txt"
+"$PY" harness/check_sdf.py --compare "$WORK/data.sdf" "$WORK/sdf.txt"
 
 step "判官:配位几何的排列分组(与外部实现逐组比)"
 "$PY" harness/check_stereo_perm.py

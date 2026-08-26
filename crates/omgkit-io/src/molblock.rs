@@ -273,6 +273,14 @@ pub enum ReadError {
         /// 读到的值
         got: i32,
     },
+    /// SDF 的数据字段头(`> <名字>`)里找不到 `<名字>`。
+    ///
+    /// 只有读 SDF 时才会出现。宁可报出来也不猜:猜错的后果是一条数据挂到了
+    /// 别的名字底下,而那种错查起来比读不出来难得多。
+    BadDataField {
+        /// 记录内的行号(从 0 数)
+        line: usize,
+    },
 }
 
 impl core::fmt::Display for ReadError {
@@ -287,6 +295,9 @@ impl core::fmt::Display for ReadError {
             }
             Self::BadBondType { line, got } => {
                 write!(f, "第 {line} 行:键类型 {got} 不在 1..=4(5..=8 是查询用的)")
+            }
+            Self::BadDataField { line } => {
+                write!(f, "第 {line} 行:数据字段头里没有 `<名字>`")
             }
         }
     }
@@ -539,6 +550,156 @@ pub fn read_v2000(text: &str) -> Result<Molblock, ReadError> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// SDF:多条记录
+// ---------------------------------------------------------------------------
+
+/// SDF 里的一条记录:一条 molblock,加上跟在它后面的数据字段。
+#[derive(Debug, Clone)]
+pub struct SdfRecord {
+    /// 分子那一段(到 `M  END` 为止)。
+    pub block: Molblock,
+    /// 数据字段,按文件里出现的顺序。
+    ///
+    /// **用 `Vec` 而不是映射**:同名字段在真实文件里出现过(供应商把多次测量
+    /// 各写一行),换成映射会静默地只留最后一条。名字重不重是调用方的判断,
+    /// 读取器不替它做。
+    ///
+    /// 多行的值用 `\n` 接起来,行尾的空白照原样留着 —— 那可能是有效数据。
+    pub data: Vec<(String, String)>,
+}
+
+/// 逐条读一个 SDF。每条给一个 `Result`,**读不了的那条不影响后面的**。
+///
+/// # 一条坏记录不许吞掉整个文件,也不许悄悄消失
+///
+/// 两种常见做法都不行:整份拒收会让一条坏记录废掉上万条好的;静默跳过会让
+/// **分母悄悄变小** —— 调用方数出来的条数与文件里的不符,而没有任何地方报错。
+/// 所以这里每条都给一个 `Result`:坏的那条以 `Err` 出现,位置(第几条)由
+/// 调用方数着,后面的照读不误。
+///
+/// 真实语料里这一档是有的:金属茂类配合物的键数超出 V2000 的表达能力,
+/// 写出方自己就换成了 V3000,而 V3000 这里明确拒收。
+///
+/// # 记录边界与 `M  END`
+///
+/// 记录以单独一行 `$$$$` 收尾(行尾空白与 `\r` 不计)。每条记录里必须有一行
+/// `M  END` —— 它是 molblock 自己的终止符,**也是数据字段的起点**:没有它就
+/// 不知道分子在哪结束、数据从哪开始,所以缺了就报
+/// [`Truncated`](ReadError::Truncated) 而不是猜。
+///
+/// 最后一条**可以没有** `$$$$`(有些写出方不写),它照样要有 `M  END`;
+/// 文件末尾只剩空白时不算一条记录。
+///
+/// # 数据字段
+///
+/// ```text
+/// > <名字>
+/// 值
+/// (空行)
+/// ```
+///
+/// 名字取第一对 `<` `>` 之间的东西 —— 字段头里还可能有登记号、DT 号之类,
+/// 一概不看。值是到下一个空行为止的所有行。
+///
+/// # 错误里的行号是**记录内**的行号
+///
+/// 不是文件内的。一条记录自己读起来是独立的一段,把整份文件的偏移量搬进来
+/// 会让 `read_v2000` 也得知道自己在哪 —— 那是把 SDF 的事情漏进 molblock 这一层。
+/// 第几条记录由调用方数(`enumerate`),两个数合起来定位。
+pub fn read_sdf(text: &str) -> impl Iterator<Item = Result<SdfRecord, ReadError>> + '_ {
+    records(text).map(read_record)
+}
+
+/// 把文件切成一条条记录的原文(不含 `$$$$` 那一行)。
+///
+/// 末尾只剩空白的那一段不算记录 —— 那是最后一个 `$$$$` 后面的换行。
+fn records(text: &str) -> impl Iterator<Item = &str> + '_ {
+    let mut rest = Some(text);
+    core::iter::from_fn(move || loop {
+        let cur = rest?;
+        let (chunk, tail) = match split_at_terminator(cur) {
+            Some((c, t)) => (c, Some(t)),
+            None => (cur, None),
+        };
+        let was_last = tail.is_none();
+        rest = tail;
+        if chunk.trim().is_empty() {
+            // 空段:最后一个 `$$$$` 之后的换行,或连着两行 `$$$$`。
+            // 前者不是记录 —— 算了的话每个文件末尾都会多出一条读不了的;
+            // 后者是文件本身的毛病,跳过它继续读下一段。
+            if was_last {
+                return None;
+            }
+            continue;
+        }
+        return Some(chunk);
+    })
+}
+
+/// 在第一行单独的 `$$$$` 处切开,返回 `(这一条, 剩下的)`。找不到时给 `None`。
+fn split_at_terminator(text: &str) -> Option<(&str, &str)> {
+    let mut at = 0usize;
+    for line in text.split_inclusive('\n') {
+        if line
+            .trim_end_matches('\n')
+            .trim_end_matches('\r')
+            .trim_end()
+            == "$$$$"
+        {
+            return Some((&text[..at], &text[at + line.len()..]));
+        }
+        at += line.len();
+    }
+    None
+}
+
+/// 读一条记录的原文:`M  END` 之前交给 [`read_v2000`],之后当数据字段读。
+fn read_record(chunk: &str) -> Result<SdfRecord, ReadError> {
+    // `str::lines` 自己就把 `\r\n` 里的 `\r` 去掉了 —— 这里不必再 trim 一次。
+    // (记录终止符那边要:它用 `split_inclusive('\n')`,拿到的是带 `\r` 的整行。)
+    let lines: Vec<&str> = chunk.lines().collect();
+    let end = lines
+        .iter()
+        .position(|l| l.starts_with("M  END"))
+        .ok_or(ReadError::Truncated { what: "M  END" })?;
+    let block = read_v2000(&lines[..=end].join("\n"))?;
+    Ok(SdfRecord {
+        block,
+        data: read_data_fields(&lines[end + 1..], end + 1)?,
+    })
+}
+
+/// 数据字段。`offset` 是这一段在记录里的起始行号,只用来把错误的行号说准。
+fn read_data_fields(lines: &[&str], offset: usize) -> Result<Vec<(String, String)>, ReadError> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if !line.starts_with('>') {
+            // 字段之间的空行,以及字段头之前的杂项。空行照跳,非空的也跳 ——
+            // 这一段的格式各家写法太多,只认 `> <名字>` 那一种,其余不当数据。
+            i += 1;
+            continue;
+        }
+        let name = field_name(line).ok_or(ReadError::BadDataField { line: offset + i })?;
+        i += 1;
+        let start = i;
+        while i < lines.len() && !lines[i].is_empty() {
+            i += 1;
+        }
+        out.push((name.to_string(), lines[start..i].join("\n")));
+    }
+    Ok(out)
+}
+
+/// 字段头里第一对 `<` `>` 之间的名字。
+fn field_name(line: &str) -> Option<&str> {
+    let open = line.find('<')?;
+    let close = line[open + 1..].find('>')? + open + 1;
+    Some(&line[open + 1..close])
+}
+
 /// `M  RAD` 的编码 → 未成对电子数。1 = 双线态(1 个)、2 = 单线态(2 个)、
 /// 3 = 三线态(2 个)。
 fn radical_electrons(code: i32) -> i32 {
@@ -546,5 +707,167 @@ fn radical_electrons(code: i32) -> i32 {
         1 | 2 => code.min(2),
         3 => 2,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 两条极小的记录,第二条带数据字段(其中一个是多行的,还有一对同名的)。
+    const TWO: &str = "\
+甲醇
+     RDKit          2D
+
+  2  1  0  0  0  0  0  0  0  0999 V2000
+   -0.7500    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    0.7500    0.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0
+  1  2  1  0
+M  END
+> <ID>
+1
+
+$$$$
+乙烷
+     RDKit          2D
+
+  2  1  0  0  0  0  0  0  0  0999 V2000
+   -0.7500    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    0.7500    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+  1  2  1  0
+M  END
+> <ID>
+2
+
+> <备注>
+第一行
+第二行
+
+> <ID>
+又一个
+
+$$$$
+";
+
+    fn smiles_of(r: &SdfRecord) -> String {
+        let mut m = r.block.mol.clone();
+        omgkit_chem::pipeline::sanitize(&mut m).expect("净化");
+        crate::canon::canonical_smiles(&m).smiles
+    }
+
+    #[test]
+    fn two_records_come_back_with_their_titles_and_molecules() {
+        let got: Vec<_> = read_sdf(TWO).collect();
+        assert_eq!(got.len(), 2);
+        let a = got[0].as_ref().expect("第一条");
+        let b = got[1].as_ref().expect("第二条");
+        assert_eq!(a.block.title, "甲醇");
+        assert_eq!(b.block.title, "乙烷");
+        assert_eq!(smiles_of(a), "CO");
+        assert_eq!(smiles_of(b), "CC");
+    }
+
+    /// 数据字段:按出现顺序、多行值用 `\n` 接起来、**同名的一条都不丢**。
+    #[test]
+    fn data_fields_keep_their_order_duplicates_and_line_breaks() {
+        let got: Vec<_> = read_sdf(TWO).collect();
+        let b = got[1].as_ref().expect("第二条");
+        assert_eq!(
+            b.data,
+            vec![
+                ("ID".to_string(), "2".to_string()),
+                ("备注".to_string(), "第一行\n第二行".to_string()),
+                ("ID".to_string(), "又一个".to_string()),
+            ]
+        );
+    }
+
+    /// **一条读不了的记录不许吞掉后面的,也不许自己消失。**
+    ///
+    /// 整份拒收会让一条坏记录废掉上万条好的;静默跳过会让分母悄悄变小 ——
+    /// 两种都不行,坏的那条要以 `Err` 出现在它自己的位置上。
+    #[test]
+    fn a_bad_record_in_the_middle_does_not_swallow_the_rest() {
+        let broken = TWO.replace("  2  1  0  0  0  0  0  0  0  0999 V2000\n   -0.7500    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n    0.7500    0.0000    0.0000 O",
+            "  0  0  0  0  0  0  0  0  0  0999 V3000\n   -0.7500    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n    0.7500    0.0000    0.0000 O");
+        assert_ne!(broken, TWO, "第一条没改到");
+        let got: Vec<_> = read_sdf(&broken).collect();
+        assert_eq!(got.len(), 2, "条数不能变");
+        assert_eq!(got[0].as_ref().err(), Some(&ReadError::V3000));
+        assert_eq!(smiles_of(got[1].as_ref().expect("第二条照读")), "CC");
+    }
+
+    /// 最后一条没写 `$$$$` 也认 —— 有些写出方不写。
+    #[test]
+    fn a_final_record_without_the_terminator_still_counts() {
+        let trimmed = TWO.strip_suffix("$$$$\n").expect("末尾是 $$$$");
+        let got: Vec<_> = read_sdf(trimmed).collect();
+        assert_eq!(got.len(), 2);
+        assert_eq!(smiles_of(got[1].as_ref().expect("第二条")), "CC");
+    }
+
+    /// 缺 `M  END` 就报截断,不猜分子在哪结束。
+    ///
+    /// 它是 molblock 自己的终止符,**也是数据字段的起点** —— 没有它,一条被
+    /// 截断的记录会被当成"分子读完了、只是没有数据",而那是编出来的。
+    #[test]
+    fn a_record_without_m_end_is_truncated_not_guessed() {
+        let no_end = TWO.replacen("M  END\n", "", 1);
+        assert_ne!(no_end, TWO, "第一条的 M  END 没删到");
+        let got: Vec<_> = read_sdf(&no_end).collect();
+        assert_eq!(
+            got[0].as_ref().err(),
+            Some(&ReadError::Truncated { what: "M  END" })
+        );
+    }
+
+    /// 字段头里没有 `<名字>` 就报出来,不猜。
+    #[test]
+    fn a_data_field_header_without_a_name_is_reported() {
+        let bad = TWO.replacen("> <ID>", "> DT12", 1);
+        assert_ne!(bad, TWO, "字段头没改到");
+        let got: Vec<_> = read_sdf(&bad).collect();
+        assert!(matches!(
+            got[0].as_ref().err(),
+            Some(ReadError::BadDataField { .. })
+        ));
+    }
+
+    /// `$$$$` 后面拖着空格也算终止符。
+    ///
+    /// **语料级判据碰不到这一条** —— 判官那份文件是外部实现写的,`$$$$` 干干净净。
+    /// 拿掉行尾那次 `trim_end` 全语料照样绿。真实文件里拖空格的有,所以留着,
+    /// 而"留着"要有个东西验,不能只靠一句话。
+    #[test]
+    fn a_terminator_with_trailing_spaces_still_ends_the_record() {
+        let padded = TWO.replace("$$$$\n", "$$$$   \n");
+        assert_ne!(padded, TWO, "终止符那两行没改到");
+        assert_eq!(read_sdf(&padded).count(), 2);
+    }
+
+    /// 整份文件用 Windows 换行(`\r\n`)读出来要一模一样。
+    ///
+    /// 真实的 SDF 多半来自 Windows。留着 `\r` 的话,终止符匹配不上(整个文件
+    /// 变成一条记录)、元素符号变成 `C\r`(查不到)—— 而错误信息里看不出多了什么。
+    #[test]
+    fn windows_line_endings_read_the_same() {
+        let crlf = TWO.replace('\n', "\r\n");
+        let a: Vec<_> = read_sdf(TWO).map(|r| r.map(|x| smiles_of(&x))).collect();
+        let b: Vec<_> = read_sdf(&crlf).map(|r| r.map(|x| smiles_of(&x))).collect();
+        assert_eq!(a.len(), 2);
+        assert_eq!(a, b);
+        let fields = read_sdf(&crlf)
+            .nth(1)
+            .expect("第二条")
+            .expect("读得出")
+            .data;
+        assert_eq!(fields[1].1, "第一行\n第二行", "多行值里不许留 \\r");
+    }
+
+    /// 末尾的空白不算一条记录 —— 算了的话每个文件都会多出一条读不了的。
+    #[test]
+    fn trailing_blank_lines_are_not_a_record() {
+        let padded = format!("{TWO}\n\n  \n");
+        assert_eq!(read_sdf(&padded).count(), 2);
     }
 }
