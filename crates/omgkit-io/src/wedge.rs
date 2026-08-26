@@ -17,6 +17,8 @@
 
 use omgkit_core::{ChiralTag, MolBuilder};
 
+use crate::stereo::FLAT_TOL;
+
 /// 一根键的楔形指派。**窄端在立体中心**,宽端在另一头 —— 这是画结构式的通例:
 /// 楔形描述的是"从这个中心看出去",窄端标出了那个中心。
 ///
@@ -285,8 +287,19 @@ pub fn chirality_from_wedges(
 ///
 /// 三维 molblock 的立体在**坐标本身**里,楔形一般是空的 —— 那一档这里一个也
 /// 打不出来,得另走一条路。名字里带 `_2d` 就是为了不让人误以为它两种都管。
+///
+/// # 认出三维就整个不做
+///
+/// "楔形一般是空的"只是**一般**。三维文件里偶尔留着楔形字段,那时
+/// [`chirality_from_wedges`] 会把 z 一丢、按 xy 投影算体积 —— 算得出一个答案,
+/// 而那个答案与分子无关。空答案可以接受,错答案不行,所以任何一个 `z` 不为零
+/// 就返回 0。这与顺反那一侧
+/// ([`crate::stereo::assign_bond_stereo_2d`])是同一条线。
 #[must_use]
 pub fn assign_chirality_2d(mol: &mut MolBuilder, coords: &[[f64; 3]], wedges: &[Wedge]) -> usize {
+    if coords.iter().any(|p| p[2].abs() > FLAT_TOL) {
+        return 0;
+    }
     let mut n = 0;
     for a in 0..u32::try_from(mol.num_atoms()).unwrap_or(0) {
         let Some(tag) = chirality_from_wedges(mol, coords, wedges, a) else {
@@ -298,4 +311,53 @@ pub fn assign_chirality_2d(mol: &mut MolBuilder, coords: &[[f64; 3]], wedges: &[
         }
     }
     n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一张画着楔形的二维图,以及把同一张图的某个 `z` 抬起来之后的样子。
+    const WEDGED: &str = "\
+C[C@H](N)O
+     RDKit          2D
+
+  4  3  0  0  0  0  0  0  0  0999 V2000
+   -1.2990   -0.7500    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    1.2990   -0.7500    0.0000 N   0  0  0  0  0  0  0  0  0  0  0  0
+    0.0000    1.5000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0
+  2  1  1  1
+  2  3  1  0
+  2  4  1  0
+M  END
+";
+
+    fn tagged(block: &str) -> usize {
+        let got = crate::molblock::read_v2000(block).expect("读 molblock");
+        let mut m = got.mol;
+        omgkit_chem::pipeline::sanitize(&mut m).expect("净化");
+        assign_chirality_2d(&mut m, &got.coords, &got.wedges)
+    }
+
+    /// 二维那张图读得出中心 —— 这是下一条测试的对照,少了它"三维读不出"
+    /// 可能只是因为这张图本来就没有立体。
+    #[test]
+    fn a_wedge_on_a_flat_drawing_gives_a_centre() {
+        assert_eq!(tagged(WEDGED), 1);
+    }
+
+    /// 同一张图把一个 `z` 抬起来,就整个不做。
+    ///
+    /// 三维文件里偶尔留着楔形字段,那时按 xy 投影算出来的体积与分子无关 ——
+    /// 空答案可以接受,错答案不行。
+    #[test]
+    fn the_same_drawing_lifted_into_3d_gives_nothing() {
+        let lifted = WEDGED.replace(
+            "    0.0000    1.5000    0.0000 O",
+            "    0.0000    1.5000    0.9000 O",
+        );
+        assert_ne!(lifted, WEDGED, "原子块那一行没改到");
+        assert_eq!(tagged(&lifted), 0);
+    }
 }

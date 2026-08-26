@@ -321,6 +321,13 @@ jobs:
       - name: 判官:构型生成的 Python 绑定(与 Rust 逐位比)
         run: python harness/check_python_conformer.py "$RUNNER_TEMP/ours.jsonl"
 
+      # 读 molblock 的绑定:与 Rust 侧逐字符比。这条路上翻译要多做两步 ——
+      # 净化,以及净化之后回来打立体标记。漏掉后一步不会报错,只会静默地把整个
+      # 文件的立体丢掉(分子照样合法、原子数照样对,`@` 和 `/` 全没了)。
+      # "逐字符相同"在两侧一起丢光时同样成立,所以再配一条"带立体符号的条数"下限。
+      - name: 判官:读 molblock 的 Python 绑定(与 Rust 逐字符比)
+        run: python harness/check_python_molblock.py "$RUNNER_TEMP/in.sdf" "$RUNNER_TEMP/read.txt"
+
       # ---- 先前只在本地手动跑的那四条 ----
       #
       # **闸不进 CI 就不是闸。** 它们一直躺在 `harness/` 里,谁想起来谁跑一次。

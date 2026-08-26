@@ -413,5 +413,68 @@ class ConformerTests(unittest.TestCase):
         self.assertIn(2, orders, "凯库勒化之后该有双键")
 
 
+# 一张画着楔形的二维图。楔形(键块第四列的 1)把手性画在纸面上,
+# 立体**不在**原子块里 —— 读的时候丢掉不会报错。
+WEDGED_MOLBLOCK = """C[C@H](N)O
+     RDKit          2D
+
+  4  3  0  0  0  0  0  0  0  0999 V2000
+   -1.2990   -0.7500    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0
+    1.2990   -0.7500    0.0000 N   0  0  0  0  0  0  0  0  0  0  0  0
+    0.0000    1.5000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0
+  2  1  1  1
+  2  3  1  0
+  2  4  1  0
+M  END
+"""
+
+
+class MolblockReading(unittest.TestCase):
+    """`parse_molblock`:读 `.mol` 文件的那一半。"""
+
+    def test_the_drawn_stereo_survives_the_read(self):
+        """楔形画着的手性,读出来要还在。
+
+        这是这条路上最容易静默丢掉的东西:立体在坐标与楔形里,而它们不在
+        `Mol` 里 —— 少走一步"净化之后回来打标记",分子照样合法、原子数照样对,
+        只是 `@` 没了。
+        """
+        got = omgkit.parse_molblock(WEDGED_MOLBLOCK)
+        self.assertIn("@", got.mol.to_canonical_smiles())
+
+    def test_it_reads_the_same_molecule_as_the_smiles_route(self):
+        """文件那条路与 SMILES 那条路读出同一个分子。"""
+        m = omgkit.parse_smiles("C[C@H](N)O")
+        m.sanitize()
+        self.assertEqual(
+            omgkit.parse_molblock(WEDGED_MOLBLOCK).mol.to_canonical_smiles(),
+            m.to_canonical_smiles(),
+        )
+
+    def test_title_and_coordinates_come_along(self):
+        """标题与坐标要一起交回来 —— 坐标不在 `Mol` 里,只能这么给。"""
+        got = omgkit.parse_molblock(WEDGED_MOLBLOCK)
+        self.assertEqual(got.title, "C[C@H](N)O")
+        self.assertFalse(got.is_3d)
+        self.assertEqual(len(got.coords), got.mol.num_atoms)
+        self.assertTrue(all(z == 0.0 for _, _, z in got.coords), "二维图的 z 该是 0")
+        self.assertEqual(got.coords[0], (-1.2990, -0.7500, 0.0))
+
+    def test_v3000_is_refused_rather_than_misread(self):
+        """V3000 明确拒收,而不是当成 V2000 硬读出一个错分子。"""
+        v3000 = (
+            "\n     RDKit          2D\n\n"
+            "  0  0  0  0  0  0  0  0  0  0999 V3000\n"
+            "M  V30 BEGIN CTAB\nM  V30 COUNTS 2 1 0 0 0\nM  V30 END CTAB\nM  END\n"
+        )
+        with self.assertRaises(ValueError):
+            omgkit.parse_molblock(v3000)
+
+    def test_garbage_raises_rather_than_returning_an_empty_molecule(self):
+        with self.assertRaises(ValueError):
+            omgkit.parse_molblock("这不是一个 molblock")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

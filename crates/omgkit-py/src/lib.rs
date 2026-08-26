@@ -284,6 +284,106 @@ impl PyConformer {
     }
 }
 
+/// 一个从 `.mol` / `.sdf` 文件读出来的记录:分子,加上它在文件里的坐标。
+///
+/// 由 `parse_molblock` 产出。分开成一个类而不是直接给 `Mol`,是因为坐标
+/// **不在** `Mol` 里:molblock 的立体化学一半靠坐标表达,把坐标丢掉等于把这一半
+/// 丢掉,而丢的时候一声不响。
+#[pyclass(name = "Molblock", module = "omgkit")]
+pub struct PyMolblock {
+    mol: PyMol,
+    coords: Vec<[f64; 3]>,
+    title: String,
+    is_3d: bool,
+}
+
+#[pymethods]
+impl PyMolblock {
+    /// 分子。**已经净化过,立体也打上了**(二维图的情形)。
+    #[getter]
+    fn mol(&self) -> PyMol {
+        self.mol.clone()
+    }
+
+    /// 逐原子的 `(x, y, z)`,顺序与 [`mol`](Self::mol) 的原子表一致。
+    ///
+    /// 二维图的 `z` 一律是 0。
+    #[getter]
+    fn coords(&self) -> Vec<(f64, f64, f64)> {
+        self.coords.iter().map(|p| (p[0], p[1], p[2])).collect()
+    }
+
+    /// 文件第一行的标题。
+    #[getter]
+    fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// 坐标是不是三维的(有任何一个 `z` 不为 0)。
+    ///
+    /// 文件里没有哪个字段直说这件事,只能这么判 —— 与外部实现同法。
+    #[getter]
+    fn is_3d(&self) -> bool {
+        self.is_3d
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<omgkit.Molblock {} atoms {}D{}>",
+            self.mol.inner.num_atoms(),
+            if self.is_3d { 3 } else { 2 },
+            if self.title.is_empty() {
+                String::new()
+            } else {
+                format!(" {:?}", self.title)
+            }
+        )
+    }
+}
+
+/// 读一条 V2000 molblock(`.mol` 文件的内容,或 `.sdf` 里 `$$$$` 之前的一段)。
+///
+/// 读不出来时抛 `ValueError`,消息里说明是哪一行的什么字段 —— V3000 会被明确
+/// 拒收,而不是当成 V2000 硬读出一个错分子。
+///
+/// # 它替你多做了两步,而且必须多做
+///
+/// 别的解析函数(如 `parse_smiles`)交回来的是**没净化**的分子,由调用方自己
+/// 决定什么时候净化。这里不一样:
+///
+/// * SMILES 的立体写在串里,净化推迟不丢任何东西;
+/// * molblock 的立体一半在**坐标与楔形**里,而那两样在 `Mol` 之外。给它们打上
+///   标记要先知道每个原子有几个隐式氢、要用对称等价类 —— 两样都是净化算出来的。
+///
+/// 所以顺序只能是"读 → 净化 → 回来打立体标记",而中间那一步一旦交给调用方,
+/// 漏了不会报错,只会**静默地把整个文件的立体丢掉**。与 `Mol.sanitize`
+/// 把顺反感知并进来是同一个理由:绑定层是给人直接用的,把必须成对的两步拆开
+/// 就是个陷阱。
+///
+/// # 三维文件眼下不读立体
+///
+/// 三维的立体在坐标本身里,是另一条路,还没做。`is_3d` 为真时交回来的分子
+/// **没有任何立体标记** —— 不是"这个分子没有立体",是"这一档还没实现"。
+/// 二维那条路(楔形定手性、坐标定顺反)是通的。
+#[pyfunction]
+fn parse_molblock(text: &str) -> PyResult<PyMolblock> {
+    let got =
+        omgkit_io::molblock::read_v2000(text).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let mut mol = got.mol;
+    omgkit_chem::sanitize(&mut mol).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    // 净化**之后**才打得上:手性要知道中心有几个隐式氢,顺反要用对称等价类。
+    // 两个函数自己认出三维就整个不做,绑定这一层不加判断 —— 加了的话,
+    // "什么时候读得出立体"就有了两个住处。
+    let _ = omgkit_io::wedge::assign_chirality_2d(&mut mol, &got.coords, &got.wedges);
+    let _ = omgkit_io::stereo::assign_bond_stereo_2d(&mut mol, &got.coords, &got.unknown_stereo);
+    Ok(PyMolblock {
+        mol: PyMol { inner: mol },
+        coords: got.coords,
+        title: got.title,
+        is_3d: got.is_3d,
+    })
+}
+
 #[pyfunction]
 fn parse_smiles(smiles: &str) -> PyResult<PyMol> {
     match omgkit_io::smiles::parse(smiles) {
@@ -583,8 +683,10 @@ fn omgkit(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyQuery>()?;
     m.add_class::<PyReaction>()?;
     m.add_class::<PyOutcome>()?;
+    m.add_class::<PyMolblock>()?;
     m.add_function(wrap_pyfunction!(parse_smiles, m)?)?;
     m.add_function(wrap_pyfunction!(parse_smarts, m)?)?;
     m.add_function(wrap_pyfunction!(parse_reaction, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_molblock, m)?)?;
     Ok(())
 }
