@@ -21,8 +21,20 @@ from [byproduct reconstruction](byproducts.md).*
 ['CC(NCC)=O']
 ```
 
-`reactants[i]` goes with reactant template *i*. Mismatched counts give an empty
-list — see [Intramolecular](#intramolecular) below for the case that needs.
+Each reactant template gets a **different** input molecule. Mismatched counts
+give an empty list — see [Intramolecular](#intramolecular) below for the case
+that needs.
+
+!!! tip "The order you hand the molecules in does not decide whether it runs"
+
+    Position is not chemistry. `rxn.run([amine, acid])` gives the same products
+    as `rxn.run([acid, amine])`: the engine tries "template *i* with molecule
+    *i*" first, and only if that yields nothing does it look for another
+    one-to-one assignment. When your order already lines up, the cost is exactly
+    the same as trying that one assignment alone.
+
+    So an empty list means one thing only: **there is no reaction site on these
+    molecules.**
 
 ## Atom mapping
 
@@ -58,7 +70,7 @@ with the extent measured on a real corpus.
 
 ## Intramolecular
 
-`run` pairs molecule *i* with template fragment *i*. When there are more
+`run` gives each template fragment a **different** molecule. When there are more
 template fragments than molecules — two fragments landing on the *same*
 molecule — that shape cannot be expressed, and `run` returns nothing.
 
@@ -72,7 +84,8 @@ out = rxn.run_on_substrate([one_molecule])
 
 | | `run` | `run_on_substrate` |
 |---|---|---|
-| Intermolecular | yes | yes, and no need to enumerate input permutations |
+| Intermolecular | yes | yes |
+| Sensitive to the order you pass molecules in | no | no |
 | Intramolecular | no | yes |
 | Salts (cation and anion as components of one molecule) | no | yes |
 | Cost | predictable | larger search space, less predictable |

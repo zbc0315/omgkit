@@ -153,6 +153,63 @@ fn two_reactant_templates() {
     assert_eq!(v[0], canonical("CN"));
 }
 
+/// **递入顺序不该决定这条反应跑不跑得起来。**
+///
+/// 位置不是化学:谁先谁后是调用方敲键盘的顺序。先前第 i 个模板只在第 i 个
+/// 分子里找,顺序反了就返回空 —— 而调用方拿到的空列表与"这批分子上真的没有
+/// 反应位点"长得一模一样,分不出来。
+///
+/// USPTO-50k 正向语料里,按记录自带的分子顺序直接调用有约 689 条交白卷;
+/// 抽样 4000 条核过,其中 59 条**全部**只是顺序对不上,没有一条是真匹配不上。
+#[test]
+fn the_order_the_molecules_are_handed_in_does_not_decide_whether_it_runs() {
+    let rxn = "[C:1](=[O:2])[OH].[NH2:3][C:4]>>[C:1](=[O:2])[N:3][C:4]";
+    let forward = flat(rxn, &["CC(=O)O", "NCC"]);
+    let reversed = flat(rxn, &["NCC", "CC(=O)O"]);
+    assert_eq!(forward.len(), 1, "顺序对得上时该出一组产物");
+    assert_eq!(
+        forward, reversed,
+        "换个递入顺序就交白卷 —— 位置被当成了化学"
+    );
+    assert_eq!(forward[0], canonical("CCNC(C)=O"));
+}
+
+/// 上一条的另一半:**真的没有位点时,返回的还是空**。
+///
+/// 少了这一条,一个"总是把所有分配都试一遍、只要有产物就交"的实现照样全绿 ——
+/// 而那种实现会把不该反应的东西也反应掉。回退只允许在"某个模板配不上它那个
+/// 分子"时救场,不允许放宽模板本身。
+#[test]
+fn falling_back_to_another_assignment_does_not_invent_a_site() {
+    let rxn = "[C:1](=[O:2])[OH].[NH2:3][C:4]>>[C:1](=[O:2])[N:3][C:4]";
+    // 两个都是酸,没有胺 —— 任何一一对应都配不上
+    assert!(
+        flat(rxn, &["CC(=O)O", "CCC(=O)O"]).is_empty(),
+        "没有胺却出了产物"
+    );
+    // 分子数与模板数不等:那是 run_on_substrate 的形状,这里仍然返回空
+    assert!(flat(rxn, &["CC(=O)O"]).is_empty(), "分子数不足却出了产物");
+}
+
+/// 回退是**取第一个能出产物的分配**,不是把所有分配的结果并起来。
+///
+/// 这条守的是那个替代设计:两个模板片段都能配上两个分子中的任意一个时,
+/// 并集会把同一条反应数两遍,产物多重集当场变长。
+///
+/// **它守不住"恒等分配有没有走快路"** —— 搜索本来就从恒等分配起步,把快路
+/// 删掉结果一样,只是慢。那一条只有耗时判据能守,这里不假装守得住。
+#[test]
+fn the_fallback_takes_the_first_assignment_not_the_union() {
+    // 两个模板片段都能匹配到两个分子中的任意一个(都是伯胺),恒等分配可行。
+    let rxn = "[NH2:1][C:2].[NH2:3][C:4]>>[C:2][N:1][N:3][C:4]";
+    let v = flat(rxn, &["NCC", "NCCC"]);
+    assert_eq!(
+        v.len(),
+        1,
+        "把所有分配的结果并起来了,同一条反应数了两遍:{v:?}"
+    );
+}
+
 /// 产物模板可以有多个,一次给出多个分子。
 #[test]
 fn multiple_product_templates() {

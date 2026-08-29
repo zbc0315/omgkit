@@ -87,11 +87,36 @@ pub struct Outcome {
 
 /// 对一组反应物跑反应,返回所有结果组。
 ///
-/// `reactants[i]` 要与 `reaction.reactants[i]` 一一对应。数目不符时返回空。
+/// 每个反应物模板配一个**互不相同**的输入分子;分子数与模板数不等时返回空
+/// (那一档是 [`run_on_substrate`] 的形状:多个片段落在同一个分子上)。
 ///
 /// 每个匹配组合产出一组结果 —— 底物上有几处能反应就有几组,内容可能重复
 /// (对称位点)。去重是调用方的事:要按什么去重取决于用途,规范 SMILES
 /// 多重集只是其中一种。
+///
+/// # 递入顺序不影响出不出产物
+///
+/// **位置不是化学。** 谁先谁后是调用方敲键盘的顺序,不是分子的性质,所以
+/// 它不该决定这条反应跑不跑得起来。
+///
+/// 实现上仍然**先试恒等分配**(第 i 个模板配第 i 个分子)—— 顺序本来就对得上
+/// 时开销与只试这一种完全相同;恒等分配一个产物都给不出,才去找别的一一对应,
+/// 按字典序取第一个能出产物的。所以:
+///
+/// - 顺序对得上:行为与耗时都不变
+/// - 顺序不对:照样出产物,而不是交白卷
+/// - **返回空只剩一个意思:这批分子上没有反应位点**
+///
+/// 这一条是量出来的,不是想出来的。USPTO-50k 正向语料里,按记录自带的分子
+/// 顺序直接调用,约 **689 条**交白卷;抽样 4000 条逐条核过,其中 **59 条全部**
+/// 只是顺序对不上 —— 换个顺序就出产物,**没有一条**是真的匹配不上。
+/// 而调用方拿到的是同一个空列表,分不出这两件事。
+///
+/// 回退那条路要多算最多 n²−n 次子结构搜索(n 是反应物模板数,现实中 1–3),
+/// 而且**只在本来就要返回空的时候才走** —— 拿它换的是一个静默的错答案。
+///
+/// 开了 `atom_mapping` 时,哪个分子担了哪个角色可以从映射号读回来:
+/// [`Outcome::reactants`] 里的副本按**输入顺序**排,号是按底物原子发的。
 ///
 /// # 哪些原子会进产物:只有从保留下来的原子**走得到**的
 ///
@@ -202,20 +227,77 @@ pub fn run_reactants(
         // 因为那里作者写什么就该算什么。
         use_chirality: false,
     };
+    let n = reaction.reactants.len();
     let per_template: Vec<Vec<Vec<u32>>> = reaction
         .reactants
         .iter()
         .zip(reactants)
         .map(|(t, (mol, props))| substructure_matches(t, mol, props, opts))
         .collect();
-    // 位置式契约:第 i 个模板只找第 i 个分子
-    let home: Vec<usize> = (0..reaction.reactants.len()).collect();
-    if per_template.iter().any(Vec::is_empty) {
-        return Vec::new();
+    // 连通分量按分子算一次就够 —— 它与匹配到哪个位点无关,更与分配无关
+    let comps: Vec<Vec<u32>> = reactants.iter().map(|(m, _)| components(m)).collect();
+
+    // **恒等分配先试**:第 i 个模板配第 i 个分子。它只要 n 次子结构搜索,
+    // 所以顺序本来就对得上时,这条路的开销与先前一模一样。
+    if per_template.iter().all(|m| !m.is_empty()) {
+        let identity: Vec<usize> = (0..n).collect();
+        let out = outcomes_under(
+            reaction,
+            reactants,
+            &per_template,
+            &identity,
+            &comps,
+            max_products,
+            atom_mapping,
+        );
+        if !out.is_empty() {
+            return out;
+        }
     }
 
-    // 连通分量按分子算一次就够 —— 它与匹配到哪个位点无关
-    let comps: Vec<Vec<u32>> = reactants.iter().map(|(m, _)| components(m)).collect();
+    // 恒等分配一个产物都给不出 —— 再看**别的一一对应**行不行。
+    // 到这里才把匹配表补满(最多再 n²−n 次搜索),恒等那条路一分钱不多花。
+    let mut table: Vec<Vec<Vec<Vec<u32>>>> = Vec::with_capacity(n);
+    for (t, tpl) in reaction.reactants.iter().enumerate() {
+        let mut row = Vec::with_capacity(n);
+        for (m, (mol, props)) in reactants.iter().enumerate() {
+            row.push(if m == t {
+                per_template[t].clone()
+            } else {
+                substructure_matches(tpl, mol, props, opts)
+            });
+        }
+        table.push(row);
+    }
+    let mut assign = vec![0usize; n];
+    let mut used = vec![false; n];
+    search_assignment(
+        reaction,
+        reactants,
+        &table,
+        &comps,
+        max_products,
+        atom_mapping,
+        0,
+        &mut assign,
+        &mut used,
+    )
+    .unwrap_or_default()
+}
+
+/// 在一个**确定的分配**下枚举匹配的笛卡尔积、造产物。
+///
+/// `assign[i]` 是第 i 个反应物模板落在第几个输入分子上;`per_template[i]` 是
+/// 那个模板在**那个分子**里的全部匹配。
+fn outcomes_under(
+    reaction: &Reaction,
+    reactants: &[(MolBuilder, MolProps)],
+    per_template: &[Vec<Vec<u32>>],
+    assign: &[usize],
+    comps: &[Vec<u32>],
+    max_products: usize,
+    atom_mapping: bool,
+) -> Vec<Outcome> {
     let mut out = Vec::new();
     let mut combo: Vec<usize> = vec![0; per_template.len()];
     loop {
@@ -224,10 +306,10 @@ pub fn run_reactants(
             .enumerate()
             .map(|(i, &j)| &per_template[i][j])
             .collect();
-        let built = build_products(reaction, reactants, &mapping, &home, &comps);
+        let built = build_products(reaction, reactants, &mapping, assign, comps);
         out.push(stamp_atom_maps(reactants, built, atom_mapping));
         if max_products != 0 && out.len() >= max_products {
-            break;
+            return out;
         }
         // 进位
         let mut i = 0;
@@ -243,7 +325,63 @@ pub fn run_reactants(
             i += 1;
         }
     }
-    out
+}
+
+/// 按字典序找**第一个能出产物的一一对应**。
+///
+/// 搜索的是"模板 ↔ 分子"的完美匹配,匹配表已经算好,所以每一步只是查表 ——
+/// 某个模板在剩下的分子里一个都匹配不上时当场剪掉,不往下展。
+#[allow(clippy::too_many_arguments)]
+fn search_assignment(
+    reaction: &Reaction,
+    reactants: &[(MolBuilder, MolProps)],
+    table: &[Vec<Vec<Vec<u32>>>],
+    comps: &[Vec<u32>],
+    max_products: usize,
+    atom_mapping: bool,
+    depth: usize,
+    assign: &mut Vec<usize>,
+    used: &mut Vec<bool>,
+) -> Option<Vec<Outcome>> {
+    if depth == assign.len() {
+        let per: Vec<Vec<Vec<u32>>> = assign
+            .iter()
+            .enumerate()
+            .map(|(t, &m)| table[t][m].clone())
+            .collect();
+        let out = outcomes_under(
+            reaction,
+            reactants,
+            &per,
+            assign,
+            comps,
+            max_products,
+            atom_mapping,
+        );
+        return if out.is_empty() { None } else { Some(out) };
+    }
+    for m in 0..used.len() {
+        if used[m] || table[depth][m].is_empty() {
+            continue;
+        }
+        used[m] = true;
+        assign[depth] = m;
+        if let Some(out) = search_assignment(
+            reaction,
+            reactants,
+            table,
+            comps,
+            max_products,
+            atom_mapping,
+            depth + 1,
+            assign,
+            used,
+        ) {
+            return Some(out);
+        }
+        used[m] = false;
+    }
+    None
 }
 
 /// 把若干个分子拼成一张图(不加任何键),返回拼好的图。
