@@ -42,6 +42,27 @@ was a no-op on the bulk of the corpus. The fix was to count only the records
 where the injection actually changed something, and to add a second injection
 that works on every molecule.
 
+### And check that red came from the mutation, not from the harness
+
+The mirror of the paragraph above. A mutation run that goes red is only evidence
+if it went red *for the reason you injected*.
+
+From this repository: a calibration script passed four corpus paths as a single
+quoted argument, so the judge failed with `FileNotFoundError` and exited 1 on
+every run. Three mutations in a row "went red" — and one of them was never
+looked at by that judge at all. In the same run, `maturin && pip install`
+skipped the install when the build failed, leaving the *previous* mutation's
+wheel installed, so one red was left over from the run before.
+
+An exit code says *red*, not *why*. When the harness itself is broken it goes
+red more eagerly than the code under test, and that red reads as the conclusion
+you were hoping for — which is what makes it the hardest to doubt.
+
+So: run the unmutated baseline first and confirm it is **green** (a red baseline
+means the harness is broken, not the code); then read the failing lines and check
+they name the thing you injected; then restore and verify with `shasum -a 256 -c`.
+Never let a build or install step be swallowed by `&&`.
+
 ## Coverage is a table, not a feeling
 
 The hardest defects are not "a judge got it wrong" — they are the ones **in the

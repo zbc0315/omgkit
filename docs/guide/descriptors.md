@@ -128,6 +128,35 @@ the step right after it. `Mol.sanitize()` does both.
 Skipping it does not raise — you get a full set of descriptors made of parse-time
 placeholders.
 
+## The Rust API
+
+```rust
+use omgkit_chem::{atom_descriptors, bond_descriptors, sanitize};
+
+let mut m = omgkit_io::smiles::parse("C/C=C/C(=O)O")?;
+sanitize(&mut m)?;
+omgkit_io::stereo::perceive_bond_stereo(&mut m);   // see below
+
+let a = atom_descriptors(&m);   // Vec<AtomDescriptors>
+let b = bond_descriptors(&m);   // Vec<BondDescriptors>
+assert!(a[0].gasteiger_is_valid());
+```
+
+The enums come back as enums here (`Hybridization::Sp3`,
+`BondStereo::Trans`), not as strings — the strings exist only at the Python
+boundary, where there is no enum to hand over.
+
+!!! warning "Rust callers must make that second call themselves"
+
+    `Mol.sanitize()` in Python runs **two** things: `omgkit_chem::sanitize`, and
+    then `omgkit_io::stereo::perceive_bond_stereo`, which turns the `/` and `\`
+    of the input into the double bond's own cis/trans property. The second lives
+    in `omgkit-io`, a sibling of `omgkit-chem` rather than a dependency, so
+    `sanitize` cannot call it.
+
+    Skipping it does not raise. Every bond just reports `BondStereo::None`, and
+    nothing about the result looks wrong.
+
 ## How this is checked
 
 Every one of the sixteen descriptors is compared atom-by-atom and bond-by-bond

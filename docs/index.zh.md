@@ -92,6 +92,8 @@ RDKit ETKDGv3 2025.09.2 失败 36 个(0.41%),omgkit 失败 1 个(0.01%)。
 
 - **[五分钟上手](getting-started/quickstart.md)** —— 解析、净化、匹配、反应
 - **[功能与用法](guide/index.md)** —— 一个能力一页,从任务出发
+- **[给模型做特征](guide/descriptors.md)** —— 图神经网络要读的那十六项,
+  以及为什么给的是名字而不是 one-hot
 - **[Python API](api/python.md)** —— 每个可调用项,带签名
 - **[开发者帮助](dev/index.md)** —— 构建、测试,以及推之前那一整套闸门
 

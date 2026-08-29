@@ -27,6 +27,22 @@ single bonds around the double bond in the input syntax; geometry is a property
 of the double bond itself. Keeping the two apart is what lets the writer put
 the slashes back in a different but equivalent place.
 
+## What runs on it afterwards
+
+Sanitization only *fills in* the molecule; nothing here computes anything a
+caller did not ask for. Two things read that output and are deliberately not
+part of the pipeline:
+
+| | Needs from sanitization |
+|---|---|
+| [Descriptors for ML](descriptors.md) | aromaticity, ring membership, hybridization, conjugation, implicit hydrogen counts, plus the cis/trans step above |
+| [Drawing](depict.md) and [3D structures](conformers.md) | the same, plus kekulization |
+
+Calling them on an unsanitized molecule does not raise. It hands back a full set
+of values made of parse-time placeholders — every atom `unspecified`, every bond
+geometry `none` — which is the failure mode worth knowing about, because nothing
+about the result looks wrong.
+
 ## The order is not arbitrary
 
 Each stage consumes what the ones before it produced. Aromaticity perception

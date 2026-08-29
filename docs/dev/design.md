@@ -41,7 +41,21 @@ Conversion goes both ways and the round trip is identity, checked by test.
 | **L7** Reactions | template application | product count comes from connected components of the rewritten graph |
 | **L8** Python bindings | PyO3 | do not silently add safety the Rust side does not have |
 
-## Three decisions worth knowing about
+Two things sit **beside** the layers rather than in them, because they read L2's
+output instead of producing it:
+
+| | What it does | The thing it must not get wrong |
+|---|---|---|
+| 2D depiction | coordinates and SVG/PNG output | the picture is decided by the molecule, not by how it was written |
+| Graph descriptors | the sixteen per-atom and per-bond values a graph model reads | report what cannot be computed as *not computed*, rather than as a default |
+
+Neither is called by `sanitize`, and both require it to have run. Of the sixteen
+descriptors, thirteen are L2 output handed over under one fixed set of
+conventions; the only new computation is the Gasteiger–Marsili partial charge,
+and the only new data are the Pauling electronegativity and isotope-mass columns
+of the element table.
+
+## Four decisions worth knowing about
 
 ### Aromaticity at L1 is a claim, not a fact
 
@@ -56,6 +70,20 @@ Removing a hydrogen, cutting a bond, reordering for canonical output — each
 changes that order, and each therefore has to rebase the tag. Getting it wrong
 raises nothing; it produces the mirror image. Every operation that reorders
 neighbours has a stereo-specific judge behind it for this reason.
+
+### A missing value is a value
+
+Two descriptors can come back as "not computed": the Pauling electronegativity
+of an element that has no accepted value, and the Gasteiger charge of an atom
+outside the parameter set. Both are reported as missing — `None` and a
+non-finite number — rather than filled in with a default.
+
+The reason is not tidiness. A featurizer has to decide whether to mask that
+input, and it can only decide if "we do not know" and "the value happens to be
+that" are still distinguishable when they reach it. Substituting a plausible
+default merges them, silently, at the one place where the difference matters.
+The same principle is why depiction reports `degraded` instead of handing back
+a picture whose configuration cannot be read.
 
 ### Product count comes from the graph
 

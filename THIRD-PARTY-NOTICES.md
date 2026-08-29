@@ -39,8 +39,10 @@ RDKit 的完整许可文本见 <https://github.com/rdkit/rdkit/blob/master/licen
 (`large.smi` 共 8863 行,生效 8839 条 —— 另外 24 行是**上游就注释掉的**用例,
 连同 `#` 一起照搬了过来;去重后 8725 条互不相同的 SMILES。)
 
-`harness/corpus/smoke.smi` 与 `harness/corpus/reactions.txt` 是本项目自己写的,
-不涉及第三方。
+`harness/corpus/` 下另外那几份 —— `smoke.smi`、`reactions.txt`、`hard.smi`、
+`bridged.smi`、`lonepair.smi`、`stereo_edge.smi`、`descriptors.smi` —— **都是本项目
+自己写的**,不涉及第三方。它们不是"挑几个跑得过的分子":每一份都照着某条算法
+假设挑,每一行攻击一条具体的分支,理由写在各自的文件头里。
 
 ## 需要一并引用的原始工作
 

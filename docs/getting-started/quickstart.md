@@ -189,6 +189,28 @@ True
 its place in the list instead of raising or vanishing. See
 [Reading and writing `.mol`/`.sdf`](../guide/molfiles.md).
 
+## Featurize for a model
+
+```pycon
+>>> m = omgkit.parse_smiles("CC(=O)Oc1ccccc1C(=O)O"); m.sanitize()
+>>> m.atom_descriptors()[1]
+{'atomic_num': 6, 'total_degree': 3, 'formal_charge': 0,
+ 'chiral_tag': 'unspecified', 'total_num_hs': 0, 'hybridization': 'sp2',
+ 'is_aromatic': False, 'is_in_ring': False, 'mass': 12.011,
+ 'electronegativity': 2.55, 'gasteiger_charge': 0.3075...,
+ 'gasteiger_valid': True}
+>>> m.bond_descriptors()[1]
+{'begin': 1, 'end': 2, 'order': 'double', 'is_conjugated': True,
+ 'is_in_ring': False, 'stereo': 'none', 'stereo_atoms': None}
+```
+
+Twelve values per atom and seven per bond, including Gasteiger partial charges.
+Categorical ones come back as names, not one-hot vectors — the vocabulary is
+your featurizer's decision. `electronegativity` is `None` where the element has
+no accepted Pauling value and `gasteiger_valid` is `False` where the charge
+could not be computed; neither is filled in with a default. See
+[Descriptors for ML](../guide/descriptors.md).
+
 ## Where to go next
 
 - [Guides](../guide/index.md) — one page per capability

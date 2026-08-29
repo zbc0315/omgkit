@@ -40,6 +40,35 @@ Two runs are byte-identical — the layout has no random component — so a diff
     committed SVGs quietly go stale. Until that is gated, it is on the author to
     re-run the script and look at the diff.
 
+## If you touch the element table, regenerate it — do not hand-edit
+
+`crates/omgkit-core/src/element_data.rs` is generated, and it is large: 119
+elements, 3111 isotope masses, 93 Pauling electronegativities, the early-atom
+table. It carries a `@generated` header for that reason.
+
+```shell
+python3 harness/gen_elements.py --rdkit ../rdkit --out crates/omgkit-core/src/element_data.rs
+```
+
+It needs an RDKit **source checkout** at the version pinned in
+`harness/requirements.lock`; the script refuses to run if the source and the
+installed package disagree, because a table from one version compared against
+baselines from another produces divergences that are not real.
+
+!!! warning "No gate watches this either, and here is what covers it instead"
+
+    Re-generating and diffing cannot be a CI gate — CI has no RDKit source tree.
+    What guards the table is a unit test in `omgkit-core` pinning a few textbook
+    values, **which elements have no value at all**, and the row counts. That
+    catches a shifted or truncated table, which is the realistic failure: the
+    parser once silently dropped H-1 and Ca-47 because two of the sixty-odd raw
+    string blocks put their first data row on the same physical line as the
+    opening `R"DAT(`.
+
+    What it does not catch is a single digit changed in place. Nothing does —
+    RDKit exposes no API for the electronegativity table, so there is no
+    independent reader to compare against. Do not hand-edit the file.
+
 ## What a change needs
 
 **A test that goes red when the change is reverted.** Please actually revert it

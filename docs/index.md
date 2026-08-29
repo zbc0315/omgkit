@@ -103,6 +103,8 @@ Full instructions in [Installation](getting-started/install.md).
 - **[Quickstart](getting-started/quickstart.md)** — parse, sanitize, match and
   react in five minutes
 - **[Guides](guide/index.md)** — one page per capability, task first
+- **[Descriptors for ML](guide/descriptors.md)** — the sixteen values a graph
+  model reads, and why they come back as names rather than one-hot vectors
 - **[Python API](api/python.md)** — every callable, with signatures
 - **[Developing](dev/index.md)** — build, test, and the full pre-push gate suite
 

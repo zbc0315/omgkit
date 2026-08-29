@@ -142,6 +142,35 @@ open("out.sdf", "w").write(conf.to_molblock(title="L-丙氨酸") + "$$$$\n")
 | RDKit ETKDGv3 2025.09.2 | 36(0.41%) | 多数是金属配合物 |
 | **omgkit** | **1(0.01%)** | 那一个的距离界本身自相矛盾 |
 
+## 给模型做特征
+
+图神经网络要从分子上读的东西,两个方法各一次调用交齐:原子 12 项、键 7 项,
+每一项的口径都与外部实现对齐。
+
+```python
+m = omgkit.parse_smiles("CC(=O)Oc1ccccc1C(=O)O"); m.sanitize()
+m.atom_descriptors()[1]
+# {'atomic_num': 6, 'total_degree': 3, 'formal_charge': 0,
+#  'chiral_tag': 'unspecified', 'total_num_hs': 0, 'hybridization': 'sp2',
+#  'is_aromatic': False, 'is_in_ring': False, 'mass': 12.011,
+#  'electronegativity': 2.55, 'gasteiger_charge': 0.3075..., 'gasteiger_valid': True}
+```
+
+**交的是描述符,不是编码。** 分类量给的是**名字**(`"sp3"`、`"ccw"`、
+`"aromatic"`),不是 one-hot,也不是整数编号。词表收哪几种元素、留不留"其它"
+兜底桶,是特征化那一侧的决定 —— 焊进库里等于把某一个模型的口径当成库的口径;
+整数编号更糟,它错位的时候没有任何地方会响。
+
+**两种"算不出",都如实交出去。** 元素没有公认的 Pauling 电负性时是 `None`;
+电荷落在参数表之外时 `gasteiger_valid` 为 `False`,而且这种失效**会沿着图扩散**。
+拿默认值顶上去,"不知道"和"值恰好是这个数"就成了同一格 —— 而分开这两件事,
+正是特征化那一侧需要这一位的全部理由。
+
+**顺反给的是 `cis`/`trans`,不是 `Z`/`E`。** 后者要 CIP 优先级,本库没有实现
+CIP;给出的是相对 `stereo_atoms` 那两个参照原子的顺反。两项必须一起看 ——
+四取代双键上换个参照,同一个几何会得出相反的标签。带上参照之后两者承载的
+几何信息相同,要 `Z`/`E` 的自己排一次 CIP 就能换算。
+
 ## 出图
 
 内置两套规范,每一个数都取自 ChemDraw 17.1 手册,不是照着眼睛调的。SVG 输出零依赖,
@@ -159,7 +188,7 @@ PNG 与 JPEG 在 `raster` feature 后面。
 ## 正确性
 
 上面每一句话背后都有一条判据,而且每条判据都先被证明过"行为坏掉时它会变红"。
-整套闸(条数以 `harness/gates.sh` 里的 `TOTAL` 为准,写这段时是 **40**)在每次
+整套闸(条数以 `harness/gates.sh` 里的 `TOTAL` 为准,写这段时是 **41**)在每次
 推送时跑一遍:在 8831 个分子的语料上逐条与外部实现比对,
 每一条都同时配了上限与下限 —— 免得喂空了也照样绿。
 

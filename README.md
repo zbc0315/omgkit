@@ -157,6 +157,42 @@ On the same 8831-molecule corpus:
 | RDKit ETKDGv3 2025.09.2 | 36 (0.41%) | mostly metal complexes |
 | **omgkit** | **1 (0.01%)** | the one case has contradictory distance bounds |
 
+## Descriptors for machine learning
+
+Everything a graph neural network reads off a molecule, in one call each — the
+twelve per-atom values and the seven per-bond ones, computed the way the
+reference implementation computes them.
+
+```python
+m = omgkit.parse_smiles("CC(=O)Oc1ccccc1C(=O)O"); m.sanitize()
+m.atom_descriptors()[1]
+# {'atomic_num': 6, 'total_degree': 3, 'formal_charge': 0,
+#  'chiral_tag': 'unspecified', 'total_num_hs': 0, 'hybridization': 'sp2',
+#  'is_aromatic': False, 'is_in_ring': False, 'mass': 12.011,
+#  'electronegativity': 2.55, 'gasteiger_charge': 0.3075..., 'gasteiger_valid': True}
+```
+
+**Descriptors, not an encoding.** Categorical values come back as names —
+`"sp3"`, `"ccw"`, `"aromatic"` — never one-hot vectors and never integer codes.
+Which elements go in the vocabulary and whether to keep an "other" bucket belong
+to your featurizer; baking one model's answer into a library makes it wrong for
+the next one, and integer codes are worse still because they are invisible when
+they shift.
+
+**Two ways a value can be missing, and neither is filled in.**
+`electronegativity` is `None` for elements with no accepted Pauling value;
+`gasteiger_valid` is `False` where the charge could not be computed, which
+happens outside the parameter set and **spreads along the graph**. A default
+would merge "we do not know" with "the value happens to be that" — and telling
+those apart is exactly what a featurizer needs the flag for.
+
+**Double-bond geometry is `cis`/`trans`, not `Z`/`E`.** The latter is defined by
+CIP priority and omgkit does not implement CIP ranking; what you get is the
+geometry relative to the two atoms in `stereo_atoms`. Read the two together —
+on a tetrasubstituted double bond a different choice of reference flips the
+label. With the reference atoms in hand the two carry the same information, so
+ranking them yourself converts one to the other.
+
 ## Drawing
 
 Two styles are built in, both with every number taken from the ChemDraw 17.1
@@ -176,7 +212,7 @@ whose configuration cannot be read.
 ## Correctness
 
 Every claim above has a judge behind it, and each judge had to be shown to go
-red when the behaviour is broken. The full suite (`TOTAL` in `harness/gates.sh`, **40** as of this writing) runs
+red when the behaviour is broken. The full suite (`TOTAL` in `harness/gates.sh`, **41** as of this writing) runs
 on every push; the gates compare
 omgkit against an external implementation record by record on a
 8831-molecule corpus, and each one carries a floor as well as a cap so that it
