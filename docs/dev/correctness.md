@@ -71,6 +71,7 @@ So the coverage table matters more than any single judge:
 | SMARTS **chirality** reference frame | `check_smarts_chirality.py` (with a discriminating-power check) |
 | Product-side **chirality**, four instruction kinds | `check_product_chirality.py` (with a discriminating-power check) |
 | Drawing (L9) | `omgkit-depict --example audit` over the whole corpus — see below |
+| Graph descriptors for ML | `check_descriptors.py` — all sixteen, atom by atom and bond by bond, over four corpora |
 
 **When adding a path, ask this table first.** Which cell does it fall in? No
 cell means a new gap.

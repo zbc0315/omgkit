@@ -13,9 +13,9 @@ homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
-omgkit-core = { path = "../omgkit-core", version = "0.0.3" }
-omgkit-chem = { path = "../omgkit-chem", version = "0.0.3" }
-omgkit-io = { path = "../omgkit-io", version = "0.0.3" }
+omgkit-core = { path = "../omgkit-core", version = "0.0.4" }
+omgkit-chem = { path = "../omgkit-chem", version = "0.0.4" }
+omgkit-io = { path = "../omgkit-io", version = "0.0.4" }
 
 [dev-dependencies]
 serde_json = "1"

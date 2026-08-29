@@ -606,5 +606,67 @@ class TwoDMolblock(unittest.TestCase):
         self.assertIn(2, orders, "凯库勒化之后该有双键")
 
 
+class Descriptors(unittest.TestCase):
+    """描述符的**翻译**:类型对不对、"算不出"有没有原样带过来。
+
+    十六项的值对不对由 `harness/check_descriptors.py` 拿四份语料逐原子比
+    (那才是化学那一侧),这里只盯翻译层特有的失效。
+    """
+
+    def _sanitized(self, smi):
+        m = omgkit.parse_smiles(smi)
+        m.sanitize()
+        return m
+
+    def test_lengths_line_up_with_the_molecule(self):
+        m = self._sanitized("CC(=O)Oc1ccccc1C(=O)O")
+        self.assertEqual(len(m.atom_descriptors()), m.num_atoms)
+        self.assertEqual(len(m.bond_descriptors()), m.num_bonds)
+
+    def test_types_are_what_the_docs_say(self):
+        d = self._sanitized("C[C@H](N)C(=O)O").atom_descriptors()[1]
+        for key in ("atomic_num", "total_degree", "formal_charge", "total_num_hs"):
+            self.assertIsInstance(d[key], int, key)
+        for key in ("chiral_tag", "hybridization"):
+            self.assertIsInstance(d[key], str, key)
+        for key in ("is_aromatic", "is_in_ring", "gasteiger_valid"):
+            self.assertIsInstance(d[key], bool, key)
+        for key in ("mass", "electronegativity", "gasteiger_charge"):
+            self.assertIsInstance(d[key], float, key)
+        # 布尔别翻成 0/1:`isinstance(1, int)` 是真,反过来不成立
+        self.assertIs(d["is_aromatic"], False)
+
+    def test_missing_electronegativity_arrives_as_none_not_zero(self):
+        """氦没有公认的 Pauling 值。翻成 0.0 的话,下游再也分不出这一格。"""
+        d = self._sanitized("[He]").atom_descriptors()[0]
+        self.assertIsNone(d["electronegativity"])
+
+    def test_an_uncomputable_charge_arrives_as_a_number_not_an_exception(self):
+        """表外元素给的是 nan/inf。翻译层不许把它变成异常,也不许悄悄填 0。"""
+        d = self._sanitized("[Na][Na]").atom_descriptors()
+        self.assertTrue(any(not x["gasteiger_valid"] for x in d))
+        for x in d:
+            if not x["gasteiger_valid"]:
+                self.assertIsInstance(x["gasteiger_charge"], float)
+                self.assertNotEqual(x["gasteiger_charge"], 0.0)
+
+    def test_stereo_and_its_reference_atoms_arrive_together(self):
+        for b in self._sanitized("C/C=C/C").bond_descriptors():
+            if b["stereo"] == "none":
+                self.assertIsNone(b["stereo_atoms"])
+            else:
+                self.assertIsInstance(b["stereo_atoms"], tuple)
+                self.assertEqual(len(b["stereo_atoms"]), 2)
+
+    def test_categorical_values_are_names_not_codes(self):
+        """整数编号只有绑定这一层有,换一版整体错位而调用方看不出来。"""
+        d = self._sanitized("c1ccccc1").atom_descriptors()[0]
+        self.assertEqual(d["hybridization"], "sp2")
+        self.assertEqual(d["chiral_tag"], "unspecified")
+        self.assertEqual(
+            self._sanitized("c1ccccc1").bond_descriptors()[0]["order"], "aromatic"
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -32,6 +32,7 @@ m.to_canonical_smiles()          # 'Nc1ccccc1C(=O)O'
 | **读写 `.mol` / `.sdf`** | V2000 molblock 与多记录 SDF,二维三维都读写,立体化学两个方向都过得去 |
 | **画结构式** | 2D 坐标与 SVG/PNG/JPEG 输出,两套绘图规范;画不好的地方**如实报出来** |
 | **生成三维构型** | 每个分子一个确定性构型 —— 无随机种子,无重试循环 |
+| **给模型做特征** | 图神经网络要读的十六个原子/键描述符,含 Gasteiger 部分电荷 |
 | **批处理** | 列式 `MolBatch`,逐分子零拷贝视图 |
 
 ## 和别的有什么不一样
@@ -75,12 +76,12 @@ RDKit ETKDGv3 2025.09.2 失败 36 个(0.41%),omgkit 失败 1 个(0.01%)。
 
     ```toml
     [dependencies]
-    omgkit-core   = "0.0.3"
-    omgkit-io     = "0.0.3"
-    omgkit-chem   = "0.0.3"
-    omgkit-match  = "0.0.3"
-    omgkit-depict = "0.0.3"
-    omgkit-conf   = "0.0.3"
+    omgkit-core   = "0.0.4"
+    omgkit-io     = "0.0.4"
+    omgkit-chem   = "0.0.4"
+    omgkit-match  = "0.0.4"
+    omgkit-depict = "0.0.4"
+    omgkit-conf   = "0.0.4"
     ```
 
 按需取用,每一层只依赖它下面的层。完整说明见[安装](getting-started/install.md)。

@@ -5,7 +5,7 @@
 //! 数字不一致都会在 ChEMBL 差分测试里表现为成千条难以定位的分歧,
 //! 所以它是生成的而非手写的。
 
-use crate::element_data::{symbol_to_atomic_num, ELEMENTS, IS_EARLY_ATOM};
+use crate::element_data::{symbol_to_atomic_num, ELEMENTS, ISOTOPE_MASSES, IS_EARLY_ATOM};
 
 /// 单个元素的静态数据。
 #[derive(Debug, Clone, Copy)]
@@ -20,14 +20,25 @@ pub struct Element {
     pub rcov: f32,
     /// 范德华半径 (Å)
     pub rvdw: f32,
-    /// 标准原子量
-    pub mass: f32,
+    /// 标准原子量。
+    ///
+    /// **f64 而不是 f32**:上游表里写的是 `12.011`,存成 f32 再读回来是
+    /// 12.0109996…,差 3e-7。这点差在化学上无关紧要,可它让"与参照逐位相同"
+    /// 变成"与参照差在末几位",判据只好配一个容差 —— 容差一旦有了,就再也
+    /// 分不出"存储精度"和"抄错了一位"。电负性同理。
+    pub mass: f64,
     /// 外层电子数
     pub outer_electrons: u8,
     /// 最常见同位素的质量数
     pub common_isotope: u16,
     /// 最常见同位素的精确质量
     pub common_isotope_mass: f64,
+    /// Pauling 电负性。
+    ///
+    /// `None` 表示**该元素没有公认的 Pauling 值**(稀有气体 He/Ne/Ar/Rn、
+    /// Pm、Eu、Tb、Yb、Fr 等),不是"还没填"。两者必须能被下游分开:
+    /// 拿一个默认数顶上去,调用方就再也看不出这一格是量出来的还是补的。
+    pub electronegativity: Option<f64>,
     /// 默认价列表。`-1` 表示无价约束(该元素不参与隐式氢推断)。
     pub valences: &'static [i8],
 }
@@ -68,6 +79,25 @@ pub fn by_symbol(symbol: &str) -> Option<&'static Element> {
 #[must_use]
 pub fn atomic_num_of(symbol: &str) -> Option<u8> {
     symbol_to_atomic_num(symbol)
+}
+
+/// 某个同位素的精确质量。该元素/质量数不在表里时返回 `None`。
+///
+/// 与"标准原子量"([`Element::mass`])是两件事:后者是天然丰度加权的平均值,
+/// 与写不写同位素标注无关;这里给的是**指定那一个核素**的质量。
+/// 氘(`[2H]`)的标准原子量仍是 1.008,精确质量是 2.0141 —— 差了一倍,
+/// 混用会在氘代化合物上悄悄给出错的数。
+///
+/// 表由 `harness/gen_elements.py` 从 RDKit `atomic_data.cpp` 的
+/// `isotopesAtomData` 抽取(3111 条,覆盖 113 种元素;105–109 号在源表里
+/// 本来就没有数据)。
+#[must_use]
+pub fn isotope_mass(atomic_num: u8, mass_number: u16) -> Option<f64> {
+    ISOTOPE_MASSES
+        .get(atomic_num as usize)?
+        .iter()
+        .find(|&&(m, _)| m == mass_number)
+        .map(|&(_, mass)| mass)
 }
 
 /// 表中元素总数(含 0 号通配原子)。
@@ -193,6 +223,86 @@ mod tests {
                 e.symbol
             );
         }
+    }
+
+    /// 电负性表的护栏。
+    ///
+    /// 表是从 RDKit 源码抽的,而 CI 里没有那份源码 —— 重新生成一遍再逐字节比
+    /// 的闸进不了 CI,进不了 CI 就不是闸。所以这里钉两样在 CI 里跑得动的:
+    ///
+    /// 1. **几个课本上的值**(氟最大、铯最小、碳氧氢),抓整表错位与量纲写错;
+    /// 2. **哪些元素没有值**,以及有值的元素**个数**。
+    ///
+    /// 第 2 条是关键:没有公认 Pauling 值的元素(稀有气体、Pm/Eu/Tb/Yb/Fr)
+    /// 必须是 `None`。谁要是给它们补个"默认 2.0",这里立刻红 —— 那种补法会让
+    /// 下游再也分不出"这个元素没有值"和"这个元素的值恰好是 2.0"。
+    #[test]
+    fn pauling_electronegativity_table() {
+        let en = |sym: &str| by_symbol(sym).unwrap().electronegativity;
+        // 课本值:氟最大 3.98,铯最小 0.79
+        assert_eq!(en("F"), Some(3.98));
+        assert_eq!(en("Cs"), Some(0.79));
+        assert_eq!(en("H"), Some(2.2));
+        assert_eq!(en("C"), Some(2.55));
+        assert_eq!(en("N"), Some(3.04));
+        assert_eq!(en("O"), Some(3.44));
+        // 全表的最大值就该是氟
+        let max = ELEMENTS
+            .iter()
+            .filter_map(|e| e.electronegativity)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            (max - 3.98).abs() < f64::EPSILON,
+            "全表最大电负性应为氟的 3.98,实得 {max}"
+        );
+
+        // 没有公认值的:如实为 None
+        for sym in ["He", "Ne", "Ar", "Rn", "Pm", "Eu", "Tb", "Yb", "Fr"] {
+            assert_eq!(en(sym), None, "{sym} 没有公认的 Pauling 值,应为 None");
+        }
+        // 通配原子当然也没有
+        assert_eq!(by_atomic_num(0).unwrap().electronegativity, None);
+
+        let n = ELEMENTS
+            .iter()
+            .filter(|e| e.electronegativity.is_some())
+            .count();
+        assert_eq!(
+            n, 93,
+            "有电负性的元素个数变了 —— 表被改过,重跑 gen_elements.py"
+        );
+    }
+
+    /// 同位素质量表的护栏。CI 里没有 RDKit 源码,所以钉几个核素 + 一条
+    /// "标准原子量与精确质量不是一回事"的对照。
+    #[test]
+    fn isotope_mass_table() {
+        // 氕与氘:标准原子量都是 1.008,精确质量差了一倍
+        assert_eq!(by_symbol("H").unwrap().mass, 1.008);
+        assert_eq!(isotope_mass(1, 1), Some(1.007_825_032));
+        assert_eq!(isotope_mass(1, 2), Some(2.014_101_778));
+        assert_eq!(isotope_mass(6, 12), Some(12.0));
+        assert_eq!(isotope_mass(6, 13), Some(13.00335484));
+        assert_eq!(isotope_mass(7, 15), Some(15.0001089));
+        // 表里没有的质量数、以及源表本来就没有数据的元素(105–109)
+        assert_eq!(isotope_mass(6, 200), None);
+        assert_eq!(isotope_mass(105, 268), None);
+        // 每个有数据的元素都得含它最常见的那个同位素 —— 分块解析漏首行时,
+        // 漏掉的恰恰是排在最前的质量数(实测漏过 H-1)
+        for e in ELEMENTS.iter() {
+            let rows = ISOTOPE_MASSES[e.atomic_num as usize];
+            if rows.is_empty() || e.common_isotope == 0 {
+                continue;
+            }
+            assert!(
+                isotope_mass(e.atomic_num, e.common_isotope).is_some(),
+                "{} 的最常见同位素 {} 不在表里",
+                e.symbol,
+                e.common_isotope
+            );
+        }
+        let n: usize = ISOTOPE_MASSES.iter().map(|r| r.len()).sum();
+        assert_eq!(n, 3111, "同位素条目数变了 —— 表被改过,重跑 gen_elements.py");
     }
 
     /// 这些默认价是隐式氢推断的基石。

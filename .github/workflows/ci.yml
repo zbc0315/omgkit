@@ -366,6 +366,26 @@ jobs:
       - name: 判官:写出去的 molblock 我方自己读回来
         run: python harness/check_molblock_roundtrip.py harness/corpus/large.smi
 
+      # 图神经网络特征化要读的那十六个描述符。走产品那条路(`parse_smiles` →
+      # `sanitize` → `atom_descriptors` / `bond_descriptors`),逐原子逐键与 RDKit 比。
+      #
+      # **四份语料一份都不能少。** `large` 给规模与真实分布,`hard` 给难例,
+      # `smoke` 里才有 `@SP`/`@TB`/`@OH` 这类取值,`descriptors` 专喂前三份都走不到
+      # 的三档:没有公认 Pauling 电负性的元素、Gasteiger 参数表外的金属、同位素标注。
+      # 少喂一份,对应那几列就恒为同一个值 —— 逐位比对当然全绿。
+      #
+      # 变异实测:参数表抄错一位 93381 处红;总连接度漏掉隐式氢 76840 处红;
+      # 原子量不看同位素 21 处红;顺反永远交 None 408 处红;钉死表少命中一条 → 红;
+      # 空语料 → 红。够不着的一档:电负性的**值**改一位它是绿的,那一项由
+      # omgkit-core 的 `pauling_electronegativity_table` 单元测试守(在上面的主 job 里)。
+      - name: 判官:图特征描述符(十六项,逐原子逐键)
+        run: |
+          python harness/check_descriptors.py \
+            harness/corpus/large.smi \
+            --extra harness/corpus/hard.smi \
+            --extra harness/corpus/smoke.smi \
+            --extra harness/corpus/descriptors.smi
+
       # ---- 先前只在本地手动跑的那四条 ----
       #
       # **闸不进 CI 就不是闸。** 它们一直躺在 `harness/` 里,谁想起来谁跑一次。

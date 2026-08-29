@@ -34,6 +34,7 @@ m.to_canonical_smiles()          # 'c1cccc(c1C(O)=O)N'
 | **Read and write `.mol` / `.sdf`** | V2000 molblocks and multi-record SDF, in 2D and 3D, with stereochemistry read and written both ways |
 | **Draw structures** | 2D coordinates and SVG/PNG/JPEG output, in two drawing styles — with an explicit report of anything it could not draw well |
 | **Generate 3D structures** | One deterministic conformer per molecule — no random seed, no retry loop |
+| **Featurize for ML** | The sixteen per-atom and per-bond descriptors a graph neural network reads, Gasteiger partial charges included |
 | **Work in batches** | A columnar `MolBatch` with zero-copy per-molecule views |
 
 ## What makes it different
@@ -84,12 +85,12 @@ to prove it does not pass vacuously. The whole suite runs on every push. See
 
     ```toml
     [dependencies]
-    omgkit-core   = "0.0.3"
-    omgkit-io     = "0.0.3"
-    omgkit-chem   = "0.0.3"
-    omgkit-match  = "0.0.3"
-    omgkit-depict = "0.0.3"
-    omgkit-conf   = "0.0.3"
+    omgkit-core   = "0.0.4"
+    omgkit-io     = "0.0.4"
+    omgkit-chem   = "0.0.4"
+    omgkit-match  = "0.0.4"
+    omgkit-depict = "0.0.4"
+    omgkit-conf   = "0.0.4"
     ```
 
 Take only the layers you need; each depends only on the ones below it.

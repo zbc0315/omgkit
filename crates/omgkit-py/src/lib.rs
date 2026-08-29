@@ -24,8 +24,68 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use omgkit_core::MolBuilder;
+
+/// 杂化状态的名字。
+///
+/// 交出去的是**名字**,不是编号:编号只有这一层有,换一版就可能整体错位,
+/// 而拿它去建特征列的人看不出来。名字改了则立刻炸在调用方脸上。
+fn hybridization_name(h: omgkit_core::Hybridization) -> &'static str {
+    use omgkit_core::Hybridization as H;
+    match h {
+        H::Unspecified => "unspecified",
+        H::S => "s",
+        H::Sp => "sp",
+        H::Sp2 => "sp2",
+        H::Sp3 => "sp3",
+        H::Sp2d => "sp2d",
+        H::Sp3d => "sp3d",
+        H::Sp3d2 => "sp3d2",
+    }
+}
+
+/// 手性标记的名字。记的是**几何类别**,不是 CIP 的 R/S。
+fn chiral_tag_name(c: omgkit_core::ChiralTag) -> &'static str {
+    use omgkit_core::ChiralTag as C;
+    match c {
+        C::Unspecified => "unspecified",
+        C::Cw => "cw",
+        C::Ccw => "ccw",
+        C::Allene => "allene",
+        C::SquarePlanar => "square_planar",
+        C::TrigonalBipyramidal => "trigonal_bipyramidal",
+        C::Octahedral => "octahedral",
+    }
+}
+
+/// 键级的名字。与 `Mol.bonds` 给的数值键级是同一件事的两种写法 ——
+/// 芳香在数值那边是 1.5,在这边是它自己一档。
+fn bond_order_name(o: omgkit_core::BondOrder) -> &'static str {
+    use omgkit_core::BondOrder as B;
+    match o {
+        B::Unspecified => "unspecified",
+        B::Single => "single",
+        B::Double => "double",
+        B::Triple => "triple",
+        B::Quadruple => "quadruple",
+        B::Aromatic => "aromatic",
+        B::Dative => "dative",
+    }
+}
+
+/// 双键顺反的名字。`z`/`e` 依 CIP 优先级,`cis`/`trans` 依记录的参照原子。
+fn bond_stereo_name(s: omgkit_core::BondStereo) -> &'static str {
+    use omgkit_core::BondStereo as S;
+    match s {
+        S::None => "none",
+        S::Z => "z",
+        S::E => "e",
+        S::Cis => "cis",
+        S::Trans => "trans",
+    }
+}
 
 /// 一个分子。
 ///
@@ -205,6 +265,100 @@ impl PyMol {
         };
         omgkit_io::molblock::write_v2000(&grown, &rec)
             .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// 逐原子的描述符,按存储顺序。返回 `list[dict]`。
+    ///
+    /// 每个字典 12 个键:
+    ///
+    /// | 键 | 类型 | 说明 |
+    /// |---|---|---|
+    /// | `atomic_num` | int | 元素种类。0 是通配原子 `*` |
+    /// | `total_degree` | int | 显式邻居数 + 总氢数 |
+    /// | `formal_charge` | int | 形式电荷 |
+    /// | `chiral_tag` | str | 手性标记的几何类别,不是 R/S |
+    /// | `total_num_hs` | int | 显式声明 + 隐式推断,**不含**独立的 `[H]` 原子 |
+    /// | `hybridization` | str | 杂化 |
+    /// | `is_aromatic` | bool | 是否芳香 |
+    /// | `is_in_ring` | bool | 是否在环上 |
+    /// | `mass` | float | 标了同位素用该核素的精确质量,否则用标准原子量 |
+    /// | `electronegativity` | float \| None | Pauling 电负性 |
+    /// | `gasteiger_charge` | float | Gasteiger 部分电荷 |
+    /// | `gasteiger_valid` | bool | 上一项算不算得出来 |
+    ///
+    /// # 交的是描述符,不是编码
+    ///
+    /// 分类量给的是**名字**(`"sp3"`、`"ccw"`),不是 one-hot,也不是整数编号。
+    /// 词表该收哪些元素、留不留"其它"兜底桶,是特征化那一侧的决定 ——
+    /// 在这里定死等于把某一个模型的词表焊进库里。
+    ///
+    /// # 两处"算不出"
+    ///
+    /// `electronegativity` 为 `None` 表示该元素**没有公认的 Pauling 值**
+    /// (稀有气体、Pm/Eu/Tb/Yb/Fr 等);`gasteiger_valid` 为 `False` 表示该原子
+    /// 落在 Gasteiger 参数表之外(多数金属),此时 `gasteiger_charge` 是
+    /// `nan` 或 `inf`,并且**会沿着图扩散**——同一个分子里的碳也可能因此失效。
+    /// 两者都如实交出,不拿 0 顶:那会让"不知道"和"恰好是 0"变成同一格。
+    ///
+    /// # 前置
+    ///
+    /// 要先 `sanitize()`。没净化的分子不会报错,只会让芳香、环、杂化、共轭、
+    /// 隐式氢数全是解析时的占位值。
+    fn atom_descriptors<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        omgkit_chem::atom_descriptors(&self.inner)
+            .into_iter()
+            .map(|d| {
+                let e = PyDict::new(py);
+                e.set_item("atomic_num", d.atomic_num)?;
+                e.set_item("total_degree", d.total_degree)?;
+                e.set_item("formal_charge", d.formal_charge)?;
+                e.set_item("chiral_tag", chiral_tag_name(d.chiral_tag))?;
+                e.set_item("total_num_hs", d.total_num_hs)?;
+                e.set_item("hybridization", hybridization_name(d.hybridization))?;
+                e.set_item("is_aromatic", d.is_aromatic)?;
+                e.set_item("is_in_ring", d.is_in_ring)?;
+                e.set_item("mass", d.mass)?;
+                e.set_item("electronegativity", d.electronegativity)?;
+                e.set_item("gasteiger_charge", d.gasteiger_charge)?;
+                e.set_item("gasteiger_valid", d.gasteiger_is_valid())?;
+                Ok(e)
+            })
+            .collect()
+    }
+
+    /// 逐键的描述符,按存储顺序。返回 `list[dict]`。
+    ///
+    /// 每个字典 7 个键:`begin`、`end`(两端原子下标)、`order`(键级的名字)、
+    /// `is_conjugated`、`is_in_ring`、`stereo`(双键顺反)、`stereo_atoms`。
+    ///
+    /// # 顺反是 `cis`/`trans`,不是 `Z`/`E`
+    ///
+    /// `Z`/`E` 按 CIP 优先级定义,而 CIP 排序本库没有实现。这里给的是"相对
+    /// `stereo_atoms` 那两个参照原子"的顺反。**两项必须一起看**:四取代双键上
+    /// 参照挑得不同,同一个几何会得出相反的顺反值。带上参照之后,顺反与 Z/E
+    /// 承载的几何信息相同,要 Z/E 的调用方自己排 CIP 换算。
+    /// 没有顺反时 `stereo_atoms` 是 `None`。
+    ///
+    /// # 前置
+    ///
+    /// 要先 `sanitize()`。顺反尤其要注意:它由净化之后那一步方向键折算填写,
+    /// 而 `sanitize()` 已经把两步并在一起了 —— 只跑 Rust 侧的净化不够,那样
+    /// 每根双键的 `stereo` 都会是 `"none"`,而且不报错。
+    fn bond_descriptors<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        omgkit_chem::bond_descriptors(&self.inner)
+            .into_iter()
+            .map(|d| {
+                let e = PyDict::new(py);
+                e.set_item("begin", d.begin)?;
+                e.set_item("end", d.end)?;
+                e.set_item("order", bond_order_name(d.order))?;
+                e.set_item("is_conjugated", d.is_conjugated)?;
+                e.set_item("is_in_ring", d.is_in_ring)?;
+                e.set_item("stereo", bond_stereo_name(d.stereo))?;
+                e.set_item("stereo_atoms", d.stereo_atoms.map(|[a, b]| (a, b)))?;
+                Ok(e)
+            })
+            .collect()
     }
 
     /// 深拷贝。

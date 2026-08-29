@@ -139,6 +139,7 @@ nav:
       - Reading and writing .mol/.sdf: guide/molfiles.md
       - Drawing structures: guide/depict.md
       - 3D structures: guide/conformers.md
+      - Descriptors for ML: guide/descriptors.md
       - Batches: guide/batches.md
   - API reference:
       - Python API: api/python.md

@@ -13,7 +13,7 @@ homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
-omgkit-core = { path = "../omgkit-core", version = "0.0.3" }
+omgkit-core = { path = "../omgkit-core", version = "0.0.4" }
 
 [dev-dependencies]
 omgkit-chem = { path = "../omgkit-chem" }

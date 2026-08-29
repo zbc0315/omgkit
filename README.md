@@ -25,6 +25,7 @@ chemistry library is involved. The code that produced them is
 | **`.mol` / `.sdf`** | V2000 molblock and multi-record SDF, read and written, in 2D and 3D, with stereochemistry both ways |
 | **2D depiction** | Coordinates and SVG/PNG/JPEG output in two drawing styles — with an explicit report of anything it could not draw well |
 | **3D structures** | One deterministic conformer per molecule, no random seed and no retries, as a starting point for force-field refinement |
+| **Graph descriptors** | The sixteen per-atom and per-bond values a graph neural network reads — including Gasteiger partial charges and Pauling electronegativity |
 | **Batches** | A columnar `MolBatch` with zero-copy per-molecule views |
 
 **Status: under development.** The API still changes between commits. Every
@@ -46,12 +47,12 @@ For Rust, take only the layers you need; each depends only on the ones below it.
 
 ```toml
 [dependencies]
-omgkit-core   = "0.0.3"   # data structures
-omgkit-io     = "0.0.3"   # SMILES, SMARTS, .mol/.sdf
-omgkit-chem   = "0.0.3"   # sanitization
-omgkit-match  = "0.0.3"   # matching, reactions, byproducts
-omgkit-depict = "0.0.3"   # 2D coordinates and drawing
-omgkit-conf   = "0.0.3"   # 3D structure generation
+omgkit-core   = "0.0.4"   # data structures
+omgkit-io     = "0.0.4"   # SMILES, SMARTS, .mol/.sdf
+omgkit-chem   = "0.0.4"   # sanitization
+omgkit-match  = "0.0.4"   # matching, reactions, byproducts
+omgkit-depict = "0.0.4"   # 2D coordinates and drawing
+omgkit-conf   = "0.0.4"   # 3D structure generation
 ```
 
 ## Getting started

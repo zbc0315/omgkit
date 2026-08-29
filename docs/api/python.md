@@ -177,6 +177,31 @@ open("alanine.mol", "w").write(
 Both are deterministic: same molecule in, byte-identical file out, no timestamp
 on the second line.
 
+## Descriptors for machine learning
+
+Two methods hand you everything a graph neural network reads, one call each:
+[`Mol.atom_descriptors`](#omgkit.Mol.atom_descriptors) (twelve values per atom)
+and [`Mol.bond_descriptors`](#omgkit.Mol.bond_descriptors) (seven per bond).
+
+```pycon
+>>> m = omgkit.parse_smiles("CC(=O)O"); m.sanitize()
+>>> m.atom_descriptors()[0]["hybridization"]
+'sp3'
+>>> m.atom_descriptors()[0]["gasteiger_charge"]
+0.0337...
+```
+
+Categorical values come back as names (`"sp3"`, `"ccw"`, `"aromatic"`), never as
+one-hot vectors or integer codes — the vocabulary is your featurizer's decision,
+not the library's. `electronegativity` is `None` for elements with no accepted
+Pauling value, and `gasteiger_valid` is `False` where the charge could not be
+computed; neither is filled in with a default, because a default merges "unknown"
+with "happens to be that number".
+
+See the [descriptors guide](../guide/descriptors.md) for the full table, a
+worked one-hot encoder, and why double-bond geometry is reported as
+`cis`/`trans` rather than `Z`/`E`.
+
 ## Errors
 
 Every parse function raises `ValueError` on malformed input.

@@ -26,7 +26,10 @@ RDKit 的完整许可文本见 <https://github.com/rdkit/rdkit/blob/master/licen
 | 同上,命中 4900 条 | RDKit `Data/NCI/first_5K.smi`,内容取自 NCI/DTP 开放化合物集 | BSD-3-Clause(上游文件) |
 | 同上,命中 979 条 | RDKit `Regress/Data/zinc.frags.500.q.smi` 与 `zinc.leads.500.q.smi`,内容取自 ZINC 数据库 | BSD-3-Clause(上游文件);ZINC 见下 |
 | `harness/corpus/smarts.txt` | RDKit `Data/FunctionalGroups.txt`、`Data/SmartsLib/RLewis_smarts.txt`、`Data/Pains/wehi_pains.csv`,由 `harness/oracle_smarts.py --build-corpus` 合并去重 | BSD-3-Clause;PAINS 与 RLewis 见下 |
-| `crates/omgkit-core/src/element_data.rs` | Blue Obelisk Data Repository 的元素数据,经 RDKit 转录,再由 `harness/gen_elements.py` 生成 | 见下 |
+| `crates/omgkit-core/src/element_data.rs`,元素表 | Blue Obelisk Data Repository 的元素数据,经 RDKit `Code/GraphMol/atomic_data.cpp` 转录,再由 `harness/gen_elements.py` 生成 | 见下 |
+| 同一文件,同位素精确质量表(3111 条) | RDKit `Code/GraphMol/atomic_data.cpp` 的 `isotopesAtomData` 区段 | BSD-3-Clause |
+| 同一文件,Pauling 电负性(93 项) | RDKit `Code/GraphMol/Descriptors/OxidationNumbers.cpp` 的 `pauling_en_map`;该文件头注明其算法源自 syngenta/linchemin | BSD-3-Clause;linchemin 为 MIT |
+| `crates/omgkit-chem/src/gasteiger.rs` 的参数表(31 行) | RDKit `Code/GraphMol/PartialCharges/GasteigerParams.cpp` 的 `defaultParamData` 与 `additionalParamData`;后者由该文件注明是用 PyBabel 的算法补算的 | BSD-3-Clause |
 | `harness/baseline/*.jsonl`、`*.tsv` | 不是抄来的文件,是**跑 RDKit 生成的输出**(见 `harness/oracle_*.py`) | 派生数据 |
 
 三个来源**彼此有重叠**(NCI 那批有一部分同时收在 `canonSmiles` 里),所以上面
@@ -82,6 +85,11 @@ comm -13 <(cat /tmp/a /tmp/b /tmp/c | sort -u) /tmp/og.smi | wc -l        # 0 �
 在上;**BODR 自身的条款没有在本仓库里独立核实过**。这些数据是元素的物理常数
 (符号、质量、价态、共价半径),事实性数据本身通常不构成受保护的表达,但真要把
 仓库公开发布之前,这一条应当再确认一次,不要凭上面这句话就当已经清楚了。
+
+后来添的三张表(同位素精确质量、Pauling 电负性、Gasteiger 参数)链路更短 ——
+它们直接出自 RDKit 的源码文件,BSD-3-Clause 那一条已经覆盖到,不落在上面这个
+未核实的口子里。Pauling 那张表在 RDKit 里另注了 linchemin(MIT)的来路,两个
+条款都只要求保留声明,已照录在表内。
 
 ## 语料为什么要随仓库带着
 

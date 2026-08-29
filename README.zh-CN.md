@@ -24,6 +24,7 @@ Rust 写的化学信息学工具箱,带 Python 绑定。
 | **`.mol` / `.sdf`** | V2000 molblock 与多记录 SDF,读写双向、二维三维都读立体 |
 | **二维出图** | 坐标与 SVG/PNG/JPEG 输出,两套绘图规范;画不好的地方**如实报出来** |
 | **三维构型** | 每个分子一个确定性构型,无随机种子、无重试,给后续力场优化当起点 |
+| **图特征描述符** | 图神经网络要读的十六个原子/键描述符,含 Gasteiger 部分电荷与 Pauling 电负性 |
 | **批处理** | 列式 `MolBatch`,逐分子零拷贝视图 |
 
 **状态:开发中。** 接口在提交之间仍会变。每一层都对外部实现逐条比对过
@@ -42,12 +43,12 @@ Rust 侧按需取层,每一层只依赖它下面的那些:
 
 ```toml
 [dependencies]
-omgkit-core   = "0.0.3"   # 数据结构
-omgkit-io     = "0.0.3"   # SMILES、SMARTS、.mol/.sdf
-omgkit-chem   = "0.0.3"   # 净化
-omgkit-match  = "0.0.3"   # 匹配、反应、副产物
-omgkit-depict = "0.0.3"   # 二维出图
-omgkit-conf   = "0.0.3"   # 三维构型
+omgkit-core   = "0.0.4"   # 数据结构
+omgkit-io     = "0.0.4"   # SMILES、SMARTS、.mol/.sdf
+omgkit-chem   = "0.0.4"   # 净化
+omgkit-match  = "0.0.4"   # 匹配、反应、副产物
+omgkit-depict = "0.0.4"   # 二维出图
+omgkit-conf   = "0.0.4"   # 三维构型
 ```
 
 ## 上手

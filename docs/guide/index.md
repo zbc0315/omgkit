@@ -43,6 +43,12 @@ which crate the code lives in.
     One deterministic conformer per molecule — why there is no random seed,
     and what the numbers that come back with it mean.
 
+- **[Descriptors for ML](descriptors.md)**
+
+    The per-atom and per-bond values a graph neural network reads — including
+    Gasteiger partial charges — and why they come back as names, not one-hot
+    vectors.
+
 - **[Batches](batches.md)**
 
     The columnar representation, and what it is for.

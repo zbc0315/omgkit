@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 # 漏一处就是个不会报错的假数。CI 的头注释里记过同一个坑(那里原先写着
 # "四道闸门",而步骤早已加到八步)。这里由 `step` 计数,末尾自查:
 # 改了步骤忘了改 `TOTAL`,脚本最后一行会红。
-TOTAL=40
+TOTAL=41
 N=0
 step() {
     N=$((N + 1))
@@ -370,6 +370,26 @@ step "判官:写二维 molblock 的 Python 绑定(与 Rust 逐字节比)"
 # 这一档报 551,退出码 1。
 step "判官:写出去的 molblock 我方自己读回来(外部实现读同一份当真值)"
 "$PY" harness/check_molblock_roundtrip.py harness/corpus/large.smi
+
+# **图神经网络特征化要读的那十六个描述符。** 走产品那条路(`parse_smiles` →
+# `sanitize` → `atom_descriptors` / `bond_descriptors`),逐原子逐键与 RDKit 比。
+#
+# 四份语料一份都不能少:`large` 给规模与真实分布,`hard` 给难例,`smoke` 里才有
+# `@SP`/`@TB`/`@OH` 这类取值,`descriptors` 专喂前三份都走不到的三档(没有公认
+# 电负性的元素、Gasteiger 参数表外的金属、同位素标注)。少喂一份,对应那几列
+# 就恒为同一个值 —— 逐位比对照样全绿。
+#
+# 变异实测(每条都是拷出来改、跑完还原、sha256 核过):Gasteiger 参数表抄错
+# 一位 93381 处红;总连接度漏掉隐式氢 76840 处红;原子量不看同位素 21 处红;
+# 双键顺反永远交 None 408 处红;钉死表里塞一条永不命中的例外 → 红;喂空语料 → 红。
+# **够不着的那一档也写下来**:把氟的电负性从 3.98 改成 3.99,这条判据是绿的
+# ——电负性的值只有 omgkit-core 那条单元测试守着,理由见判据文件头。
+step "判官:图特征描述符(十六项,逐原子逐键)"
+"$PY" harness/check_descriptors.py \
+    harness/corpus/large.smi \
+    --extra harness/corpus/hard.smi \
+    --extra harness/corpus/smoke.smi \
+    --extra harness/corpus/descriptors.smi
 
 # ---- 先前只在本地手动跑的那几条 ----
 #
