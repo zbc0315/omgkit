@@ -39,7 +39,7 @@ pub type BondWedge = Wedge;
 const V2000_LIMIT: usize = 999;
 
 /// 写不出来的原因。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteError {
     /// 原子数或键数超过 V2000 的 999 上限。
     TooLarge {
@@ -64,6 +64,17 @@ pub enum WriteError {
         /// 第一根芳香键的下标
         bond: usize,
     },
+    /// 数据字段的名字或值装不进 SDF 的格式。
+    ///
+    /// 名字里有 `<` / `>` / 换行,或者值里有**空行**、有单独一行 `$$$$`。
+    /// 三样都会让读的人把这条记录切在别处 —— 写出去不报错,读回来是另一批
+    /// 数据,所以在这里拦住。
+    BadDataField {
+        /// 出问题的字段名
+        name: String,
+        /// 哪儿装不下
+        what: &'static str,
+    },
 }
 
 impl core::fmt::Display for WriteError {
@@ -75,6 +86,9 @@ impl core::fmt::Display for WriteError {
             ),
             Self::BondArrayLen { got, want } => {
                 write!(f, "逐键数组给了 {got} 项,而分子有 {want} 根键")
+            }
+            Self::BadDataField { name, what } => {
+                write!(f, "数据字段 `{name}` 装不进 SDF:{what}")
             }
             Self::AromaticBond { bond } => write!(
                 f,
@@ -233,6 +247,64 @@ pub fn write_v2000(mol: &MolBuilder, rec: &Record) -> Result<String, WriteError>
         }
     }
     out.push_str("M  END\n");
+    Ok(out)
+}
+
+/// 写一条 **SDF 记录**:molblock + 数据字段 + `$$$$`。
+///
+/// `data` 是 `(名字, 值)`,按给的顺序写出。值可以多行,用 `\n` 分行。
+///
+/// 一份 `.sdf` 就是把这些串首尾接起来 —— 每条自带 `$$$$`,调用方不必再拼。
+///
+/// # 装不下的字段**报错,不悄悄改写**
+///
+/// SDF 的记录边界靠行认:字段之间隔一个**空行**,记录之间隔一行 `$$$$`。
+/// 所以值里不能有空行、不能有单独一行 `$$$$`,名字里不能有 `<` `>` 或换行 ——
+/// 有的话读的人会把这条记录切在别处,而**写的时候一点毛病都看不出来**。
+/// 这一档给 [`WriteError::BadDataField`],不替调用方猜该怎么改。
+///
+/// (清洗那种值是调用方的事:该截断、该转义、还是该报错,只有它知道。)
+///
+/// # Errors
+///
+/// [`write_v2000`] 的那几种,外加字段装不下。
+pub fn write_sdf_record(
+    mol: &MolBuilder,
+    rec: &Record,
+    data: &[(&str, &str)],
+) -> Result<String, WriteError> {
+    let mut out = write_v2000(mol, rec)?;
+    for (name, value) in data {
+        let bad = |what| WriteError::BadDataField {
+            name: (*name).to_string(),
+            what,
+        };
+        if name.contains(['<', '>', '\n', '\r']) {
+            return Err(bad("名字里有 `<` `>` 或换行"));
+        }
+        if name.is_empty() {
+            return Err(bad("名字是空的"));
+        }
+        // 空行是字段的终止符;单独一行 `$$$$` 是记录的终止符。值里出现哪个,
+        // 读的人都会在那儿切开。
+        for line in value.lines() {
+            if line.trim_end().is_empty() {
+                return Err(bad("值里有空行 —— 那是字段的终止符"));
+            }
+            if line.trim_end() == "$$$$" {
+                return Err(bad("值里有单独一行 `$$$$` —— 那是记录的终止符"));
+            }
+        }
+        out.push_str("> <");
+        out.push_str(name);
+        out.push_str(">\n");
+        if !value.is_empty() {
+            out.push_str(value);
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out.push_str("$$$$\n");
     Ok(out)
 }
 
@@ -862,6 +934,76 @@ $$$$
             .expect("读得出")
             .data;
         assert_eq!(fields[1].1, "第一行\n第二行", "多行值里不许留 \\r");
+    }
+
+    /// 写出去的记录,读回来是同一批分子与同一批字段。
+    ///
+    /// 这条是**自反**的(两侧都是自家代码),格式对不对由外部判据
+    /// `harness/check_molblock.py` 守着 —— 它拿 `ForwardSDMolSupplier` 当普通
+    /// SDF 读我方写的文件。这里钉的是"写出器与读取器对同一套字段格式的理解
+    /// 一致",那是两个模块之间的约定,值得单独有个东西看着。
+    #[test]
+    fn a_written_record_reads_back_with_its_fields() {
+        let got = read_sdf(TWO).next().expect("第一条").expect("读得出");
+        let orders: Vec<_> = got.block.mol.bonds().iter().map(|b| b.order).collect();
+        let rec = Record {
+            title: "甲醇",
+            coords: &got.block.coords,
+            wedges: &[],
+            orders: &orders,
+        };
+        let text = write_sdf_record(
+            &got.block.mol,
+            &rec,
+            &[("ID", "1"), ("备注", "第一行\n第二行")],
+        )
+        .expect("写得出");
+        assert!(text.ends_with("$$$$\n"), "记录要以 $$$$ 收尾");
+
+        let back: Vec<_> = read_sdf(&text).collect();
+        assert_eq!(back.len(), 1);
+        let back = back.into_iter().next().expect("一条").expect("读得回");
+        assert_eq!(back.block.title, "甲醇");
+        assert_eq!(
+            back.data,
+            vec![
+                ("ID".to_string(), "1".to_string()),
+                ("备注".to_string(), "第一行\n第二行".to_string()),
+            ]
+        );
+    }
+
+    /// **装不下的字段报错,不悄悄改写。**
+    ///
+    /// 值里的空行是字段的终止符、单独一行 `$$$$` 是记录的终止符、名字里的
+    /// `<` `>` 会让读的人截错地方 —— 三样都让写出去的文件在**读的时候**才出错,
+    /// 而那时已经查不回来了。语料里碰不到这一档(字段都是判官自己造的),
+    /// 所以只有这个测试守着。
+    #[test]
+    fn a_field_that_would_break_the_record_boundary_is_refused() {
+        let got = read_sdf(TWO).next().expect("第一条").expect("读得出");
+        let orders: Vec<_> = got.block.mol.bonds().iter().map(|b| b.order).collect();
+        let rec = Record {
+            title: "",
+            coords: &got.block.coords,
+            wedges: &[],
+            orders: &orders,
+        };
+        for (name, value) in [
+            ("备注", "上半段\n\n下半段"),
+            ("备注", "上半段\n$$$$\n下半段"),
+            ("有>的名字", "值"),
+            ("有<的名字", "值"),
+            ("", "值"),
+        ] {
+            let e = write_sdf_record(&got.block.mol, &rec, &[(name, value)]);
+            assert!(
+                matches!(e, Err(WriteError::BadDataField { .. })),
+                "`{name}` = {value:?} 该被拒,实际 {e:?}"
+            );
+        }
+        // 多行值本身是合法的 —— 上面拒的是空行,不是换行
+        assert!(write_sdf_record(&got.block.mol, &rec, &[("备注", "上\n下")]).is_ok());
     }
 
     /// 末尾的空白不算一条记录 —— 算了的话每个文件都会多出一条读不了的。

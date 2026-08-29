@@ -143,9 +143,31 @@ the last. Values spanning several lines are joined with `\n`, and a line that
 The whole file is parsed at once — budget peak memory accordingly for very
 large libraries.
 
-Writing a 2D molblock back out is not available from Python: choosing where the
-wedges go is part of the drawing layer, which the bindings do not carry.
-Writing a **3D** one is — see [`Conformer.to_molblock`](#omgkit.Conformer.to_molblock).
+## Writing `.mol` files
+
+Two methods, for the two kinds of file:
+
+| | Method | Where the stereochemistry lives |
+|---|---|---|
+| **2D** | [`Mol.to_molblock_2d`](#omgkit.Mol.to_molblock_2d) | wedge bonds (column 4 of the bond block) |
+| **3D** | [`Conformer.to_molblock`](#omgkit.Conformer.to_molblock) | the coordinates themselves |
+
+```python
+open("alanine.mol", "w").write(
+    omgkit.parse_smiles("C[C@H](N)C(=O)O").to_molblock_2d(title="alanine")
+)
+```
+
+!!! info "The 2D file may have more atoms than your molecule"
+
+    To draw a centre's configuration the layout sometimes has to add an explicit
+    C–H — the wedge goes on exactly that bond. A centre whose configuration the
+    layout cannot draw is left without a wedge rather than given an arbitrary
+    one: the file then says "no stereo here", which is true, instead of saying
+    something false.
+
+Both are deterministic: same molecule in, byte-identical file out, no timestamp
+on the second line.
 
 ## Errors
 
@@ -254,7 +276,7 @@ today and are not yet wrapped:
 | `omgkit_core::MolBatch` | the columnar batch and its zero-copy per-molecule views |
 | `omgkit_io::smarts` writing | SMARTS output for molecules and reactions |
 | `omgkit_chem` individual stages | running one sanitization stage at a time |
-| `omgkit_io::molblock::write_v2000` with wedges | writing a **2D** molblock (needs the drawing layer to place the wedges) |
-| SDF **writing** | multi-record output with data fields — only single-record 3D output exists today |
+| `omgkit_depict` rendering | SVG/PNG depiction — only the 2D molblock output is wrapped |
+| `omgkit_io::molblock::write_sdf_record` | multi-record SDF output with data fields |
 
 See the [Rust API](rust.md) if you need them.

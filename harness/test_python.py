@@ -563,5 +563,48 @@ class SdfReading(unittest.TestCase):
             self.assertEqual(len(rec.block.coords), rec.block.mol.num_atoms)
 
 
+class TwoDMolblock(unittest.TestCase):
+    """`Mol.to_molblock_2d`:画一张二维图并写出去。"""
+
+    def test_a_stereocentre_gets_a_wedge(self):
+        """手性中心要在键块第四列留下 1 或 6。
+
+        二维图的立体全靠楔形 —— 一个都不画的话,交出去的文件在别人眼里就是
+        "这个分子没有立体",而线条本身看着一点毛病没有。
+        """
+        blk = omgkit.parse_smiles("C[C@H](N)C(=O)O").to_molblock_2d()
+        lines = blk.splitlines()
+        na, nb = int(lines[3][:3]), int(lines[3][3:6])
+        codes = [ln[9:12].strip() for ln in lines[4 + na : 4 + na + nb]]
+        self.assertTrue(set(codes) & {"1", "6"}, f"一个楔形都没画:{codes}")
+
+    def test_the_coordinates_are_flat(self):
+        """二维图的 `z` 一律是 0 —— 有一个不是,读的人就会按三维去读立体。"""
+        blk = omgkit.parse_smiles("c1ccccc1O").to_molblock_2d()
+        lines = blk.splitlines()
+        na = int(lines[3][:3])
+        for ln in lines[4 : 4 + na]:
+            self.assertEqual(float(ln[20:30]), 0.0, f"z 不是 0:{ln!r}")
+
+    def test_it_is_deterministic_and_does_not_touch_the_molecule(self):
+        smi = "C[C@H](N)c1ccc(O)cc1"
+        m = omgkit.parse_smiles(smi)
+        before = m.num_atoms
+        a = m.to_molblock_2d(title=smi)
+        b = m.to_molblock_2d(title=smi)
+        self.assertEqual(a, b, "两次画出来不同 —— 布局里混进了随机数")
+        self.assertEqual(m.num_atoms, before, "原分子被改动了")
+        self.assertEqual(a.splitlines()[0], smi)
+
+    def test_no_aromatic_bond_code(self):
+        """二维那条路同样要凯库勒化 —— 4 号键级各家读法不一。"""
+        blk = omgkit.parse_smiles("c1ccsc1").to_molblock_2d()
+        lines = blk.splitlines()
+        na, nb = int(lines[3][:3]), int(lines[3][3:6])
+        orders = [int(ln[6:9]) for ln in lines[4 + na : 4 + na + nb]]
+        self.assertNotIn(4, orders, "写出了 4 号(芳香)键级")
+        self.assertIn(2, orders, "凯库勒化之后该有双键")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

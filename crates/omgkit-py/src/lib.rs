@@ -158,6 +158,50 @@ impl PyMol {
         })
     }
 
+    /// 画一张二维结构图,写成 V2000 molblock(`.mol` 文件的内容)。
+    ///
+    /// **不改动本分子**:内部先深拷贝一份,在那一份上净化、感知顺反、排布局。
+    ///
+    /// # 立体靠**楔形**,不是坐标
+    ///
+    /// 二维图的手性写在键块第四列(1 实楔、6 虚楔)。为了把某个中心的构型画
+    /// 出来,布局有时要**补一根显式 C–H** —— 楔形恰恰打在那根键上。所以写出去
+    /// 的原子数可能比这个分子多,与
+    /// [`Conformer`](PyConformer) 那边同理。
+    ///
+    /// 画不出构型的中心不会被硬画:那种中心在文件里就是"没写立体",而不是
+    /// 随便给一个。
+    ///
+    /// # 与 `Conformer.to_molblock` 的分工
+    ///
+    /// 那个写**三维**:立体在坐标本身里,楔形是空的。这个写**二维**:所有 `z`
+    /// 都是 0,立体全靠楔形。两种文件都合法,读的人按坐标是不是平的自己分。
+    ///
+    /// 芳香键会先凯库勒化,理由与三维那条一样。第二行是程序名,不写时间戳。
+    ///
+    /// 净化过不去、或者分子大到 V2000 装不下(原子或键超过 999)时抛 `ValueError`。
+    #[pyo3(signature = (title = ""))]
+    fn to_molblock_2d(&self, title: &str) -> PyResult<String> {
+        let mut mol = self.inner.clone();
+        omgkit_chem::sanitize(&mut mol).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        omgkit_io::stereo::perceive_bond_stereo(&mut mol);
+        let d = omgkit_depict::generate(&mol, &omgkit_depict::style::Style::ACS_1996);
+        // 画出来的那个分子才是要写的:补出来的显式氢也在里面,而楔形就打在
+        // 那根 C–H 上。拿原分子写的话,那根键根本不存在,读的人看到的是
+        // "没有立体信息"。
+        let grown = d.drawn(&mol);
+        let orders = omgkit_depict::render::drawn_orders(&grown);
+        let coords: Vec<[f64; 3]> = d.coords.iter().map(|p| [p.x, p.y, 0.0]).collect();
+        let rec = omgkit_io::molblock::Record {
+            title,
+            coords: &coords,
+            wedges: &d.wedges,
+            orders: &orders,
+        };
+        omgkit_io::molblock::write_v2000(&grown, &rec)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
     /// 深拷贝。
     fn copy(&self) -> Self {
         self.clone()

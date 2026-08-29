@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 # 漏一处就是个不会报错的假数。CI 的头注释里记过同一个坑(那里原先写着
 # "四道闸门",而步骤早已加到八步)。这里由 `step` 计数,末尾自查:
 # 改了步骤忘了改 `TOTAL`,脚本最后一行会红。
-TOTAL=38
+TOTAL=39
 N=0
 step() {
     N=$((N + 1))
@@ -338,6 +338,16 @@ step "判官:读 molblock 的 Python 绑定(与 Rust 逐字符比)"
 # 变异实测:读不了的静默跳过 —— 条数当场对不上;数据字段丢掉 8830 条红。
 step "判官:读 SDF 的 Python 绑定(与 Rust 逐条比)"
 "$PY" harness/check_python_sdf.py "$WORK/data.sdf" "$WORK/sdf.txt"
+
+# **写二维 molblock 的绑定:与 Rust 侧逐字节比。** `Mol.to_molblock_2d()` 要走
+# 一整条链:净化 → 感知顺反 → 排布局 → 指派楔形 → 把**画出来的那个分子**
+# (可能补过一根显式 C–H)交给写出器。任何一步接错,交出去的都是一张画错构型
+# 的图,而线条本身看着一点毛病没有。
+#
+# 变异实测:写原分子而不是画出来的那个 86 条红;不传楔形 311 条红;
+# 漏掉顺反感知 13 条红。
+step "判官:写二维 molblock 的 Python 绑定(与 Rust 逐字节比)"
+"$PY" harness/check_python_molblock2d.py "$WORK/blocks.txt"
 
 # ---- 先前只在本地手动跑的那几条 ----
 #

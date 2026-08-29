@@ -17,7 +17,14 @@
 //!
 //! 只导**带立体标记**的分子:立体是最容易在格式里丢掉的一档,而没有立体的
 //! 分子读回来对不对,`check_write.py` 那条已经在 SMILES 上守着了。
-use omgkit_io::molblock::{write_v2000, Record};
+//!
+//! # 导的是**真 SDF**,不是自造的包装
+//!
+//! 先前每条前面加一行 `>>> 行号\t原串`、后面手写 `$$$$`。那样判官读的是我方
+//! 自造的格式,于是 `$$$$` 摆在哪、数据字段怎么写,**外部实现一次都没读过**。
+//! 现在走 `write_sdf_record`:行号与原串是两个数据字段,记录边界由写出器负责,
+//! 判官拿 `ForwardSDMolSupplier` 当普通 SDF 读。
+use omgkit_io::molblock::{write_sdf_record, Record};
 
 fn main() {
     let path = std::env::args().nth(1).expect("语料");
@@ -54,12 +61,12 @@ fn main() {
             wedges: &[],
             orders: &orders,
         };
-        let Ok(block) = write_v2000(&mol, &rec) else {
+        let line_no = lineno.to_string();
+        let Ok(block) = write_sdf_record(&mol, &rec, &[("行号", &line_no), ("原串", smi)])
+        else {
             continue;
         };
-        println!(">>> {lineno}\t{smi}");
         print!("{block}");
-        println!("$$$$");
         n += 1;
     }
     eprintln!("导出 {n} 个分子");

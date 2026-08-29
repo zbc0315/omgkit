@@ -11,6 +11,16 @@
 另一个分子:少写价键字段,`[CH]` 读回来成 `[CH3]`;漏 `M RAD`,自由基读成甲基;
 计数行挤出格,整条记录直接读不了。
 
+# 读的是**真 SDF**,记录边界与数据字段一并验了
+
+先前我方每条前面加一行 `>>> 行号\t原串`、后面手写 `$$$$`,判官照那个自造的
+包装切。于是 `$$$$` 摆在哪、数据字段怎么写,**外部实现一次都没读过** ——
+而那正是 `.sdf` 交出去之后别人要读的东西。
+
+现在我方走 `write_sdf_record` 导真 SDF(行号与原串是两个数据字段),判官用
+`ForwardSDMolSupplier` 当普通 SDF 读。**用 Forward 而不是 `SDMolSupplier`**:
+后者会跳过读不了的记录,条数就对不上了 —— 而条数正是要比的东西之一。
+
 # 判什么
 
 读回来的分子必须**满足输入 SMILES 指定的每一处立体**。用带手性的子结构匹配,
@@ -31,20 +41,24 @@ from rdkit import Chem, RDLogger
 RDLogger.DisableLog("rdApp.*")
 
 
-def records(path):
-    """切成 `(语料行号, SMILES, molblock)`。"""
-    smi = None
-    lineno = None
+def raw_blocks(path):
+    """按 `$$$$` 切出每条记录的原文。只用来数条数、以及给失败的那条留个说法。"""
     buf = []
     for line in open(path, encoding="utf-8"):
-        if line.startswith(">>> "):
-            lineno, smi = line[4:].rstrip("\n").split("\t", 1)
-            buf = []
-        elif line.rstrip("\n") == "$$$$":
-            yield lineno, smi, "".join(buf)
+        if line.rstrip("\n") == "$$$$":
+            yield "".join(buf)
             buf = []
         else:
             buf.append(line)
+
+
+def field(block, name):
+    """从记录原文里抠一个数据字段的值。读不了的记录也拿得到,只为报错好看。"""
+    lines = block.split("\n")
+    for i, ln in enumerate(lines):
+        if ln.startswith(">") and f"<{name}>" in ln and i + 1 < len(lines):
+            return lines[i + 1]
+    return "?"
 
 
 def rdkit_can_read_itself(smi):
@@ -68,18 +82,32 @@ def main() -> int:
     args = ap.parse_args()
     print(f"外部实现:RDKit {rdkit.__version__}")
 
-    ok = bad = unreadable = blind = skipped = 0
+    blocks = list(raw_blocks(args.blocks))
+    # **removeHs=False**:删氢会改原子数,而立体正是靠坐标读的
+    with open(args.blocks, "rb") as f:
+        mols = list(Chem.ForwardSDMolSupplier(f, sanitize=True, removeHs=False))
+    if len(mols) != len(blocks):
+        print(f"条数不同:外部实现读出 {len(mols)} 条,文件里有 {len(blocks)} 条 —— "
+              "我方写的记录边界(`$$$$`)与它切出来的对不上")
+        return 1
+
+    ok = bad = unreadable = blind = skipped = missing_field = 0
     failures = []
-    for lineno, smi, block in records(args.blocks):
+    for block, m in zip(blocks, mols):
+        # 身份从**数据字段**里取:那一步也在验我方写的字段读不读得回来
+        smi = m.GetProp("原串") if m is not None and m.HasProp("原串") else field(block, "原串")
+        lineno = m.GetProp("行号") if m is not None and m.HasProp("行号") else field(block, "行号")
+        if m is not None and not (m.HasProp("原串") and m.HasProp("行号")):
+            missing_field += 1
+            failures.append(f"第 {lineno} 行 {smi}:数据字段没读回来")
+            continue
         ref = Chem.MolFromSmiles(smi)
         if ref is None:
             skipped += 1
             continue
-        # **removeHs=False**:删氢会改原子数,而立体正是靠坐标读的
-        m = Chem.MolFromMolBlock(block, removeHs=False)
         if m is None:
             unreadable += 1
-            failures.append(f"第 {lineno} 行 {smi}:外部实现读不了这条 molblock")
+            failures.append(f"第 {lineno} 行 {smi}:外部实现读不了这条记录")
             continue
         try:
             Chem.AssignStereochemistryFrom3D(m)
@@ -101,11 +129,11 @@ def main() -> int:
 
     checked = ok + bad
     print(f"读回来一致 {ok};不符 {bad};读不了 {unreadable};"
-          f"判官够不着 {blind};输入本身跳过 {skipped}")
+          f"判官够不着 {blind};输入本身跳过 {skipped};数据字段丢了 {missing_field}")
     if failures:
         for f in failures[:8]:
             print(f"  ✗ {f}")
-    if bad or unreadable:
+    if bad or unreadable or missing_field:
         print("\n我们写的 molblock 交出去之后成了另一个分子。")
         return 1
     if checked < args.min_checked:

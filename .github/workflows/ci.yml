@@ -353,6 +353,11 @@ jobs:
       - name: 判官:读 SDF 的 Python 绑定(与 Rust 逐条比)
         run: python harness/check_python_sdf.py "$RUNNER_TEMP/data.sdf" "$RUNNER_TEMP/sdf.txt"
 
+      # 写二维 molblock 的绑定:与 Rust 侧逐字节比。那条链上任何一步接错,交出去
+      # 的都是一张画错构型的图,而线条本身看着一点毛病没有。
+      - name: 判官:写二维 molblock 的 Python 绑定(与 Rust 逐字节比)
+        run: python harness/check_python_molblock2d.py "$RUNNER_TEMP/blocks.txt"
+
       # ---- 先前只在本地手动跑的那四条 ----
       #
       # **闸不进 CI 就不是闸。** 它们一直躺在 `harness/` 里,谁想起来谁跑一次。

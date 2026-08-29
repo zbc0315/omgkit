@@ -292,6 +292,7 @@ dependencies = [
  "omgkit-chem",
  "omgkit-conf",
  "omgkit-core",
+ "omgkit-depict",
  "omgkit-io",
  "omgkit-match",
  "pyo3",
