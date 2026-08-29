@@ -2,6 +2,11 @@
 
 Rust 写的化学信息学工具箱,带 Python 绑定。
 
+![omgkit 画的结构式](assets/gallery.svg)
+
+*本站每一张结构式都是 omgkit 自己画的,没有借助任何别的化学库。出图脚本是
+[`docs/figures/make_figures.py`](https://github.com/zbc0315/omgkit/blob/main/docs/figures/make_figures.py)。*
+
 ```python
 import omgkit
 
@@ -21,10 +26,12 @@ m.to_canonical_smiles()          # 'Nc1ccccc1C(=O)O'
 |---|---|
 | **读写 SMILES** | 四面体手性、双键顺反、配位键、显式氢,以及规范 SMILES |
 | **净化** | 价、隐式氢、环感知、凯库勒化、芳香性、共轭、杂化 |
-| **子结构匹配** | SMARTS 解析、VF2++ 匹配、可选的立体敏感、分子与反应的 SMARTS 写出 |
+| **子结构匹配** | SMARTS 解析、VF2++ 式定序的匹配、可选的立体敏感、分子与反应的 SMARTS 写出 |
 | **应用反应模板** | 产物生成,原子映射号可选 |
 | **推演副产物** | 酯化丢掉的那个水,重建成真正的分子;记录本身配不平时,**明说判不了**而不是猜 |
+| **读写 `.mol` / `.sdf`** | V2000 molblock 与多记录 SDF,二维三维都读写,立体化学两个方向都过得去 |
 | **画结构式** | 2D 坐标与 SVG/PNG/JPEG 输出,两套绘图规范;画不好的地方**如实报出来** |
+| **生成三维构型** | 每个分子一个确定性构型 —— 无随机种子,无重试循环 |
 | **批处理** | 列式 `MolBatch`,逐分子零拷贝视图 |
 
 ## 和别的有什么不一样
@@ -45,27 +52,37 @@ SMILES 写法,必须净化成同一个东西、匹配同样的查询、按同样
 被丢了,并能把它们收口成配平的副产物分子。记录本身配不平的时候 —— 比如还原剂
 压根不在记录里 —— 它会明说判不了,而不是猜一个。
 
+**三维构型不靠重试循环。** 生成一个构型是确定性的 —— 没有随机种子,也不会因为
+随机取出来的距离表摆不出来而重掷 `10×N` 次。同一份 8831 个分子的语料上,
+RDKit ETKDGv3 2025.09.2 失败 36 个(0.41%),omgkit 失败 1 个(0.01%)。
+见[三维构型](guide/conformers.md)。
+
 **每一条声明后面都有判据。** 正确性不是宣称出来的,是逐条对着外部实现比出来的,
-而且每条判据都必须先证明自己**不会空过**。见[正确性](dev/correctness.md)。
+而且每条判据都必须先证明自己**不会空过**。整套闸在每次推送时跑一遍。
+见[正确性](dev/correctness.md)。
 
 ## 安装
 
 === "Python"
 
     ```shell
-    pip install maturin
-    maturin build --release -m crates/omgkit-py/Cargo.toml --out dist
-    pip install dist/omgkit-*.whl
+    pip install omgkit
     ```
+
+    一个 wheel 覆盖 Python 3.9 及以上,没有任何系统依赖。
 
 === "Rust"
 
     ```toml
     [dependencies]
-    omgkit-core  = "0.0.1"
-    omgkit-io    = "0.0.1"
-    omgkit-chem  = "0.0.1"
-    omgkit-match = "0.0.1"
+    omgkit-core   = "0.0.1"
+    omgkit-io     = "0.0.1"
+    omgkit-chem   = "0.0.1"
+    omgkit-match  = "0.0.1"
+
+    # 这两个还没发到 crates.io,先从 git 取
+    omgkit-depict = { git = "https://github.com/zbc0315/omgkit" }
+    omgkit-conf   = { git = "https://github.com/zbc0315/omgkit" }
     ```
 
 按需取用,每一层只依赖它下面的层。完整说明见[安装](getting-started/install.md)。

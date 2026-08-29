@@ -28,14 +28,24 @@ which crate the code lives in.
     Rebuilding the fragments a template discards — and reading the verdict that
     tells you how much to trust the answer.
 
-- **[Batches](batches.md)**
+- **[Reading and writing `.mol`/`.sdf`](molfiles.md)**
 
-    The columnar representation, and what it is for.
+    V2000 molblocks and multi-record SDF, in 2D and 3D, and how
+    stereochemistry survives the round trip.
 
 - **[Drawing structures](depict.md)**
 
     2D coordinates and SVG/PNG/JPEG output, the two drawing styles, and what
     gets reported when a structure cannot be drawn well.
+
+- **[3D structures](conformers.md)**
+
+    One deterministic conformer per molecule — why there is no random seed,
+    and what the numbers that come back with it mean.
+
+- **[Batches](batches.md)**
+
+    The columnar representation, and what it is for.
 
 </div>
 

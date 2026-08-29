@@ -3,11 +3,23 @@
 `omgkit-depict` turns a molecule into 2D coordinates and then into a picture —
 SVG, PNG or JPEG.
 
-!!! note "Rust only, for now"
+![Structures drawn by omgkit](../assets/gallery.svg)
 
-    The Python extension does not expose depiction yet. Everything on this page
-    is the Rust API. The crate is also **not on crates.io yet**; use a path or
-    git dependency, or build the docs from a clone.
+*Drawn by the code on this page. Every figure on this site comes from omgkit
+itself; the script is
+[`docs/figures/make_figures.py`](https://github.com/zbc0315/omgkit/blob/main/docs/figures/make_figures.py).*
+
+!!! note "Rendering is Rust-only; the layout is not"
+
+    Python gets the **layout** through
+    [`Mol.to_molblock_2d()`](../api/python.md#omgkit.Mol.to_molblock_2d) — 2D
+    coordinates and wedge bonds, written as a `.mol` file. What Python does not
+    get is the **rendering** step: `Scene`, SVG, PNG and JPEG are Rust-only, and
+    everything below the first section is the Rust API.
+
+    The crate is **not on crates.io yet**; take it from git
+    (`omgkit-depict = { git = "https://github.com/zbc0315/omgkit" }`) or build
+    from a clone.
 
 ```rust
 use omgkit_depict::{generate, render::scene, style::Style, svg::to_svg};
@@ -94,7 +106,11 @@ SMILES for the same structure gives point-for-point identical coordinates and
 the same set of drawn primitives. Every tie in the layout is broken by
 [canonical rank](smiles.md), never by the order atoms happen to be stored in.
 
-**Stereochemistry is not misrepresented.** Double-bond geometry is corrected
+**Stereochemistry is not misrepresented.**
+
+![Wedges and double-bond geometry](../assets/stereo.svg)
+
+Double-bond geometry is corrected
 *before* collision relief, and collision relief refuses any flip that would
 break it. Wedges are assigned by reading the drawn geometry back and keeping
 the one that reproduces the recorded configuration; a wedge records which end
@@ -104,11 +120,23 @@ confused.
 **Bond lengths are all equal, ring double bonds sit inside their ring, sp atoms
 are drawn straight (180°), and nothing is drawn outside the canvas.**
 
+![Cholesterol](../assets/cholesterol.svg)
+
+*Cholesterol: the fused steroid skeleton, the Δ5 double bond inside its ring,
+and all eight stereocentres drawn — the angular methyls as bold wedges, the ring
+junction hydrogens as hashes.*
+
 ## What it admits it cannot do
 
 Bridged and caged systems have no good planar solution. Crowded substituents
 sometimes cannot be separated by the operators available. Rather than quietly
 producing a picture whose configuration cannot be read, `Depiction` says so:
+
+![Bridged systems report degraded](../assets/degraded.svg)
+
+*Both of these are drawn, and both report `degraded = 1`. The report is about
+how the layout was reached — ring systems that fell back to spring relaxation —
+not a claim that the picture is wrong.*
 
 | Field | Meaning |
 |---|---|

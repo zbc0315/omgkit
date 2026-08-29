@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="685" height="154" viewBox="0 0 685.11 153.55">
+<rect width="685.11" height="153.55" fill="#fff"/>
+<g transform="translate(18.00,18.00)">
+<line x1="38.00" y1="68.00" x2="38.00" y2="38.00" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="38.00" y1="38.00" x2="38.00" y2="8.00" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="38.00" y1="38.00" x2="8.00" y2="38.00" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="38.00" y1="38.00" x2="62.50" y2="38.00" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="71.34" y1="43.78" x2="83.00" y2="63.98" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="81.44" y1="63.08" x2="69.78" y2="83.28" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="84.56" y1="64.88" x2="73.42" y2="84.18" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="83.00" y1="63.98" x2="108.15" y2="63.98" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="116.23" y1="58.39" x2="128.00" y2="38.00" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="128.00" y1="38.00" x2="158.00" y2="38.00" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="158.00" y1="38.00" x2="173.00" y2="63.98" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="173.00" y1="63.98" x2="203.00" y2="63.98" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="175.08" y1="60.38" x2="200.92" y2="60.38" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="203.00" y1="63.98" x2="218.00" y2="38.00" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="218.00" y1="38.00" x2="203.00" y2="12.02" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="213.84" y1="38.00" x2="200.92" y2="15.62" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="203.00" y1="12.02" x2="173.00" y2="12.02" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="173.00" y1="12.02" x2="158.00" y2="38.00" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="175.08" y1="15.62" x2="162.16" y2="38.00" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<text x="68.00" y="38.00" font-family="Arial, Helvetica, sans-serif" font-size="10.00" text-anchor="middle" dominant-baseline="central" fill="#000"><tspan font-size="10.00" dy="0.00">O</tspan></text>
+<text x="68.00" y="89.96" font-family="Arial, Helvetica, sans-serif" font-size="10.00" text-anchor="middle" dominant-baseline="central" fill="#000"><tspan font-size="10.00" dy="0.00">O</tspan></text>
+<text x="116.61" y="63.98" font-family="Arial, Helvetica, sans-serif" font-size="10.00" text-anchor="middle" dominant-baseline="central" fill="#000"><tspan font-size="10.00" dy="0.00">N</tspan><tspan font-size="10.00" dy="0.00">H</tspan></text>
+</g>
+<text x="131.00" y="148.55" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">Boc-protected benzylamine</text>
+<line x1="258.00" y1="68.78" x2="296.00" y2="68.78" stroke="#333" stroke-width="1.2"/>
+<path d="M302.00,68.78 L294.00,65.28 L294.00,72.28 Z" fill="#333"/>
+<g transform="translate(316.00,32.30)">
+<line x1="25.39" y1="18.58" x2="37.17" y2="38.97" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="37.17" y1="38.97" x2="67.17" y2="38.97" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="67.17" y1="38.97" x2="82.17" y2="12.99" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="82.17" y1="12.99" x2="112.17" y2="12.99" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="84.24" y1="16.59" x2="110.09" y2="16.59" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="112.17" y1="12.99" x2="127.17" y2="38.97" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="127.17" y1="38.97" x2="112.17" y2="64.95" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="123.01" y1="38.97" x2="110.09" y2="61.35" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="112.17" y1="64.95" x2="82.17" y2="64.95" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="82.17" y1="64.95" x2="67.17" y2="38.97" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="84.24" y1="61.35" x2="71.32" y2="38.97" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<text x="16.89" y="12.99" font-family="Arial, Helvetica, sans-serif" font-size="10.00" text-anchor="middle" dominant-baseline="central" fill="#000"><tspan font-size="10.00" dy="0.00">H</tspan><tspan font-size="6.00" dy="1.40">2</tspan><tspan font-size="10.00" dy="-1.40">N</tspan></text>
+</g>
+<text x="383.58" y="148.55" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">Benzylamine</text>
+<text x="473.17" y="72.78" font-family="Helvetica,Arial,sans-serif" font-size="14.0" fill="#333" text-anchor="middle">+</text>
+<g transform="translate(495.17,30.99)">
+<line x1="8.00" y1="48.98" x2="33.98" y2="33.98" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="33.98" y1="33.98" x2="18.98" y2="8.00" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="33.98" y1="33.98" x2="48.98" y2="59.96" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="33.98" y1="33.98" x2="54.46" y2="22.16" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="65.46" y1="22.16" x2="85.94" y2="33.98" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="84.14" y1="33.98" x2="84.14" y2="58.20" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="87.74" y1="33.98" x2="87.74" y2="58.20" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="85.94" y1="33.98" x2="106.42" y2="22.16" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<text x="59.96" y="18.98" font-family="Arial, Helvetica, sans-serif" font-size="10.00" text-anchor="middle" dominant-baseline="central" fill="#000"><tspan font-size="10.00" dy="0.00">O</tspan></text>
+<text x="85.94" y="63.98" font-family="Arial, Helvetica, sans-serif" font-size="10.00" text-anchor="middle" dominant-baseline="central" fill="#000"><tspan font-size="10.00" dy="0.00">O</tspan></text>
+<text x="115.53" y="18.98" font-family="Arial, Helvetica, sans-serif" font-size="10.00" text-anchor="middle" dominant-baseline="central" fill="#000"><tspan font-size="10.00" dy="0.00">O</tspan><tspan font-size="10.00" dy="0.00">H</tspan></text>
+</g>
+<text x="560.68" y="148.55" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">tert-Butyl carbonic acid · formal byproduct</text>
+</svg>

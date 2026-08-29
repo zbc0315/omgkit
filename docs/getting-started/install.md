@@ -2,8 +2,16 @@
 
 ## Python
 
-There is no wheel on PyPI yet, so build one. You need a Rust toolchain
-(1.75 or newer) and [maturin](https://github.com/PyO3/maturin):
+```shell
+pip install omgkit
+```
+
+Wheels are published for macOS on Apple silicon. On other platforms pip falls
+back to the source distribution, which needs a Rust toolchain (1.75 or newer)
+to build — it is a normal `pip install` either way, just slower the first time.
+
+To build from a clone instead, you need Rust and
+[maturin](https://github.com/PyO3/maturin):
 
 ```shell
 git clone https://github.com/zbc0315/omgkit
@@ -35,13 +43,17 @@ engine.
 
 ```toml
 [dependencies]
-omgkit-core  = "0.0.1"   # data structures
-omgkit-io    = "0.0.1"   # SMILES / SMARTS
-omgkit-chem  = "0.0.1"   # sanitization
-omgkit-match = "0.0.1"   # matching, reactions
+omgkit-core   = "0.0.1"   # data structures
+omgkit-io     = "0.0.1"   # SMILES, SMARTS, .mol/.sdf
+omgkit-chem   = "0.0.1"   # sanitization
+omgkit-match  = "0.0.1"   # matching, reactions, byproducts
+
+# not on crates.io yet — take them from git
+omgkit-depict = { git = "https://github.com/zbc0315/omgkit" }   # 2D drawing
+omgkit-conf   = { git = "https://github.com/zbc0315/omgkit" }   # 3D structures
 ```
 
-Or with `cargo add`:
+Or with `cargo add`, for the four that are published:
 
 ```shell
 cargo add omgkit-core omgkit-io omgkit-chem omgkit-match
@@ -52,7 +64,9 @@ cargo add omgkit-core omgkit-io omgkit-chem omgkit-match
 | `omgkit-core` | — | `MolBuilder`, `MolBatch`, `MolView`, the scalar types |
 | `omgkit-io` | core | SMILES and SMARTS parsing and writing |
 | `omgkit-chem` | core | the sanitization pipeline, valence, aromaticity |
-| `omgkit-match` | core, io, chem | VF2++ matching, reaction templates, byproducts |
+| `omgkit-match` | core, io, chem | substructure matching, reaction templates, byproducts |
+| `omgkit-depict` | core, io, chem | 2D coordinates, wedge assignment, SVG (PNG/JPEG behind `raster`) — **git only** |
+| `omgkit-conf` | core, io, chem | 3D structure generation — **git only** |
 | `omgkit-py` | all of the above | the Python extension module (not a library) |
 
 ## Requirements

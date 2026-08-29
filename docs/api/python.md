@@ -100,13 +100,21 @@ contents of a `.mol` file, or one record of an `.sdf` up to its `$$$$`:
     a forgotten call silently drops the stereochemistry of the whole file — no
     error, same atom count, just no `@` and no `/`.
 
-!!! warning "3D files: the molecule comes back without stereochemistry"
+!!! info "3D files take a different route, and it is also taken for you"
 
-    Stereochemistry in a 3D file lives in the coordinates themselves, which is a
-    different route and is not implemented yet. When `is_3d` is true the molecule
-    carries **no stereo tags at all** — that is "not implemented", not "this
-    molecule is flat". The 2D route (wedges for chirality, coordinates for
-    double-bond geometry) is complete.
+    Stereochemistry in a 3D file lives in the coordinates themselves, so it is
+    read from the **signed volume** of a centre's four ligands and from the
+    **sign of the torsion** across a double bond — not from wedges and not from
+    a planar projection. Which route runs is decided by the coordinates (any
+    non-zero `z` makes it 3D), so the caller does not have to choose.
+
+    On the 8795 3D records of the reference corpus, 8779 come back identical to
+    what the external implementation reads from the same bytes, 0 come back as a
+    different molecule, and 16 differ only in stereochemistry — 12 of those are
+    non-tetrahedral centres (`@TB`/`@OH`/`@SP`), which this route does not read,
+    and 4 are trivalent phosphorus, where the two implementations draw the line
+    in different places. The gate that measures this is
+    `harness/check_molblock3d_read.py`.
 
 Bonds the file marks as *explicitly unknown* — a crossed double bond, a wavy
 single bond — are left unassigned rather than being read off the drawing.

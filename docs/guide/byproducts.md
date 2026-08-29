@@ -6,6 +6,13 @@ the same way: they rewrite what they were written to rewrite and drop the rest.
 
 omgkit can put those atoms back.
 
+![Boc deprotection](../assets/byproduct.svg)
+
+*What comes back is the **formal** byproduct: the balanced molecule. For Boc
+deprotection that is tert-butyl carbonic acid — not the carbon dioxide and
+isobutylene you actually isolate. See [what you get is the formal
+byproduct](#what-you-get-is-the-formal-byproduct) below.*
+
 ```pycon
 >>> rxn = omgkit.parse_reaction("[C:1](=[O:2])[OH].[N:3]>>[C:1](=[O:2])[N:3]")
 >>> out = rxn.run([acid, amine], byproducts=True)[0]

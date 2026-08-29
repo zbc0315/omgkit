@@ -159,6 +159,36 @@ wrong on its face.
 See [Byproduct reconstruction](../guide/byproducts.md) for what the budget
 means and when the answer is trustworthy.
 
+## Generate a 3D structure
+
+```pycon
+>>> conf = omgkit.parse_smiles("C[C@H](N)C(=O)O").conformer()
+>>> conf
+<omgkit.Conformer atoms=13 energy=0.000e0 converged=True chiral=1/1>
+>>> conf.coords[0]
+(-1.1906..., -0.8985..., -0.0732...)
+```
+
+No random seed and no retry loop — the same molecule always gives the same
+coordinates. `chiral=1/1` says every stereocentre came out with the right sign.
+The extra atoms are the explicit hydrogens generation adds; `conf.coords` lines
+up with `conf.mol`, not with the molecule you called it on. See
+[3D structures](../guide/conformers.md).
+
+## Read and write `.mol` files
+
+```pycon
+>>> m = omgkit.parse_smiles("C[C@H](N)C(=O)O"); m.sanitize()
+>>> block = m.to_molblock_2d(title="L-alanine")   # layout and wedges computed for you
+>>> back = omgkit.parse_molblock(block)
+>>> back.mol.to_canonical_smiles() == m.to_canonical_smiles()
+True
+```
+
+`read_sdf` reads a whole multi-record file, and a record it cannot read keeps
+its place in the list instead of raising or vanishing. See
+[Reading and writing `.mol`/`.sdf`](../guide/molfiles.md).
+
 ## Where to go next
 
 - [Guides](../guide/index.md) — one page per capability

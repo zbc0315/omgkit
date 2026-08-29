@@ -3,12 +3,14 @@
 
 # 这个脚本为什么必须能跑
 
-**0.52%** 是这个项目的头号参照:`omgkit-conf/examples/feasibility.rs` 里那条
-硬闸(`MAX_INFEASIBLE_FRAC`)就是照着它定的,注释里写着"要赢的正是 RDKit
-那 0.52% 的失败率"。一个**量不出来的参照**等于一句传说 ——
-先前这里的语料路径写死成一个早已删掉的 worktree 的绝对路径
+参照实现的失败率是这个项目的头号参照:`omgkit-conf/examples/feasibility.rs`
+里那条硬闸(`MAX_INFEASIBLE_FRAC`)就是照着它定的。一个**量不出来的参照**
+等于一句传说 —— 先前这里的语料路径写死成一个早已删掉的 worktree 的绝对路径
 (`.claude/worktrees/agent-…/harness/corpus/large.smi`),脚本一行都跑不了,
-那个 0.52% 从此没法复核。
+那个数从此没法复核。
+
+**当前值:0.41%**(large.smi,ETKDGv3,RDKit 2025.09.2)。更早的版本上量到的是
+0.52%,仓库里若还有那个数,那是历史值 —— 见下面这一条。
 
 # 这个数**跟 RDKit 版本走**
 

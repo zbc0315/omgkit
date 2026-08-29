@@ -23,10 +23,11 @@ cargo doc --workspace --no-deps --open
 | Crate | Depends on | Contains |
 |---|---|---|
 | `omgkit-core` | — | `MolBuilder`, `MolBatch`, `MolView`, `MolBatchBuilder`, the scalar types (`BondOrder`, chirality, stereo, atom and bond flags) |
-| `omgkit-io` | core | `smiles` — parsing and writing; `smarts` — query and reaction parsing and writing |
+| `omgkit-io` | core | `smiles` — parsing and writing; `smarts` — query and reaction parsing and writing; `molblock` — V2000 and SDF, read and written; `canon` — canonical ranks; `stereo` — reading stereochemistry off coordinates |
 | `omgkit-chem` | core | `sanitize` and the individual stages: valence, implicit hydrogens, rings, kekulization, aromaticity, conjugation, hybridization |
-| `omgkit-match` | core, io, chem | VF2++ substructure matching, `MolProps`, reaction application (`run_reactants`, `run_on_substrate`), byproduct reconstruction |
-| `omgkit-depict` | core, io, chem | 2D coordinate generation and structure drawing; SVG with no dependencies, PNG/JPEG behind the `raster` feature — see [Drawing structures](../guide/depict.md) |
+| `omgkit-match` | core, io, chem | substructure matching (VF2++-style ordering), `MolProps`, reaction application (`run_reactants`, `run_on_substrate`), byproduct reconstruction |
+| `omgkit-depict` | core, io, chem | 2D coordinate generation and structure drawing; SVG with no dependencies, PNG/JPEG behind the `raster` feature — see [Drawing structures](../guide/depict.md). **Not on crates.io**; take it from git |
+| `omgkit-conf` | core, io, chem | deterministic 3D structure generation: bounds matrix, triangle smoothing, metric-matrix embedding, L-BFGS refinement — see [3D structures](../guide/conformers.md). **Not on crates.io**; take it from git |
 | `omgkit-py` | all | the Python extension module — a `cdylib`, **not published to crates.io**; its distribution channel is the wheel |
 
 ## Documentation gates

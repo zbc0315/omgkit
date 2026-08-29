@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="620" height="150" viewBox="0 0 620.28 149.53">
+<rect width="620.28" height="149.53" fill="#fff"/>
+<g transform="translate(18.00,29.20)">
+<line x1="109.66" y1="57.77" x2="98.00" y2="37.57" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="99.56" y1="38.47" x2="111.22" y2="18.27" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="96.44" y1="36.67" x2="107.58" y2="17.37" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="98.00" y1="37.57" x2="68.00" y2="37.57" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="68.00" y1="37.57" x2="53.00" y2="63.55" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="53.00" y1="63.55" x2="23.00" y2="63.55" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="50.92" y1="59.95" x2="25.08" y2="59.95" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="23.00" y1="63.55" x2="8.00" y2="37.57" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="8.00" y1="37.57" x2="23.00" y2="11.59" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="12.16" y1="37.57" x2="25.08" y2="15.19" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="23.00" y1="11.59" x2="53.00" y2="11.59" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="53.00" y1="11.59" x2="68.00" y2="37.57" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="50.92" y1="15.19" x2="63.84" y2="37.57" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<text x="116.61" y="63.55" font-family="Arial, Helvetica, sans-serif" font-size="10.00" text-anchor="middle" dominant-baseline="central" fill="#000"><tspan font-size="10.00" dy="0.00">O</tspan><tspan font-size="10.00" dy="0.00">H</tspan></text>
+<text x="113.00" y="11.59" font-family="Arial, Helvetica, sans-serif" font-size="10.00" text-anchor="middle" dominant-baseline="central" fill="#000"><tspan font-size="10.00" dy="0.00">O</tspan></text>
+</g>
+<text x="84.06" y="144.53" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">苯甲酸</text>
+<text x="172.11" y="70.77" font-family="Helvetica,Arial,sans-serif" font-size="14.0" fill="#333" text-anchor="middle">+</text>
+<g transform="translate(194.11,49.47)">
+<line x1="8.00" y1="23.00" x2="33.98" y2="8.00" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="33.98" y1="8.00" x2="54.46" y2="19.82" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<text x="63.57" y="23.00" font-family="Arial, Helvetica, sans-serif" font-size="10.00" text-anchor="middle" dominant-baseline="central" fill="#000"><tspan font-size="10.00" dy="0.00">O</tspan><tspan font-size="10.00" dy="0.00">H</tspan></text>
+</g>
+<text x="233.65" y="144.53" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">乙醇</text>
+<line x1="287.18" y1="66.77" x2="325.18" y2="66.77" stroke="#333" stroke-width="1.2"/>
+<path d="M331.18,66.77 L323.18,63.27 L323.18,70.27 Z" fill="#333"/>
+<g transform="translate(345.18,18.00)">
+<line x1="8.00" y1="89.53" x2="23.00" y2="63.55" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="23.00" y1="63.55" x2="47.50" y2="63.55" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="56.34" y1="57.77" x2="68.00" y2="37.57" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="69.56" y1="36.67" x2="58.42" y2="17.37" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="66.44" y1="38.47" x2="54.78" y2="18.27" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="68.00" y1="37.57" x2="98.00" y2="37.57" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="98.00" y1="37.57" x2="113.00" y2="11.59" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="113.00" y1="11.59" x2="143.00" y2="11.59" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="115.08" y1="15.19" x2="140.92" y2="15.19" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="143.00" y1="11.59" x2="158.00" y2="37.57" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="158.00" y1="37.57" x2="143.00" y2="63.55" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="153.84" y1="37.57" x2="140.92" y2="59.95" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="143.00" y1="63.55" x2="113.00" y2="63.55" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="113.00" y1="63.55" x2="98.00" y2="37.57" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<line x1="115.08" y1="59.95" x2="102.16" y2="37.57" stroke="#000" stroke-width="1.00" stroke-linecap="round"/>
+<text x="53.00" y="63.55" font-family="Arial, Helvetica, sans-serif" font-size="10.00" text-anchor="middle" dominant-baseline="central" fill="#000"><tspan font-size="10.00" dy="0.00">O</tspan></text>
+<text x="53.00" y="11.59" font-family="Arial, Helvetica, sans-serif" font-size="10.00" text-anchor="middle" dominant-baseline="central" fill="#000"><tspan font-size="10.00" dy="0.00">O</tspan></text>
+</g>
+<text x="428.18" y="144.53" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">苯甲酸乙酯</text>
+<text x="533.18" y="70.77" font-family="Helvetica,Arial,sans-serif" font-size="14.0" fill="#333" text-anchor="middle">+</text>
+<g transform="translate(555.18,53.77)">
+<text x="17.17" y="12.99" font-family="Arial, Helvetica, sans-serif" font-size="10.00" text-anchor="middle" dominant-baseline="central" fill="#000"><tspan font-size="10.00" dy="0.00">H</tspan><tspan font-size="6.00" dy="1.40">2</tspan><tspan font-size="10.00" dy="-1.40">O</tspan></text>
+</g>
+<text x="572.35" y="144.53" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">水 · 收口得到</text>
+</svg>

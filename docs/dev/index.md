@@ -22,7 +22,15 @@ cargo test --release
 That is green on a fresh clone. The smoke oracles for the differential tests
 are committed, so nothing has to be generated first.
 
-Five gates have to pass, and they are the same five CI runs:
+The whole suite is one command:
+
+```shell
+bash harness/gates.sh
+```
+
+It needs a Python environment with the pinned RDKit
+(`harness/requirements.lock`), because most gates compare omgkit against it
+record by record. The Rust-only part, which runs without any of that, is:
 
 ```shell
 cargo fmt --all --check
@@ -31,6 +39,11 @@ cargo test --release
 cargo test --workspace
 cargo doc --workspace --no-deps --document-private-items
 ```
+
+(How many gates there are is deliberately not written here. The count has gone
+from four to five to forty as judges were added, and a number in prose falls
+behind without anything reporting it — `TOTAL` in `harness/gates.sh` is the one
+place it lives. See [Building and testing](building.md).)
 
 ## The house rules
 

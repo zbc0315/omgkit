@@ -6,6 +6,14 @@ API still moves, so bug reports are especially useful.
 ## Before you open a pull request
 
 ```shell
+bash harness/gates.sh
+```
+
+That is the whole suite, and it needs a Python environment with the pinned
+RDKit (`harness/requirements.lock`) because most gates compare against it. The
+Rust-only part, which needs none of that, is:
+
+```shell
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --release
@@ -13,7 +21,24 @@ cargo test --workspace
 cargo doc --workspace --no-deps --document-private-items
 ```
 
-All five must pass. They are what CI runs.
+## If you touch the layout, regenerate the figures
+
+Every structure in the documentation is drawn by `omgkit-depict` itself:
+
+```shell
+python3 docs/figures/make_figures.py
+```
+
+Two runs are byte-identical — the layout has no random component — so a diff in
+`docs/assets/` after a run means the change moved something on the page.
+
+!!! warning "No gate watches this"
+
+    Regenerating the figures is **not** part of `harness/gates.sh` and not part
+    of CI: `draw` needs the `raster` feature, which pulls in resvg. So a layout
+    change that alters what the figures look like will pass every gate while the
+    committed SVGs quietly go stale. Until that is gated, it is on the author to
+    re-run the script and look at the diff.
 
 ## What a change needs
 

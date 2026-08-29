@@ -136,8 +136,10 @@ nav:
       - Substructure matching: guide/matching.md
       - Reaction templates: guide/reactions.md
       - Byproduct reconstruction: guide/byproducts.md
-      - Batches: guide/batches.md
+      - Reading and writing .mol/.sdf: guide/molfiles.md
       - Drawing structures: guide/depict.md
+      - 3D structures: guide/conformers.md
+      - Batches: guide/batches.md
   - API reference:
       - Python API: api/python.md
       - Rust API: api/rust.md

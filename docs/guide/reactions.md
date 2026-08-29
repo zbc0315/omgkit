@@ -1,5 +1,17 @@
 # Reaction templates
 
+A template describes the **reaction centre**. Everything else in the molecule
+comes along on its own, which is why a template can be written small:
+`[C:1][OH:2]>>[C:1][Cl:2]` says "a hydroxyl becomes a chloride" and says nothing
+about the rest of the molecule.
+
+![Esterification](../assets/esterification.svg)
+
+*The template used here is
+`[C:1](=[O:2])[OH:3].[OH:4][C:5]>>[C:1](=[O:2])[O:4][C:5]`. The benzene ring is
+never mentioned in it; the water on the right is not in it either — that comes
+from [byproduct reconstruction](byproducts.md).*
+
 ```pycon
 >>> rxn = omgkit.parse_reaction("[C:1](=[O:2])[OH].[N:3]>>[C:1](=[O:2])[N:3]")
 >>> rxn.num_reactant_templates, rxn.num_product_templates
