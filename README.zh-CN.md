@@ -42,14 +42,12 @@ Rust 侧按需取层,每一层只依赖它下面的那些:
 
 ```toml
 [dependencies]
-omgkit-core   = "0.0.1"   # 数据结构
-omgkit-io     = "0.0.1"   # SMILES、SMARTS、.mol/.sdf
-omgkit-chem   = "0.0.1"   # 净化
-omgkit-match  = "0.0.1"   # 匹配、反应、副产物
-
-# 这两个还没发到 crates.io,先从 git 取
-omgkit-depict = { git = "https://github.com/zbc0315/omgkit" }   # 二维出图
-omgkit-conf   = { git = "https://github.com/zbc0315/omgkit" }   # 三维构型
+omgkit-core   = "0.0.2"   # 数据结构
+omgkit-io     = "0.0.2"   # SMILES、SMARTS、.mol/.sdf
+omgkit-chem   = "0.0.2"   # 净化
+omgkit-match  = "0.0.2"   # 匹配、反应、副产物
+omgkit-depict = "0.0.2"   # 二维出图
+omgkit-conf   = "0.0.2"   # 三维构型
 ```
 
 ## 上手

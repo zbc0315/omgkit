@@ -46,14 +46,12 @@ For Rust, take only the layers you need; each depends only on the ones below it.
 
 ```toml
 [dependencies]
-omgkit-core   = "0.0.1"   # data structures
-omgkit-io     = "0.0.1"   # SMILES, SMARTS, .mol/.sdf
-omgkit-chem   = "0.0.1"   # sanitization
-omgkit-match  = "0.0.1"   # matching, reactions, byproducts
-
-# not on crates.io yet — take them from git
-omgkit-depict = { git = "https://github.com/zbc0315/omgkit" }   # 2D drawing
-omgkit-conf   = { git = "https://github.com/zbc0315/omgkit" }   # 3D structures
+omgkit-core   = "0.0.2"   # data structures
+omgkit-io     = "0.0.2"   # SMILES, SMARTS, .mol/.sdf
+omgkit-chem   = "0.0.2"   # sanitization
+omgkit-match  = "0.0.2"   # matching, reactions, byproducts
+omgkit-depict = "0.0.2"   # 2D coordinates and drawing
+omgkit-conf   = "0.0.2"   # 3D structure generation
 ```
 
 ## Getting started

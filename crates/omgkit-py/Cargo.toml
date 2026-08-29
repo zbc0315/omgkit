@@ -26,15 +26,15 @@ name = "omgkit"
 crate-type = ["cdylib"]
 
 [dependencies]
-omgkit-core = { path = "../omgkit-core", version = "0.0.1" }
-omgkit-io = { path = "../omgkit-io", version = "0.0.1" }
-omgkit-chem = { path = "../omgkit-chem", version = "0.0.1" }
-omgkit-match = { path = "../omgkit-match", version = "0.0.1" }
-omgkit-conf = { path = "../omgkit-conf", version = "0.0.1" }
+omgkit-core = { path = "../omgkit-core", version = "0.0.2" }
+omgkit-io = { path = "../omgkit-io", version = "0.0.2" }
+omgkit-chem = { path = "../omgkit-chem", version = "0.0.2" }
+omgkit-match = { path = "../omgkit-match", version = "0.0.2" }
+omgkit-conf = { path = "../omgkit-conf", version = "0.0.2" }
 # 只为 `Mol.to_molblock_2d`:二维坐标与楔形是画图算出来的,写出器在 io 那边。
 # `default-features = false` 关掉位图输出(resvg 那一串外部依赖)—— 绑定这一层
 # 眼下不出图,只要那套布局。
-omgkit-depict = { path = "../omgkit-depict", version = "0.0.1", default-features = false }
+omgkit-depict = { path = "../omgkit-depict", version = "0.0.2", default-features = false }
 
 # 0.27 是 MSRV 还在 1.74 的最后一档,正好压在工作区的 1.75 之下 ——
 # 0.28 起要 1.83,用它就得为绑定一个 crate 抬高整个工作区的 MSRV。

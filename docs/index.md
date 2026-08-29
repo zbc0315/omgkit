@@ -84,14 +84,12 @@ to prove it does not pass vacuously. The whole suite runs on every push. See
 
     ```toml
     [dependencies]
-    omgkit-core   = "0.0.1"
-    omgkit-io     = "0.0.1"
-    omgkit-chem   = "0.0.1"
-    omgkit-match  = "0.0.1"
-
-    # not on crates.io yet — take them from git
-    omgkit-depict = { git = "https://github.com/zbc0315/omgkit" }
-    omgkit-conf   = { git = "https://github.com/zbc0315/omgkit" }
+    omgkit-core   = "0.0.2"
+    omgkit-io     = "0.0.2"
+    omgkit-chem   = "0.0.2"
+    omgkit-match  = "0.0.2"
+    omgkit-depict = "0.0.2"
+    omgkit-conf   = "0.0.2"
     ```
 
 Take only the layers you need; each depends only on the ones below it.

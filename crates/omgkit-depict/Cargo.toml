@@ -13,12 +13,12 @@ homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
-omgkit-core = { path = "../omgkit-core", version = "0.0.1" }
+omgkit-core = { path = "../omgkit-core", version = "0.0.2" }
 # 规范秩:布局的每一处平局都按它打破,这是"同一分子的任何写法给出同一张图"
 # 的来源。没有它,坐标就会依赖输入的原子顺序。
-omgkit-io = { path = "../omgkit-io", version = "0.0.1" }
+omgkit-io = { path = "../omgkit-io", version = "0.0.2" }
 # 环感知:稠环系统的划分是环系统布局的前提
-omgkit-chem = { path = "../omgkit-chem", version = "0.0.1" }
+omgkit-chem = { path = "../omgkit-chem", version = "0.0.2" }
 
 # 位图输出是**可选的**。默认构建零外部依赖,只出 SVG。
 #
@@ -47,7 +47,7 @@ raster = ["dep:resvg", "dep:jpeg-encoder"]
 workspace = true
 
 [dev-dependencies]
-omgkit-io = { path = "../omgkit-io", version = "0.0.1" }
+omgkit-io = { path = "../omgkit-io", version = "0.0.2" }
 
 # 这个例子要出 PNG/JPEG,没有 raster feature 就编不过。声明出来,
 # 免得默认的 `cargo clippy --all-targets` 因为它而红。

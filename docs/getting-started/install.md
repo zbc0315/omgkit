@@ -43,20 +43,18 @@ engine.
 
 ```toml
 [dependencies]
-omgkit-core   = "0.0.1"   # data structures
-omgkit-io     = "0.0.1"   # SMILES, SMARTS, .mol/.sdf
-omgkit-chem   = "0.0.1"   # sanitization
-omgkit-match  = "0.0.1"   # matching, reactions, byproducts
-
-# not on crates.io yet — take them from git
-omgkit-depict = { git = "https://github.com/zbc0315/omgkit" }   # 2D drawing
-omgkit-conf   = { git = "https://github.com/zbc0315/omgkit" }   # 3D structures
+omgkit-core   = "0.0.2"   # data structures
+omgkit-io     = "0.0.2"   # SMILES, SMARTS, .mol/.sdf
+omgkit-chem   = "0.0.2"   # sanitization
+omgkit-match  = "0.0.2"   # matching, reactions, byproducts
+omgkit-depict = "0.0.2"   # 2D coordinates and drawing
+omgkit-conf   = "0.0.2"   # 3D structure generation
 ```
 
-Or with `cargo add`, for the four that are published:
+Or with `cargo add`:
 
 ```shell
-cargo add omgkit-core omgkit-io omgkit-chem omgkit-match
+cargo add omgkit-core omgkit-io omgkit-chem omgkit-match omgkit-depict omgkit-conf
 ```
 
 | Crate | Depends on | Gives you |
@@ -65,8 +63,8 @@ cargo add omgkit-core omgkit-io omgkit-chem omgkit-match
 | `omgkit-io` | core | SMILES and SMARTS parsing and writing |
 | `omgkit-chem` | core | the sanitization pipeline, valence, aromaticity |
 | `omgkit-match` | core, io, chem | substructure matching, reaction templates, byproducts |
-| `omgkit-depict` | core, io, chem | 2D coordinates, wedge assignment, SVG (PNG/JPEG behind `raster`) — **git only** |
-| `omgkit-conf` | core, io, chem | 3D structure generation — **git only** |
+| `omgkit-depict` | core, io, chem | 2D coordinates, wedge assignment, SVG (PNG/JPEG behind `raster`) |
+| `omgkit-conf` | core, io, chem | 3D structure generation |
 | `omgkit-py` | all of the above | the Python extension module (not a library) |
 
 ## Requirements

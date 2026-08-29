@@ -17,10 +17,6 @@ itself; the script is
     get is the **rendering** step: `Scene`, SVG, PNG and JPEG are Rust-only, and
     everything below the first section is the Rust API.
 
-    The crate is **not on crates.io yet**; take it from git
-    (`omgkit-depict = { git = "https://github.com/zbc0315/omgkit" }`) or build
-    from a clone.
-
 ```rust
 use omgkit_depict::{generate, render::scene, style::Style, svg::to_svg};
 
