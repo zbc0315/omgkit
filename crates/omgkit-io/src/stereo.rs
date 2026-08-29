@@ -721,31 +721,77 @@ pub fn cis_trans_from_points(
 /// **只管资格与参照,不碰几何** —— 二维那条路(投影同侧/异侧)与三维那条路
 /// (二面角)接在它后面。资格判断各写一遍的话,同一根键会在一种坐标下算立体源、
 /// 另一种下不算,而那种差别不报错。
-fn stereo_candidate(
-    mol: &MolBuilder,
-    unknown: &[bool],
-    di: u32,
-    classes: &[u32],
-) -> Option<[u32; 2]> {
-    let db = *mol.bonds().get(di as usize)?;
+/// 这根双键**几何上分得出顺反,而分子里还没有顺反信息**。
+///
+/// 两处在用,而且必须是同一个判断:
+///
+/// * 从坐标读立体时,它圈出"值得去量一量"的那批键([`stereo_candidate`]);
+/// * 往文件里写时,它圈出**必须标成交叉双键**的那批键
+///   ([`unspecified_cis_trans`])。
+///
+/// 两处若各写一套,同一根键就会「读的时候算立体源、写的时候不算」—— 那正好是
+/// 凭空造出构型的形状:写出去没标"未知",读回来量出一个确定的值。
+fn geometry_could_decide(mol: &MolBuilder, di: u32, classes: &[u32]) -> bool {
+    let Some(&db) = mol.bonds().get(di as usize) else {
+        return false;
+    };
     if db.order != BondOrder::Double || db.flags.contains(BondFlags::AROMATIC) {
-        return None;
+        return false;
     }
     // 什么算立体源,与方向键那条路是同一套:小环、已有标注两条来自
     // `would_annotate`,两端能否区分取代基那条来自 `informative_directions`
     // (`would_annotate` 通过它的筛选结果间接用上)。各写一遍的话,同一根键
     // 从 SMILES 进来标、从文件进来不标。
     if in_small_ring(mol, di) {
-        return None;
+        return false;
     }
     if stereo_atoms_are_valid(mol, di) {
+        return false;
+    }
+    end_is_stereogenic(mol, db.begin, db.end, classes)
+        && end_is_stereogenic(mol, db.end, db.begin, classes)
+}
+
+/// 逐键:**写进文件时该不该标成交叉双键**(V2000 键块第四列的 `3`,含义是
+/// 「顺反未知」)。
+///
+/// # 不标的后果是凭空造出一个构型
+///
+/// 二维图也好、三维构象也好,**画出来的每根双键都必然有一个确定的几何** ——
+/// 布局算法总得把取代基摆在某一侧。作者没写顺反的那些键,摆完之后从图上就量
+/// 得出一个值了。不标交叉的话,读的一方(别人的工具箱,以及我们自己)会把那个
+/// 值当成化学信息读走。
+///
+/// 实测:大语料 8831 个分子里 **551 个(6.2%)** 写出去再读回来会多出顺反标记,
+/// 而原串里一个都没有。方向是**造信息**,比丢信息更难发现 —— 拿到的文件看不出
+/// 任何毛病,只是多了一句作者从没说过的话。
+///
+/// # 只标"分得出顺反"的那些
+///
+/// 苯环里的双键、两端取代基相同的双键、小环内的双键都不标:它们本来就没有
+/// 顺反可言,标上去等于说"这里有个未知的构型",同样是假话。判断走
+/// `geometry_could_decide`,与从坐标读立体那一侧用的是同一个 —— 各写一套的话,
+/// 同一根键会「读的时候算立体源、写的时候不算」,那正好是凭空造构型的形状。
+///
+/// 已经有顺反信息的键也不标 —— 那种键写出来的是真实构型,不是未知。
+#[must_use]
+pub fn unspecified_cis_trans(mol: &MolBuilder) -> Vec<bool> {
+    let classes = crate::canon::symmetry_classes(mol);
+    (0..mol.num_bonds() as u32)
+        .map(|di| geometry_could_decide(mol, di, &classes))
+        .collect()
+}
+
+fn stereo_candidate(
+    mol: &MolBuilder,
+    unknown: &[bool],
+    di: u32,
+    classes: &[u32],
+) -> Option<[u32; 2]> {
+    if !geometry_could_decide(mol, di, classes) {
         return None;
     }
-    if !end_is_stereogenic(mol, db.begin, db.end, classes)
-        || !end_is_stereogenic(mol, db.end, db.begin, classes)
-    {
-        return None;
-    }
+    let db = *mol.bonds().get(di as usize)?;
     // 文件明说这根键的立体未知(交叉双键)—— 坐标照样画得出一个确定的样子,
     // 照读就等于把"作者说不知道"改写成"作者说是顺式"。
     //

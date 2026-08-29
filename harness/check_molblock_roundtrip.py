@@ -25,6 +25,21 @@
 
 两侧的串都交给外部实现规范化再比 —— 跨实现不能直接比规范串。
 
+# 还比第二件事:**写出去的字节忠不忠于原分子**
+
+上面那一条只保证"两个读者对同一份字节的读法一致" —— 两边一起读出同一句**假话**
+时它照样全绿。实测栽过一次:作者没写顺反的双键,我方写图时没标交叉双键,于是
+图上那个由布局随手摆出来的几何被两个读者都读成了化学信息。**8831 个分子里
+551 个(6.2%)**,而当时 40 道闸一条没红。
+
+`check_molblock.py` 也够不着它:那条判据的口径是"读回来必须**满足**输入指定的
+每一处立体",明写着「多出来的立体信息不是错」—— 对三维结构那是对的(桥头碳的
+构型确实被坐标定死),对顺反不对:molblock 有表达"未知顺反"的标准写法
+(交叉双键),不用它就是造信息。
+
+所以这里加一档:**外部实现从我方写的块里读出的顺反,不得多于它从原串里读出的**。
+上限 0。
+
 # 分档
 
 `--max-diff` 那一档是"骨架一样、只有立体不同"。它不是允许错,是给已知的感知
@@ -67,6 +82,10 @@ MIN_WITH_CHIRAL = 200
 # 参照侧读得出顺反的条数下限。手性与顺反是两段独立的代码,各配一条。
 MIN_WITH_EZ = 100
 
+# **原串里本来就带顺反的分子条数下限。** "凭空多出顺反"那一档上限是 0,
+# 而 0 在语料里一个顺反都没有时同样成立 —— 那时判据什么也没守。实测 366 条。
+MIN_EZ_FROM_SOURCE = 200
+
 
 def canon(smiles):
     m = Chem.MolFromSmiles(smiles)
@@ -85,6 +104,8 @@ def main() -> int:
 
     same = stereo_diff = with_chiral = with_ez = 0
     ours_cannot_write = ref_cannot_read = 0
+    invented = 0          # 写出去之后凭空多出来的顺反
+    ez_from_source = 0    # 原串里本来就有顺反的分子数(给上面那档配的下限)
     failures = []
     for lineno, line in enumerate(open(args.corpus, encoding="utf-8")):
         line = line.strip()
@@ -97,6 +118,30 @@ def main() -> int:
             # 画不出二维图的分子不在这条判据的射程内,`check_molblock.py` 管那一档
             ours_cannot_write += 1
             continue
+
+        # **凭空多出的顺反。** 数的是外部实现自己的两次读取:一次读原串、
+        # 一次读我方写的块。同一个实现、同一套口径,差出来的就是我方在写出
+        # 那一步添的。
+        src = Chem.MolFromSmiles(smi)
+        if src is not None:
+            def n_ez(mol):
+                return sum(
+                    1 for b in mol.GetBonds()
+                    if b.GetStereo() not in (Chem.BondStereo.STEREONONE,
+                                             Chem.BondStereo.STEREOANY)
+                )
+            n_src = n_ez(src)
+            if n_src:
+                ez_from_source += 1
+            written = Chem.MolFromMolBlock(block)
+            if written is not None and n_ez(written) > n_src:
+                invented += 1
+                if len(failures) < 20:
+                    failures.append(
+                        f"第 {lineno} 行 {smi}:写出去之后多出 "
+                        f"{n_ez(written) - n_src} 处顺反 —— "
+                        "没写顺反的双键要标成交叉双键"
+                    )
 
         ref = Chem.MolFromMolBlock(block)
         if ref is None:
@@ -132,17 +177,27 @@ def main() -> int:
             continue
         failures.append(f"第 {lineno} 行 {smi}:我方读成 {got_canon},外部实现读成 {want}")
 
-    hard = [f for f in failures if "立体不同" not in f]
+    hard = [f for f in failures if "立体不同" not in f and "多出" not in f]
     print(f"逐条一致 {same};骨架对但立体不同 {stereo_diff}(上限 {args.max_diff});"
           f"读成别的分子 {len(hard)}")
     print(f"  我方画不出二维图 {ours_cannot_write};外部实现读不了我方的块 {ref_cannot_read}")
     print(f"  参照侧带四面体的 {with_chiral} 条(下限 {MIN_WITH_CHIRAL});"
           f"带顺反的 {with_ez} 条(下限 {MIN_WITH_EZ})")
+    print(f"  **凭空多出顺反的 {invented} 条(上限 0)**;原串本来就带顺反的 "
+          f"{ez_from_source} 条(下限 {MIN_EZ_FROM_SOURCE})")
     for f in failures[:8]:
         print(f"  ✗ {f}")
 
     if hard:
         print("\n我方写出去的 molblock,我方自己读回来不是同一个分子。")
+        return 1
+    if invented:
+        print(f"\n{invented} 条写出去之后多出了顺反 —— 图上那个几何是布局随手摆的,"
+              "不是化学信息。没写顺反的双键要标成交叉双键(键块第四列 3)。")
+        return 1
+    if ez_from_source < MIN_EZ_FROM_SOURCE:
+        print(f"\n原串带顺反的只有 {ez_from_source} 条,低于下限 {MIN_EZ_FROM_SOURCE} —— "
+              "上面那条上限为 0 的判据被喂空了")
         return 1
     if stereo_diff > args.max_diff:
         print(f"\n只有立体不同的涨到 {stereo_diff} 条,超过上限 {args.max_diff}")

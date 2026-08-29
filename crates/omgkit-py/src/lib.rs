@@ -192,11 +192,16 @@ impl PyMol {
         let grown = d.drawn(&mol);
         let orders = omgkit_depict::render::drawn_orders(&grown);
         let coords: Vec<[f64; 3]> = d.coords.iter().map(|p| [p.x, p.y, 0.0]).collect();
+        // **作者没写顺反的双键要标成交叉双键。** 布局总得把取代基摆在某一侧,
+        // 于是图上每根双键都有一个确定的几何;不标的话,读的一方会把那个几何
+        // 当成化学信息读走 —— 凭空多出一句作者没说过的话。
+        let unknown = omgkit_io::stereo::unspecified_cis_trans(&grown);
         let rec = omgkit_io::molblock::Record {
             title,
             coords: &coords,
             wedges: &d.wedges,
             orders: &orders,
+            unknown_stereo: &unknown,
         };
         omgkit_io::molblock::write_v2000(&grown, &rec)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -305,11 +310,15 @@ impl PyConformer {
         omgkit_chem::kekulize(&mut kek)
             .map_err(|e| PyValueError::new_err(format!("凯库勒化失败:{e}")))?;
         let orders: Vec<_> = kek.bonds().iter().map(|b| b.order).collect();
+        // 三维同理,而且一模一样地危险:嵌出来的构象给每根双键一个确定的二面角,
+        // 作者没写顺反的那些键不标交叉,读回来就成了"作者说是顺式"。
+        let unknown = omgkit_io::stereo::unspecified_cis_trans(&self.mol.inner);
         let rec = omgkit_io::molblock::Record {
             title,
             coords: &self.conf.coords,
             wedges: &[],
             orders: &orders,
+            unknown_stereo: &unknown,
         };
         omgkit_io::molblock::write_v2000(&self.mol.inner, &rec)
             .map_err(|e| PyValueError::new_err(e.to_string()))

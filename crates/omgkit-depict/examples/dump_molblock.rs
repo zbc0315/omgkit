@@ -79,12 +79,16 @@ fn main() {
         // 这里只负责把二维坐标与楔形翻过去。先前这个例子自己写了一份格式化,
         // 而三维那条路要再写一份,两份必然分家。
         let coords: Vec<[f64; 3]> = d.coords.iter().map(|p| [p.x, p.y, 0.0]).collect();
-        // 楔形两边是**同一个类型**(`omgkit_io::wedge::Wedge`),不用转换
+        // 楔形两边是**同一个类型**(`omgkit_io::wedge::Wedge`),不用转换。
+        // 作者没写顺反的双键要标成交叉双键 —— 不标的话,图上那个几何会被读成
+        // 化学信息。判断的对象是**画出来的那个分子**,键下标要与写出的一致。
+        let unknown = omgkit_io::stereo::unspecified_cis_trans(m);
         let rec = Record {
             title: "",
             coords: &coords,
             wedges: &d.wedges,
             orders: &orders,
+            unknown_stereo: &unknown,
         };
         match write_v2000(m, &rec) {
             Ok(block) => print!("{block}"),

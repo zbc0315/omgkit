@@ -38,6 +38,27 @@ is where the `@` went. `to_molblock_2d` runs the whole chain for you: sanitize,
 perceive double-bond geometry, lay out coordinates, assign wedges, and write
 **the molecule that was drawn**.
 
+!!! info "A double bond with no configuration is written as **crossed**"
+
+    Laying a molecule out gives **every** double bond a definite geometry — the
+    substituents have to go somewhere. If the input never said whether a bond is
+    cis or trans, writing that geometry without saying "unknown" hands the reader
+    a configuration the author never gave.
+
+    So a double bond that could have a configuration but does not gets stereo
+    code `3` (a crossed double bond, the V2000 way of saying *either*). Bonds
+    that already have a configuration are written with their real geometry, and
+    bonds that cannot have one — inside a small ring, or with the same two
+    substituents on one end — are not marked at all, since "unknown" would be
+    just as untrue there.
+
+    This was measured: before the marks were written, **551 of 8831 molecules
+    (6.2%)** came back from a round trip carrying cis/trans that the input never
+    had. The gate that watches it is `harness/check_molblock_roundtrip.py`.
+
+    The same applies to 3D: an embedded conformer gives every double bond a
+    definite torsion, so `Conformer.to_molblock()` marks them too.
+
 !!! info "The molecule written may have one more atom than the one you passed"
 
     Some stereocentres have all three of their heavy bonds inside a ring; the
@@ -90,6 +111,22 @@ True
 >>> back.mol.to_canonical_smiles() == conf.mol.to_canonical_smiles()
 True
 ```
+
+!!! tip "Comparing a round trip: call `remove_hs()` first"
+
+    Writing may add an explicit hydrogen to carry a wedge, so the molecule that
+    comes back can have one more atom than the one you wrote. Merge those back
+    before comparing:
+
+    ```python
+    back = omgkit.parse_molblock(m.to_molblock_2d()).mol
+    back.remove_hs()
+    back.to_canonical_smiles() == m.to_canonical_smiles()
+    ```
+
+    Across the 8831-molecule corpus this holds for 8829; the two that differ are
+    trivalent phosphorus, where omgkit reads a centre the external
+    implementation does not.
 
 Bonds the file marks as **explicitly unknown** — a crossed double bond, a wavy
 single bond — are left unassigned instead of being read off the drawing. "The

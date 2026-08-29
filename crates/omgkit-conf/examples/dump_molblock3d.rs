@@ -55,11 +55,16 @@ fn main() {
         let orders: Vec<_> = kek.bonds().iter().map(|b| b.order).collect();
         // 三维构象**不写楔形**:楔形是二维图上的记号,写在三维坐标旁边等于给出
         // 两个可能互相矛盾的说法。立体从坐标本身读。
+        //
+        // 但"顺反未知"要标:嵌出来的构象给每根双键一个确定的二面角,作者没写
+        // 顺反的那些键不标交叉,读回来就成了"作者说是顺式"。
+        let unknown = omgkit_io::stereo::unspecified_cis_trans(&mol);
         let rec = Record {
             title: "",
             coords: &conf.coords,
             wedges: &[],
             orders: &orders,
+            unknown_stereo: &unknown,
         };
         let line_no = lineno.to_string();
         let Ok(block) = write_sdf_record(&mol, &rec, &[("行号", &line_no), ("原串", smi)])

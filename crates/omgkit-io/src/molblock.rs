@@ -114,10 +114,23 @@ pub struct Record<'a> {
     /// 报 [`WriteError::AromaticBond`] —— 不是退回单键:那样噻吩写出去、
     /// 读回来就成了四氢噻吩,而且一声不响。
     pub orders: &'a [BondOrder],
+    /// 逐键的**「顺反未知」**,写成交叉双键(键块第四列的 `3`)。
+    ///
+    /// 空切片表示一个都不标。**但空切片几乎总是错的**:图上每根双键都有一个
+    /// 确定的几何,作者没写顺反的那些键不标交叉,读的一方就会从图里量出一个
+    /// 值当成化学信息 —— 凭空造出一句作者没说过的话。
+    ///
+    /// 该标哪些由 [`unspecified_cis_trans`](crate::stereo::unspecified_cis_trans)
+    /// 算,它与从坐标读立体那一侧用的是同一个判断。
+    pub unknown_stereo: &'a [bool],
 }
 
 impl<'a> Record<'a> {
     /// 三维构象的最简用法:只给坐标,不画楔形,键级照分子里存的。
+    ///
+    /// **不标任何"顺反未知"** —— 三维坐标同样会给每根双键一个确定的二面角,
+    /// 所以除非你确实要写"每根双键的构型都是真的",否则应当自己填
+    /// [`Record::unknown_stereo`]。
     #[must_use]
     pub fn from_coords(title: &'a str, coords: &'a [[f64; 3]]) -> Self {
         Self {
@@ -125,6 +138,7 @@ impl<'a> Record<'a> {
             coords,
             wedges: &[],
             orders: &[],
+            unknown_stereo: &[],
         }
     }
 }
@@ -216,6 +230,14 @@ pub fn write_v2000(mol: &MolBuilder, rec: &Record) -> Result<String, WriteError>
             BondOrder::Double => 2,
             BondOrder::Triple => 3,
             _ => 1,
+        };
+        // **「顺反未知」压在楔形之上。** 两者不会撞车 —— 楔形只打在单键上 ——
+        // 但真撞上的话该赢的是这一条:交叉双键说的是"这根键的构型不知道",
+        // 而楔形码写在双键上本来就没有意义。
+        let code = if ord == 2 && rec.unknown_stereo.get(bi).copied().unwrap_or(false) {
+            3
+        } else {
+            code
         };
         let _ = writeln!(
             out,
@@ -999,6 +1021,79 @@ M  END
     /// `harness/check_molblock.py` 守着 —— 它拿 `ForwardSDMolSupplier` 当普通
     /// SDF 读我方写的文件。这里钉的是"写出器与读取器对同一套字段格式的理解
     /// 一致",那是两个模块之间的约定,值得单独有个东西看着。
+    /// 作者没写顺反的双键,写出去必须标成**交叉双键**;写了的不能标。
+    ///
+    /// 不标的后果不是"少了点信息",是**多了一句作者没说过的话**:图上每根双键
+    /// 都有确定的几何,读的一方会把布局随手摆出来的那个样子当成化学信息。
+    /// 实测大语料 8831 个分子里有 551 个(6.2%)栽在这上面。
+    ///
+    /// 反过来也要守:已经有顺反的键**不许**标成未知,否则就是把真信息抹掉。
+    #[test]
+    fn a_double_bond_without_a_configuration_is_written_as_crossed() {
+        let stereo_codes = |smi: &str| -> Vec<(u8, String)> {
+            let mut m = crate::smiles::parse(smi).expect("解析");
+            omgkit_chem::pipeline::sanitize(&mut m).expect("净化");
+            crate::stereo::perceive_bond_stereo(&mut m);
+            let mut kek = m.clone();
+            omgkit_chem::kekulize(&mut kek).expect("凯库勒化");
+            let orders: Vec<_> = kek.bonds().iter().map(|b| b.order).collect();
+            let coords = vec![[0.0; 3]; m.num_atoms()];
+            let unknown = crate::stereo::unspecified_cis_trans(&m);
+            let rec = Record {
+                title: "",
+                coords: &coords,
+                wedges: &[],
+                orders: &orders,
+                unknown_stereo: &unknown,
+            };
+            let text = write_v2000(&m, &rec).expect("写得出");
+            let lines: Vec<&str> = text.lines().collect();
+            let na: usize = lines[3][0..3].trim().parse().unwrap();
+            let nb: usize = lines[3][3..6].trim().parse().unwrap();
+            lines[4 + na..4 + na + nb]
+                .iter()
+                .map(|ln| {
+                    (
+                        ln[6..9].trim().parse::<u8>().unwrap_or(0),
+                        ln[9..12].trim().to_string(),
+                    )
+                })
+                .collect()
+        };
+
+        // 2-丁烯没写顺反 —— 那根 C=C 必须标 3
+        let codes = stereo_codes("CC=CC");
+        let doubles: Vec<&String> = codes
+            .iter()
+            .filter(|(o, _)| *o == 2)
+            .map(|(_, c)| c)
+            .collect();
+        assert_eq!(doubles, vec!["3"], "没写顺反的双键要标成交叉双键");
+
+        // 写了顺反的**不许**标未知 —— 那会把真信息抹掉
+        let codes = stereo_codes("C/C=C/C");
+        let doubles: Vec<&String> = codes
+            .iter()
+            .filter(|(o, _)| *o == 2)
+            .map(|(_, c)| c)
+            .collect();
+        assert_eq!(doubles, vec!["0"], "有顺反的双键不许标成未知");
+
+        // 两端取代基相同,本来就没有顺反可言 —— 标上去等于说"这里有个未知的构型"
+        let codes = stereo_codes("CC(C)=C(C)C");
+        let doubles: Vec<&String> = codes
+            .iter()
+            .filter(|(o, _)| *o == 2)
+            .map(|(_, c)| c)
+            .collect();
+        assert_eq!(doubles, vec!["0"], "分不出顺反的双键不该标未知");
+
+        // 苯环:芳香键凯库勒化之后成了双键,但环内双键没有顺反可言
+        let codes = stereo_codes("c1ccccc1");
+        let marked = codes.iter().filter(|(o, c)| *o == 2 && c == "3").count();
+        assert_eq!(marked, 0, "环内双键不标未知");
+    }
+
     #[test]
     fn a_written_record_reads_back_with_its_fields() {
         let got = read_sdf(TWO).next().expect("第一条").expect("读得出");
@@ -1008,6 +1103,7 @@ M  END
             coords: &got.block.coords,
             wedges: &[],
             orders: &orders,
+            unknown_stereo: &[],
         };
         let text = write_sdf_record(
             &got.block.mol,
@@ -1045,6 +1141,7 @@ M  END
             coords: &got.block.coords,
             wedges: &[],
             orders: &orders,
+            unknown_stereo: &[],
         };
         for (name, value) in [
             ("备注", "上半段\n\n下半段"),
