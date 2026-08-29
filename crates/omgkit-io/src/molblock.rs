@@ -465,6 +465,9 @@ pub fn read_v2000(text: &str) -> Result<Molblock, ReadError> {
     // 原子块里那个旧电荷码,先记着 —— **只有在没有任何 `M  CHG` 行时才作数**。
     let mut legacy_charge = vec![0i8; na];
     let mut legacy_iso = vec![0i16; na];
+    // 价键字段也要推迟:它说的是**总价**,而减去"已经连出去的价"才得到氢数,
+    // 那要等键块读完才知道。
+    let mut legacy_valence = vec![0i32; na];
 
     for k in 0..na {
         let ln = 4 + k;
@@ -478,7 +481,7 @@ pub fn read_v2000(text: &str) -> Result<Molblock, ReadError> {
             line: ln,
             symbol: sym.to_string(),
         })?;
-        let idx = mol.add_atom(el.atomic_num);
+        mol.add_atom(el.atomic_num);
 
         // 旧电荷码:0 无、1 = +3、2 = +2、3 = +1、4 = 双线态自由基、5 = −1、
         // 6 = −2、7 = −3。这个编码常年被写错,所以只在没有 `M  CHG` 时才用。
@@ -496,13 +499,9 @@ pub fn read_v2000(text: &str) -> Result<Molblock, ReadError> {
         if mass_diff != 0 {
             legacy_iso[k] = i16::try_from(i32::from(el.common_isotope) + mass_diff).unwrap_or(0);
         }
-        // 价键字段:0 = 按默认价补氢;15 = 零价;1..=14 = 总价钉死。
-        let valence = parse_i32(field(line, 48, 51)).unwrap_or(0);
-        if valence != 0 {
-            if let Some(a) = mol.atom_mut(idx) {
-                a.flags.insert(AtomFlags::NO_IMPLICIT);
-            }
-        }
+        // 价键字段:0 = 按默认价补氢;15 = 零价;1..=14 = 总价钉死。**先记着**,
+        // 换算成氢数要等键读完 —— 见下面那一段。
+        legacy_valence[k] = parse_i32(field(line, 48, 51)).unwrap_or(0);
         coords.push([x, y, z]);
     }
 
@@ -609,6 +608,30 @@ pub fn read_v2000(text: &str) -> Result<Molblock, ReadError> {
         if let Some(a) = mol.atom_mut(u32::try_from(at).unwrap_or(0)) {
             a.num_radical_electrons = v;
         }
+    }
+
+    // **价键字段说的是总价,不是"这个原子上没有氢"。**
+    //
+    // 只把 `NO_IMPLICIT` 置上而不把氢数补回去,`[C@H]` 写出去再读回来就成了
+    // 三配位的碳 —— 中心少一个配体,手性当场消失;自由基碳(`vvv=3`)读回来是
+    // 一个光秃秃的碳。氢数 = 总价 − 已经连出去的价,而"连出去的价"要等键块
+    // 读完才算得出,所以推到这里。
+    //
+    // 15 是规范里的"零价"哨兵,不是十五价。
+    for (k, &v) in legacy_valence.iter().enumerate() {
+        if v == 0 {
+            continue;
+        }
+        let idx = u32::try_from(k).unwrap_or(0);
+        let target = if v == 15 { 0 } else { v };
+        // 此刻 `num_explicit_hs` 还是 0,所以这一步拿到的就是键的价数和
+        // (显式画出来的氢原子也在里面 —— 它们各自贡献一根键)。
+        let bonded = omgkit_core::valence::explicit_valence_nonstrict(&mol, idx);
+        let Some(a) = mol.atom_mut(idx) else {
+            continue;
+        };
+        a.num_explicit_hs = u8::try_from((target - bonded).max(0)).unwrap_or(0);
+        a.flags.insert(AtomFlags::NO_IMPLICIT);
     }
 
     let is_3d = coords.iter().any(|p| p[2].abs() > 1e-9);
@@ -820,6 +843,40 @@ M  END
 
 $$$$
 ";
+
+    /// 价键字段说的是**总价**,不是"这个原子上没有氢"。
+    ///
+    /// 断的是契约本身,不是当时的能力上限:一个碳连出去三根单键、`vvv=4`,
+    /// 那么它上面还挂着 4 − 3 = 1 个氢。只把 `NO_IMPLICIT` 置上而不把这个氢
+    /// 补回去,它就成了三配位的碳 —— 手性中心少一个配体,构型无从谈起。
+    #[test]
+    fn the_valence_field_is_a_total_not_a_ban_on_hydrogen() {
+        let text = "\
+价键字段
+     omgkit
+
+  4  3  0  0  0  0  0  0  0  0999 V2000
+    0.0000    0.0000    0.0000 C   0  0  0  0  0  4  0  0  0  0  0  0
+    1.0000    0.0000    0.0000 N   0  0  0  0  0  0  0  0  0  0  0  0
+   -0.5000    0.8660    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0
+   -0.5000   -0.8660    0.0000 F   0  0  0  0  0 15  0  0  0  0  0  0
+  1  2  1  0
+  1  3  1  0
+  1  4  1  0
+M  END
+";
+        let got = read_v2000(text).expect("读得出来");
+        let a = &got.mol.atoms()[0];
+        assert!(
+            a.flags.contains(AtomFlags::NO_IMPLICIT),
+            "写了价键字段就等于把氢数钉死了"
+        );
+        assert_eq!(a.num_explicit_hs, 1, "总价 4 减去三根单键,剩一个氢");
+        // 15 是规范里的"零价"哨兵,不是十五价 —— 读成 15 会给氟补上 14 个氢。
+        assert_eq!(got.mol.atoms()[3].num_explicit_hs, 0, "15 是零价");
+        // 没写这个字段的原子不受影响:氢数照默认价算,轮不到这一段管。
+        assert!(!got.mol.atoms()[1].flags.contains(AtomFlags::NO_IMPLICIT));
+    }
 
     fn smiles_of(r: &SdfRecord) -> String {
         let mut m = r.block.mol.clone();

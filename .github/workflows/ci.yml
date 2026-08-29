@@ -358,6 +358,14 @@ jobs:
       - name: 判官:写二维 molblock 的 Python 绑定(与 Rust 逐字节比)
         run: python harness/check_python_molblock2d.py "$RUNNER_TEMP/blocks.txt"
 
+      # 我方写的块,我方自己读得回来吗。上面两条 molblock 判据各守一半 ——
+      # "外部实现读我方写的"与"我方读外部实现写的"。两条全绿,**我方写的字节
+      # 我方自己读**这条路仍然没人走过,而接进来的那一刻它就是红的:价键字段
+      # `vvv` 说的是总价,读出侧当成了"没有氢",`C[C@H](N)C(=O)O` 读回来成了
+      # 三配位的碳。真值仍由外部实现读同一份字节给出,不是自反判据。
+      - name: 判官:写出去的 molblock 我方自己读回来
+        run: python harness/check_molblock_roundtrip.py harness/corpus/large.smi
+
       # ---- 先前只在本地手动跑的那四条 ----
       #
       # **闸不进 CI 就不是闸。** 它们一直躺在 `harness/` 里,谁想起来谁跑一次。
