@@ -6,11 +6,18 @@ build-backend = "maturin"
 name = "omgkit"
 description = "Cheminformatics toolkit in Rust with Python bindings"
 requires-python = ">=3.9"
-license = { text = "BSD-3-Clause" }
+license = "BSD-3-Clause"
+# 分发件里必须带许可证全文(BSD-3 第 1、2 条就是这么要求的),而 PEP 639 的
+# 这个字段不许写 `..` —— 只能在包目录下放一份。它与仓库根那份逐字节相同,
+# `harness/gates.sh` 建 wheel 之前会比一次,免得两份各自过期。
+license-files = ["LICENSE"]
 authors = [{ name = "zbc0315" }]
 keywords = ["chemistry", "cheminformatics", "smiles", "smarts", "molecule"]
 # 版本由 Cargo.toml 提供,不在两处各写一份
 dynamic = ["version"]
+# PyPI 项目页的正文。不写的话那一页是**空白的** —— 装包的人看不到这是什么。
+# 指向仓库根那一份,不另抄一份:抄了就会有两份各自过期。
+readme = "../../README.md"
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Programming Language :: Rust",

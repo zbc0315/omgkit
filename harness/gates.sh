@@ -222,6 +222,10 @@ cargo run -q -p omgkit-conf --release --example dump_conformers -- harness/corpu
 #
 # `check_byproducts.py` 进不来:它要 USPTO-50k 的 templates.jsonl,
 # 那份语料不随仓库分发。
+# 分发件里的许可证与仓库根那一份必须逐字节相同。PEP 639 的 `license-files`
+# 不许写 `..`,所以包目录下放了一份副本 —— 副本就会过期,除非有人比。
+diff -q LICENSE crates/omgkit-py/LICENSE
+
 echo "== 建 wheel(下面几条判据经它看 Rust 行为)"
 "$PY" -m maturin build --release -q -m crates/omgkit-py/Cargo.toml --out "$WORK/wheels"
 "$PY" -m pip install -q --force-reinstall "$WORK"/wheels/omgkit-*.whl
