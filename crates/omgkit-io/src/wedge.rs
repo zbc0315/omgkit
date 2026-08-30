@@ -63,9 +63,17 @@ impl Wedge {
 
 /// 三个画出来的邻居张不出这么大的体积,就判"这张图定不出手性"。
 ///
-/// 单位是**键长的立方**。数值取自 RDKit `Chirality.cpp` 的 `ZERO_VOLUME_TOL`,
-/// 照抄是因为**我们导出的 molblock 就是交给它读的** —— 两边用同一把尺,
-/// "别人读得回来"才谈得上。
+/// 单位是**键长的立方**。数值取自 RDKit `Chirality.cpp` 的 `ZERO_VOLUME_TOL`。
+///
+/// **理由不是"别人读我们的文件时用的就是这把尺"** —— 那句先前写在这里,而它
+/// 不成立:`ZERO_VOLUME_TOL` 属于 `assignChiralTypesFrom3D`,那个函数开头就是
+/// `if (!conf.is3D()) return;`,而本模块服务的是**二维楔形**那条路;RDKit 读
+/// 二维楔形走的是 `atomChiralTypeFromBondDirPseudo3D`,容差是 `0.01`,紧一个
+/// 数量级。三维那条路上(`stereo.rs` 里同一个引用)才是对得上的。
+///
+/// 留 `0.1` 是本实现自己的取舍:二维图里三个邻居张不出这么大的体积时,楔形
+/// 说的构型已经取决于浮点末位,不如说"这张图定不出手性"。**紧到 0.01 会把一批
+/// 本来读得出的中心判成读不出**,那不是更保守,是丢信息。要动它得先量。
 pub(crate) const ZERO_VOLUME_TOL: f64 = 0.1;
 
 enum Ligand {

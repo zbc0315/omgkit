@@ -2,5 +2,8 @@
 mkdocs-material>=9.7
 mkdocstrings[python]>=0.30
 mkdocs-static-i18n>=1.3
-mkdocs-gen-files>=0.6
-mike>=2.2
+
+# `mkdocs-gen-files` 与 `mike` 先前列在这里,而两个都没人用:
+# 前者被 `docs/sync_sources.py` 取代(i18n 插件处理不了它生成的虚拟文件,
+# 见那个脚本的文件头),后者要版本化部署,而 `mkdocs.yml` 里没有 `extra.version`。
+# 装一个没人 import 的依赖,下一个人会以为它在起作用。

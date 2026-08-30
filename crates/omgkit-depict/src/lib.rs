@@ -109,7 +109,7 @@
 /// 氢就会拿到不同的原子号 —— 后面整条管线跟着变。
 /// # 实现搬到 `omgkit-io` 去了,论证留在这儿
 ///
-/// 三维构象生成(尚未落地)也要
+/// 三维构象生成(`omgkit-conf`,已随 0.0.5 发布)也要
 /// 这个秩,而它**不该依赖绘图 crate**。所以函数体挪到了
 /// [`omgkit_io::canon::classed_ranks`],这里只剩一层转发。
 ///
@@ -180,6 +180,16 @@ pub struct Depiction {
     pub wedges: Vec<stereo::Wedge>,
     /// **没能画出构型的立体中心**。如实报出来,不假装画好了。
     pub unwedged: Vec<u32>,
+    /// **画出来的几何与记录的顺反不符的双键。**
+    ///
+    /// 掰顺反靠的是"把双键一侧整个镜像过去",而环上的
+    /// 键两侧是同一片原子,镜像动不了它 —— 环内的双键画成什么样由环的画法决定,
+    /// 而环按凸多边形画,环内双键一律画成顺式。八元以上的环里记着反式的双键
+    /// 因此**画出来是反的**,读这张图的人拿到的是另一个分子。
+    ///
+    /// 先前这一档谁都不报:`fix_cis_trans` 的返回值被丢掉,四个诊断字段一个也
+    /// 装不下它,`is_clean()` 照样为真。README 说"画不好会说出来",这里没说。
+    pub misdrawn_stereo: Vec<u32>,
     /// 产生这张图的规范名。
     pub style_name: &'static str,
     /// 规范中**影响布局**那部分的指纹。
@@ -201,8 +211,8 @@ impl Depiction {
 
     /// **真正被画的那个分子。** 没补东西时就是传进来的那个,不复制。
     ///
-    /// `coords`、`wedges`、`unresolved`、`crossings`、`unwedged`、`degraded`
-    /// 的下标全部相对它。渲染与判据都该拿它,而不是拿传进来的分子 —— 否则
+    /// `coords`、`wedges`、`unresolved`、`crossings`、`unwedged`、`degraded`、
+    /// `misdrawn_stereo` 的下标全部相对它。渲染与判据都该拿它,而不是拿传进来的分子 —— 否则
     /// 补出来的氢会被静默丢掉,而诊断全绿。
     ///
     /// 返回 [`Cow`](std::borrow::Cow),所以 `&d.drawn(&m)` 在要 `&MolBuilder`
@@ -223,6 +233,7 @@ impl Depiction {
             && self.unresolved.is_empty()
             && self.crossings.is_empty()
             && self.unwedged.is_empty()
+            && self.misdrawn_stereo.is_empty()
     }
 }
 
@@ -398,10 +409,17 @@ pub(crate) fn generate_with(
     // 取的调用方直接越界 —— 实测二茂铁 wedges.len()=12 而键数 20。
     let w = stereo::assign_wedges(whole, &coords, &ranks);
 
+    // **顺反的诊断要放在坐标全部定稿之后。** 掰顺反(`fix_cis_trans`)之后还有
+    // 消冲突与摆正两步,而消冲突挪原子时会把已经摆对的顺反再弄反 —— 那正是
+    // "顺反先摆对再消冲突"那条注释里说的隐患。在这里照最终坐标量一遍,量的
+    // 就是读图的人真正看到的东西。
+    let misdrawn_stereo = stereo::stereo_mismatches(whole, &coords);
+
     Depiction {
         coords,
         wedges: w.bonds,
         unwedged: w.unwedged,
+        misdrawn_stereo,
         degraded,
         unresolved: report.unresolved,
         crossings: report.crossings,
@@ -466,13 +484,18 @@ fn hapto_extras(
     mol: &MolBuilder,
     ranks: &[u32],
 ) -> Option<(std::collections::BTreeSet<usize>, Vec<Degradation>)> {
-    /// 会做 π 配位的元素。从宽收 —— 这里只是找候选,`>=3 根键进同一个环`
-    /// 那一条才是判据。
-    fn is_metal(z: u8) -> bool {
-        matches!(z, 3 | 4 | 11..=13 | 19..=32 | 37..=51 | 55..=84 | 87..=118)
-    }
+    // 会做 π 配位的元素从宽收 —— 这里只是找候选,`>=3 根键进同一个环`
+    // 那一条才是判据。
+    //
+    // **"什么算金属"只有一处实现。** 先前这里自己写了一份区间表,与
+    // `omgkit_chem::organometallics::is_metal` 的元素集合当前恰好相同 ——
+    // 而"恰好相同"不是性质,是巧合:两份表迟早分岔,分岔的表现是一半的
+    // 有机金属分子摘了 η 键、另一半没摘,而图看着都正常。
     let metals: Vec<u32> = (0..u32::try_from(mol.num_atoms()).ok()?)
-        .filter(|a| is_metal(mol.atoms()[*a as usize].atomic_num) && mol.degree(*a) >= 3)
+        .filter(|a| {
+            omgkit_chem::organometallics::is_metal(mol.atoms()[*a as usize].atomic_num)
+                && mol.degree(*a) >= 3
+        })
         .collect();
     if metals.is_empty() {
         return None;

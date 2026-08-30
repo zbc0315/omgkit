@@ -47,7 +47,97 @@ pub fn parse_atom_expr(src: &[u8]) -> Result<AtomExpr> {
             src,
         ));
     }
-    Ok(e)
+    hoist_atom_map(e, src)
+}
+
+/// 把映射号提到表达式树的**最外层**。
+///
+/// # 映射号不是查询基元
+///
+/// `:n` 说的是"这个原子在反应里叫几号",它不参与匹配(求值时恒为真),也不受
+/// `,` / `;` / `!` 的辖制 —— 规范里它是方括号原子**整体**的一个后缀。
+///
+/// 而语法上它写在最后,按上面那三档优先级会被吸进最后一个析取分支:
+/// `[C,N:9]` 解析成 `C 或 (N 且 :9)`。匹配上没差别(映射号恒真),可
+/// [`super::map_number`] 只在最外层的合取里找号,于是这个原子**被当成没有映射号**。
+///
+/// 后果不是"少一个号"这么轻:反应的产物构建靠映射号认领反应物原子,认不出来
+/// 就当成新建原子,底物剩下的部分一个也搬不过来 —— `[C,N:9]>>[O:9]` 作用在
+/// `CCN` 上,产物只剩一个 `O`,两个碳凭空消失,而且不报错。`[C,N:1]`、
+/// `[O,S:2]` 这类写法在真实模板里极常见。
+///
+/// 提到最外层之后,匹配语义一字不变(那个分支本来就恒真),而映射号取得到了。
+///
+/// 同一个方括号里写了两个**不同**的映射号是没有意义的,报错而不是挑一个。
+fn hoist_atom_map(e: AtomExpr, src: &[u8]) -> Result<AtomExpr> {
+    let mut found: Option<u16> = None;
+    let stripped = strip_atom_map(e, &mut found);
+    let Some(n) = found else {
+        return Ok(stripped);
+    };
+    if found_conflict(&stripped) {
+        return Err(ParseError::new(
+            K::BadBracketAtom("一个原子上写了两个不同的映射号"),
+            0,
+            src,
+        ));
+    }
+    Ok(match stripped {
+        // `[:9]` —— 只有映射号,没有别的条件
+        AtomExpr::And(parts) if parts.is_empty() => AtomExpr::Prim(AtomPrim::AtomMap(n)),
+        other => AtomExpr::And(vec![other, AtomExpr::Prim(AtomPrim::AtomMap(n))]),
+    })
+}
+
+/// 摘掉树里所有的映射号基元,第一个记进 `found`;不同号的第二个记成 `u16::MAX`
+/// 之外的哨兵由 [`found_conflict`] 判。
+fn strip_atom_map(e: AtomExpr, found: &mut Option<u16>) -> AtomExpr {
+    match e {
+        AtomExpr::Prim(AtomPrim::AtomMap(n)) => {
+            match *found {
+                None => *found = Some(n),
+                Some(m) if m != n => return AtomExpr::Prim(AtomPrim::AtomMap(n)),
+                Some(_) => {}
+            }
+            // 恒真的占位:上层的 `And` 会把它滤掉
+            AtomExpr::And(Vec::new())
+        }
+        AtomExpr::Not(inner) => AtomExpr::Not(Box::new(strip_atom_map(*inner, found))),
+        AtomExpr::And(parts) => {
+            let kept: Vec<AtomExpr> = parts
+                .into_iter()
+                .map(|p| strip_atom_map(p, found))
+                .filter(|p| !matches!(p, AtomExpr::And(v) if v.is_empty()))
+                .collect();
+            if kept.len() == 1 {
+                kept.into_iter().next().expect("刚判过长度")
+            } else {
+                AtomExpr::And(kept)
+            }
+        }
+        AtomExpr::Or(parts) => {
+            let kept: Vec<AtomExpr> = parts
+                .into_iter()
+                .map(|p| strip_atom_map(p, found))
+                .collect();
+            if kept.len() == 1 {
+                kept.into_iter().next().expect("刚判过长度")
+            } else {
+                AtomExpr::Or(kept)
+            }
+        }
+        other => other,
+    }
+}
+
+/// 摘完之后树里还剩着映射号 —— 说明写了两个不同的号。
+fn found_conflict(e: &AtomExpr) -> bool {
+    match e {
+        AtomExpr::Prim(AtomPrim::AtomMap(_)) => true,
+        AtomExpr::Not(inner) => found_conflict(inner),
+        AtomExpr::And(parts) | AtomExpr::Or(parts) => parts.iter().any(found_conflict),
+        AtomExpr::Prim(_) => false,
+    }
 }
 
 struct ExprParser<'a> {
@@ -159,7 +249,7 @@ impl ExprParser<'_> {
                     aromatic: None,
                 }
             }
-            // 计数类基元:裸写时的默认值各不相同,见 count_default
+            // 计数类基元:裸写时的默认值各不相同,见 `count_primitive`
             b'D' | b'X' | b'H' | b'h' | b'R' | b'r' | b'x' | b'v' => {
                 self.pos += 1;
                 let n = self.number();

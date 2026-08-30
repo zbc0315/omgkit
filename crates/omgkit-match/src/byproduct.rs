@@ -68,7 +68,7 @@
 
 use omgkit_core::{AtomFlags, BondData, BondOrder, MolBuilder};
 
-use crate::react::{align_for_rebase, components, permutation_is_odd, Outcome};
+use crate::react::{align_for_rebase, components, Outcome};
 
 /// 收口最多肯成几根键。
 ///
@@ -198,7 +198,7 @@ pub struct Byproducts {
 /// 片段的每个原子都建一条,而且建的顺序与原子入图的顺序完全一致,所以下标本身
 /// 就是对应关系,**不再单独存一个 `idx`**。
 ///
-/// 这不只是省一个字段:存了 `idx` 就得靠线性查找把它找回来,而那三处查找都在
+/// 这不只是省一个字段:存了 `idx` 就得靠线性查找把它找回来,而那几处查找都在
 /// "按原子"或"按键"的循环里 —— 正是本仓库反复警告的那个形状(在按原子的循环里
 /// 做一件正比于整个分子的事)。去掉字段之后查找变成下标索引,顺带也没有了
 /// "两者对不上"这种可能。
@@ -333,6 +333,17 @@ fn reconstruct_inner(
         kekulized.push(k);
     }
     let (mut frag, mut sites) = build_fragment(&kekulized, &outcome.discarded);
+    // **重原子的账在这里就要对上。**
+    //
+    // 末尾那条"账必须精确闭合"里的重原子项是在 `form_bonds` 前一行取的基线,
+    // 而那之间只剩不增删原子的步骤 —— 那一项**恒真**,守不住任何东西。真会掉
+    // 原子的是 `build_fragment` 里那两处 `continue`(下标越界就跳过一个原子),
+    // 而它在基线的**上游**。闸要下在被守的东西下游,不是上游。
+    debug_assert_eq!(
+        frag.num_atoms(),
+        outcome.discarded.iter().map(Vec::len).sum::<usize>(),
+        "build_fragment 丢了原子 —— 那两处 `continue` 触发了"
+    );
     let open_valence: u32 = sites.iter().map(|s| s.opens).sum();
     let fragment_hydrogens = u32::try_from(total_hydrogens(&frag)).unwrap_or(0);
     let fragment_charge = total_charge(&frag);
@@ -418,8 +429,11 @@ fn reconstruct_inner(
     //
     // 重原子那一项要单列。收口只该补氢、落电荷、成键 —— **一个重原子都不该增减**。
     // 前两项(氢、电荷)盯不住它:凭空多一个重原子的同时,氢与电荷完全可以照样
-    // 配平。文档一直把"重原子守恒"写成本模块的判据,可它此前只在基准脚本里查,
-    // 而 `reconstruct` 是公开 API,调用方拿到的东西没人替他查。
+    // 配平。
+    //
+    // **这一项守的是收口那几步,不是建片段那几步。** `heavy_before` 在
+    // `form_bonds` 前一行取,而建片段早就跑完了 —— 那一段由上面
+    // `build_fragment` 下面那条 `debug_assert_eq!` 守。两条各守各的一段。
     if heavy_atoms(&closed) != heavy_before
         || total_hydrogens(&closed) != delta_h
         || total_charge(&closed) != budget.delta_charge
@@ -508,11 +522,16 @@ fn build_fragment(reactants: &[MolBuilder], discarded: &[Vec<u32>]) -> (MolBuild
         .collect();
 
     for (ti, drop_list) in discarded.iter().enumerate() {
+        // 这两处 `continue` 挡的是**编程错误**(丢弃表比反应物多一项、下标越界),
+        // 不是数据情形。静默跳过会让片段少一个原子,而末尾那条账在它下游取基线,
+        // 看不见 —— 所以调用点在 `build_fragment` 返回后立刻对了一次原子数。
         let Some(mol) = reactants.get(ti) else {
+            debug_assert!(false, "丢弃表第 {ti} 项没有对应的反应物");
             continue;
         };
         for &a in drop_list {
             let Some(&data) = mol.atoms().get(a as usize) else {
+                debug_assert!(false, "丢弃表里的原子下标 {a} 越界");
                 continue;
             };
             let mut carried = data;
@@ -599,7 +618,7 @@ fn build_fragment(reactants: &[MolBuilder], discarded: &[Vec<u32>]) -> (MolBuild
 /// # 与产物侧共用同一套机制
 ///
 /// `rebase_chirality` 为产物侧做的是同一件事,所以这里直接复用
-/// [`align_for_rebase`] 与 [`permutation_is_odd`],不另写一套 —— 换参照系这件事
+/// [`align_for_rebase`] 与 `omgkit_core::permutation_is_odd`,不另写一套 —— 换参照系这件事
 /// 只该有一个真相来源,两处各写一份迟早会分叉。
 fn rebase_fragment_chirality(
     reactants: &[MolBuilder],
@@ -636,7 +655,7 @@ fn rebase_fragment_chirality(
             let Some((before, aligned)) = align_for_rebase(&slots, &after) else {
                 continue;
             };
-            if permutation_is_odd(&before, &aligned) == Some(true) {
+            if omgkit_core::permutation_is_odd(&before, &aligned) == Some(true) {
                 if let Some(at) = out.atom_mut(dst) {
                     at.chiral_tag = tag.inverted();
                 }

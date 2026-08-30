@@ -418,10 +418,10 @@ fn concat(mols: &[(MolBuilder, MolProps)]) -> MolBuilder {
 ///
 /// # 与 [`run_reactants`] 的分工
 ///
-/// [`run_reactants`] 的契约是"N 个反应物模板 ↔ N 个输入分子,第 i 个配第 i 个"。
-/// 那是个**位置**契约,而位置不是化学:同一批分子换个顺序递进来就可能不出产物,
-/// 调用方只好把所有排列都试一遍。更要紧的是,模板的片段数比分子数多时它直接
-/// 交白卷 —— 而那正是**分子内反应**的形状:两个片段落在同一个分子上。
+/// [`run_reactants`] 的契约是"N 个反应物模板 ↔ N 个输入分子,**一一对应**" ——
+/// 先恒等分配,给不出产物再搜别的对应关系,所以递入顺序不决定它跑不跑得起来。
+/// 但它仍然是**一对一**的:模板的片段数比分子数多时直接交白卷,而那正是
+/// **分子内反应**的形状 —— 两个片段落在同一个分子上。
 ///
 /// 本函数把输入拼成一张图,让每个反应物模板在整张图上自由找位置,只要求
 /// 各模板匹配到的原子**两两不重叠**。于是
@@ -601,7 +601,7 @@ fn template_order_is_odd(react: &[Option<u16>], prod: &[Option<u16>]) -> Option<
     let enc = |v: &[Option<u16>]| -> Vec<u32> {
         v.iter().map(|x| x.map_or(u32::MAX, u32::from)).collect()
     };
-    permutation_is_odd(&enc(&r), &enc(&p))
+    omgkit_core::permutation_is_odd(&enc(&r), &enc(&p))
 }
 
 /// `want` 里有而 `have` 里没有的映射号,填进 `have` 唯一的那个空位。
@@ -861,7 +861,7 @@ fn honoured_directions(template: &QueryMol) -> Vec<bool> {
     };
     let determined: Vec<bool> = (0..bonds.len())
         .map(|bi| {
-            bond_order_from(&template.bonds[bi]) == BondOrder::Double
+            product_bond_from(&template.bonds[bi]) == ProductBond::Fixed(BondOrder::Double)
                 && flanked(bonds[bi].begin, bi)
                 && flanked(bonds[bi].end, bi)
         })
@@ -935,7 +935,32 @@ fn emit_template(
     let honoured = honoured_directions(template);
     for (bi, expr) in template.bonds.iter().enumerate() {
         let b = template.topology.bonds()[bi];
-        let order = bond_order_from(expr);
+        // 键级有三种来源,见 [`ProductBond`]。原子已经在上一段建完了,所以
+        // "两端都芳香吗"此刻问得出来。
+        let order = match product_bond_from(expr) {
+            ProductBond::Fixed(o) => o,
+            ProductBond::FollowAromaticity => {
+                let aromatic = |ti: u32| {
+                    out.atoms()[from_template[ti as usize] as usize]
+                        .flags
+                        .contains(omgkit_core::AtomFlags::AROMATIC)
+                };
+                if aromatic(b.begin) && aromatic(b.end) {
+                    BondOrder::Aromatic
+                } else {
+                    BondOrder::Single
+                }
+            }
+            ProductBond::Inherit => {
+                match (anchor_of[b.begin as usize], anchor_of[b.end as usize]) {
+                    (Some((t1, a1)), Some((t2, a2))) if t1 == t2 => {
+                        inherited_order(&reactants[t1].0, a1, a2)
+                    }
+                    // 底物里没有这根键,模板又没说建什么 —— 谁都没表过态。
+                    _ => BondOrder::Unspecified,
+                }
+            }
+        };
         // 配位键的**朝向靠端点顺序表达**:`begin` 必须是给电子的一端。
         //
         // 而查询侧不是这么存的:`A<-B` 的端点按书写顺序记成 (A, B),由基元
@@ -1214,6 +1239,15 @@ fn discarded_atoms(reactants: &[(MolBuilder, MolProps)], built: &[BuiltProduct])
 /// 邻居**数目变了**的中心不处理:取代基增减之后手性本就没有定义,
 /// 硬翻一次只会把一个未定义的值变成另一个未定义的值。
 ///
+/// # 配位几何(`@SP`/`@TB`/`@OH`)走另一套换算
+///
+/// 四面体只有两种排列,换参照系就是"置换是奇是偶"。配位几何有 3 / 20 / 30 种,
+/// 奇偶说不清它 —— 换算表在 [`omgkit_core::polyhedron::renumber`],写出器与
+/// 规范化早就在用它,这里先前没接。
+///
+/// 后果:产物的邻居存储顺序**一定**变了(模板的键先建、搬运来的键后建),
+/// 而 `@SP1` 原样照抄进一个不同的参照系,指的是另一个几何异构体。
+///
 /// # 要定基的是**产物**当前的标记,不是反应物的
 ///
 /// 产物原子的标记未必等于它继承来的那个:模板可以写死一个构型,也可以刻意
@@ -1247,10 +1281,14 @@ fn rebase_chirality(
             continue;
         }
         let tag = out.atoms()[dst as usize].chiral_tag;
-        if !tag.is_tetrahedral() {
+        if tag == ChiralTag::Unspecified {
             continue;
         }
         let after: Vec<u32> = out.neighbors(dst).map(|(other, _)| other).collect();
+        if !tag.is_tetrahedral() {
+            rebase_coordination(mol, src, dst, kept, &after, out);
+            continue;
+        }
         // 反应物侧的邻居,按原顺序换算成产物下标。空出来的槽位下面补。
         //
         // 槽位空不空要看"**还连不连在这个中心上**",不是看那个原子有没有进产物。
@@ -1266,9 +1304,44 @@ fn rebase_chirality(
         let Some((before, after)) = align_for_rebase(&slots, &after) else {
             continue;
         };
-        if permutation_is_odd(&before, &after) == Some(true) {
+        if omgkit_core::permutation_is_odd(&before, &after) == Some(true) {
             if let Some(a) = out.atom_mut(dst) {
                 a.chiral_tag = tag.inverted();
+            }
+        }
+    }
+}
+
+/// 配位几何的重定基:把排列序号从反应物的邻居序换算到产物的邻居序。
+///
+/// 两侧的配体必须是同一组(不增不减)—— 增减了的话这个标记本就没有意义。
+/// 换算不出来就把标记整个丢掉:**表达不出来要说出来,照抄一个错的序号是撒谎。**
+fn rebase_coordination(
+    mol: &MolBuilder,
+    src: u32,
+    dst: u32,
+    kept: &BTreeMap<u32, u32>,
+    after: &[u32],
+    out: &mut MolBuilder,
+) {
+    let tag = out.atoms()[dst as usize].chiral_tag;
+    let perm = out.atoms()[dst as usize].stereo_perm;
+    let before: Vec<u32> = mol
+        .neighbors(src)
+        .filter_map(|(other, _)| kept.get(&other).copied())
+        .filter(|p| after.contains(p))
+        .collect();
+    let renumbered = if perm == 0 || before.len() != after.len() {
+        None
+    } else {
+        omgkit_core::polyhedron::renumber(tag, perm, &before, after)
+    };
+    if let Some(a) = out.atom_mut(dst) {
+        match renumbered {
+            Some(p) => a.stereo_perm = p,
+            None => {
+                a.stereo_perm = 0;
+                a.chiral_tag = ChiralTag::Unspecified;
             }
         }
     }
@@ -1394,30 +1467,19 @@ fn fill_replaced_slots(slots: &[Option<u32>], after: &[u32]) -> Option<Vec<u32>>
     Some(filled)
 }
 
-/// `from` → `to` 置换的宇称。两者不是同一多重集时返回 `None`。
-///
-/// n ≤ 6,O(n²) 完全够用。
-pub(crate) fn permutation_is_odd(from: &[u32], to: &[u32]) -> Option<bool> {
-    if from.len() != to.len() {
-        return None;
-    }
-    let mut cur = from.to_vec();
-    let mut swaps = 0usize;
-    for i in 0..to.len() {
-        if cur[i] == to[i] {
-            continue;
-        }
-        let j = (i + 1..cur.len()).find(|&j| cur[j] == to[i])?;
-        cur.swap(i, j);
-        swaps += 1;
-    }
-    Some(swaps % 2 == 1)
-}
-
 /// 把反应物里未被模板占用的部分接到产物上。
 /// 反应物里 `a` 与 `b` 之间那根键的方向,换算到"从 `a` 走向 `b`"的参照系。
 ///
 /// 没有这根键、或它没有方向时返回 `None` 对应的无方向值。
+/// `~` 那一档要沿用的键级:底物里 `a`–`b` 那根键的键级。没有这根键就是"未指定"。
+fn inherited_order(mol: &MolBuilder, a: u32, b: u32) -> BondOrder {
+    mol.neighbors(a)
+        .find(|&(other, _)| other == b)
+        .map_or(BondOrder::Unspecified, |(_, bi)| {
+            mol.bonds()[bi as usize].order
+        })
+}
+
 fn inherited_direction(mol: &MolBuilder, a: u32, b: u32) -> BondDirection {
     let Some((_, bi)) = mol.neighbors(a).find(|&(other, _)| other == b) else {
         return BondDirection::None;
@@ -1858,7 +1920,7 @@ fn is_dative_reversed(expr: &BondExpr) -> bool {
 /// 产物模板里的键表达式指定的方向(`/` `\`)。没写方向时返回 `None` 对应的值。
 ///
 /// 方向与键级是**两件事**:`/` 既说"这是单键",也说"取代基在双键的哪一侧"。
-/// [`bond_order_from`] 只取前者,后者要靠这里取,否则模板里写的几何会被
+/// [`product_bond_from`] 只取前者,后者要靠这里取,否则模板里写的几何会被
 /// 悄悄丢掉 —— 产物从确定的顺反退化成未指定。
 fn bond_direction_from(expr: &BondExpr) -> BondDirection {
     match expr {
@@ -1875,26 +1937,60 @@ fn bond_direction_from(expr: &BondExpr) -> BondDirection {
     }
 }
 
-/// 产物模板里的键表达式对应的键级。
+/// 产物模板里的一根键该建成什么 —— 三种情形,不是一种。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProductBond {
+    /// 模板写死了键级
+    Fixed(BondOrder),
+    /// **省略了键符号。** 两端都是芳香原子就建芳香键,否则单键。
+    FollowAromaticity,
+    /// `~` —— 沿用底物那根键;底物没有这根键时是"未指定"。
+    Inherit,
+}
+
+/// 产物模板里的键表达式该建成什么键。
 ///
-/// 产物侧的键表达式应当是确定的单个基元;写成析取或否定时说不出该建哪种键,
-/// 退回单键。
-fn bond_order_from(expr: &BondExpr) -> BondOrder {
+/// # 省略键符号**不是**单键
+///
+/// SMARTS 里省略键符号的默认值是析取 `单键 或 芳香键`([`BondExpr::default_bond`]),
+/// 而这正是产物模板最常见的写法。先前这里把析取整个退回单键,于是
+/// `>>[c:1]1[c:2][c:3][c:4][n:5]1` 建出来的是吡咯**烷** —— 五个芳香原子之间连
+/// 五根单键,而这样的产物净化得过、不报任何错,调用方拿到一个结构良好的错分子。
+///
+/// 参照实现的规矩在 `ReactionRunner.cpp:391-406`:析取默认值时看两端原子的
+/// 芳香性 —— 都芳香就建芳香键,否则单键;`~` 另算,标记成"沿用底物"。这里照办。
+///
+/// 其余析取/否定说不出确定的键级,取第一个说得出的子式;一个都没有就按省略处理。
+fn product_bond_from(expr: &BondExpr) -> ProductBond {
     match expr {
-        BondExpr::Prim(p) => match p {
+        BondExpr::Prim(BondPrim::Any) => ProductBond::Inherit,
+        BondExpr::Prim(p) => ProductBond::Fixed(match p {
             BondPrim::Double => BondOrder::Double,
             BondPrim::Triple => BondOrder::Triple,
             BondPrim::Quadruple => BondOrder::Quadruple,
             BondPrim::Aromatic => BondOrder::Aromatic,
             BondPrim::Dative | BondPrim::DativeReversed => BondOrder::Dative,
             _ => BondOrder::Single,
-        },
+        }),
         BondExpr::And(parts) => parts
             .iter()
-            .map(bond_order_from)
-            .find(|&o| o != BondOrder::Single)
-            .unwrap_or(BondOrder::Single),
-        _ => BondOrder::Single,
+            .map(product_bond_from)
+            .find(|o| !matches!(o, ProductBond::Fixed(BondOrder::Single)))
+            .unwrap_or(ProductBond::Fixed(BondOrder::Single)),
+        BondExpr::Or(_) | BondExpr::Not(_) => {
+            if *expr == BondExpr::default_bond() {
+                return ProductBond::FollowAromaticity;
+            }
+            let parts = match expr {
+                BondExpr::Or(parts) => parts.as_slice(),
+                _ => &[],
+            };
+            parts
+                .iter()
+                .map(product_bond_from)
+                .find(|o| matches!(o, ProductBond::Fixed(_)))
+                .unwrap_or(ProductBond::FollowAromaticity)
+        }
     }
 }
 

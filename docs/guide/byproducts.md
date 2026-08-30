@@ -14,6 +14,8 @@ isobutylene you actually isolate. See [what you get is the formal
 byproduct](#what-you-get-is-the-formal-byproduct) below.*
 
 ```pycon
+>>> acid = omgkit.parse_smiles("CC(=O)O"); acid.sanitize()
+>>> amine = omgkit.parse_smiles("CCN"); amine.sanitize()
 >>> rxn = omgkit.parse_reaction("[C:1](=[O:2])[OH].[N:3]>>[C:1](=[O:2])[N:3]")
 >>> out = rxn.run([acid, amine], byproducts=True)[0]
 >>> [p.to_canonical_smiles() for p in out.byproducts]
@@ -56,8 +58,8 @@ If you need strictness, take only `capped`.
 
 ```pycon
 >>> out.byproduct_budget
-{'open_valence': 1, 'fragment_hydrogens': 1, 'delta_h': 2, 'need': 1,
- 'remaining': 0, 'delta_charge': 0, 'fragment_charge': 0, 'charge_shift': 0}
+{'charge_shift': 0, 'delta_charge': 0, 'delta_h': 2, 'fragment_charge': 0,
+ 'fragment_hydrogens': 1, 'need': 1, 'open_valence': 1, 'remaining': 0}
 ```
 
 | Key | Meaning |
@@ -110,6 +112,7 @@ make it impossible to tell which parts were proved and which were guessed.
 ## Going further
 
 A full balanced reaction database built on this idea, with per-element
-verification and a documented failure breakdown, lives in
-[`benchmark/uspto-50k`](https://github.com/zbc0315/omgkit) of the companion
-benchmark repository.
+verification and a documented failure breakdown, is built with `omgkit` over
+USPTO-50k. That corpus is not redistributed here — it is licensed separately and
+is far too large for this repository — so the numbers quoted above are
+reproducible only against your own copy of it.

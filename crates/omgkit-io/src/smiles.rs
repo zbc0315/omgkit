@@ -1034,8 +1034,11 @@ impl<'a> Parser<'a> {
 
             // 丙二烯型轴手性:四个配体来自累积双键**两端**,中心自己只有两个
             // 邻居。`@AL1`/`@AL2` 与把 `@`/`@@` 写在中心上说的是同一件事
-            // (实测外部实现:`@AL1` ≡ `@`),统一归到 `Allene` + 序号 1/2,
-            // 相对四个配体的存储序。
+            // (实测 `@AL1` ≡ `@`),统一归到 `Allene` + 序号 1/2,相对四个配体的存储序。
+            //
+            // **这一档的外部裁判是 Indigo,不是 RDKit** —— 钉住的 RDKit 2025.09.2
+            // 完全不支持丙二烯型轴手性(六条路实测都把 `@AL1` 与 `@AL2` 当成同一个
+            // 东西),见 `harness/check_allene.py`。
             //
             // **写在中心上的 `@`/`@@` 必须走这条路。** 拿中心那两根键去算四面体
             // 宇称是错的:换一端起笔是两次对换(偶置换),而两根键只有一次对换,
@@ -1073,7 +1076,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
-            let mut odd = permutation_is_odd(&written, &stored).unwrap_or(false);
+            let mut odd = omgkit_core::permutation_is_odd(&written, &stored).unwrap_or(false);
 
             if stored.len() == 3 {
                 // 此刻价键尚未计算,所以"是否有第四个价位"只能看写出来的氢数
@@ -1228,7 +1231,7 @@ fn allene_renumber(
     }
     let a = allene_ligands(mol, centre, from)?;
     let b = allene_ligands(mol, centre, to)?;
-    let odd = permutation_is_odd(&a, &b)?;
+    let odd = omgkit_core::permutation_is_odd(&a, &b)?;
     Some(if odd { 3 - perm } else { perm })
 }
 
@@ -1261,35 +1264,6 @@ fn coordination_ligands(mol: &MolBuilder, atom: u32, tag: ChiralTag) -> Option<V
         _ => return None,
     }
     Some(ligands)
-}
-
-/// `written` → `storage` 置换的宇称。两者不是同一多重集时返回 `None`。
-///
-/// n ≤ 6,O(n²) 完全够用。
-pub(crate) fn permutation_is_odd<T: PartialEq>(written: &[T], storage: &[T]) -> Option<bool> {
-    let n = written.len();
-    if n != storage.len() {
-        return None;
-    }
-    let mut used = vec![false; n];
-    let mut perm = Vec::with_capacity(n);
-    for w in written {
-        let j = storage
-            .iter()
-            .enumerate()
-            .position(|(j, s)| !used[j] && s == w)?;
-        used[j] = true;
-        perm.push(j);
-    }
-    let mut inversions = 0usize;
-    for i in 0..n {
-        for j in i + 1..n {
-            if perm[i] > perm[j] {
-                inversions += 1;
-            }
-        }
-    }
-    Some(inversions % 2 == 1)
 }
 
 #[cfg(test)]

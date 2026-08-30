@@ -42,7 +42,10 @@ fn main() {
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("读不了 {path}:{e}"));
     let style = &Style::ACS_1996;
 
-    for (lineno, line) in text.lines().enumerate() {
+    // **行号从 1 数起**,与 `audit.rs` 同口径 —— 判官把它原样打进"第 N 行",
+    // 而 0 基的行号让人在语料里数不到那一行。那边为同一件事专门立过案,
+    // 这个例子先前没跟上。
+    for (lineno, line) in text.lines().enumerate().map(|(i, l)| (i + 1, l)) {
         let smi = line.split_whitespace().next().unwrap_or("");
         if smi.is_empty() {
             continue;

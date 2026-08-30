@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """从 MMFF94 优化后的几何里量**环的褶皱**。
 
+**这是个生成器,不是判据,没有任何东西自动跑它。** 它产出的
+`harness/params/mmff.pucker.tsv` 已经入库并被 `omgkit-conf` 读着;要重导那张表
+才需要跑这个脚本。放在 `harness/` 下容易被当成一道闸 —— 它不是。
+
 **这里的口径与 measure_params.py 有一处故意不同,理由是实测出来的。**
 
 键长表与键角表用的是"ETKDGv3 单次嵌入(种子 0xf00d)+ MMFF94 局部极小"。
@@ -126,7 +130,9 @@ def best_conformer(mh, seed=0xF00D):
     **`seed` 只有一个正当用途:量这套协议自己的噪声。** 入库的表一律是默认的
     0xf00d;换种子跑出来的表是拿来跟它比"同一个分子换个种子会差多少"的,
     那个差就是逐分子判据的容差下限。别拿换过种子的表入库 ——
-    `dump_ring6.py` 会把种子写进文件头,就是为了让这种表一眼认得出来。
+    生成器会把种子写进文件头,就是为了让这种表一眼认得出来。
+    (先前这里点名的是 `dump_ring6.py`,那个脚本在 34a5d0f 被删了 ——
+    `harness/params/mmff.ring5/ring6*.tsv` 现在没有在库的生成器。)
 
     **芳香标志在碰 MMFF 之前取好。** `MMFFOptimizeMoleculeConfs` 会就地把
     芳香性改写成 MMFF 自己的模型 —— 实测 776 个分子里 23 个被改过,
@@ -186,7 +192,7 @@ def one(job):
             continue          # 全芳香环平面,不进表(用 MMFF **之前**取的标志)
         # **全 sp³ 也要进表。** 只收混合杂化的话,判据今天一个环都判不到 ——
         # 现在摆得成的只有全 sp² 与全 sp³ 冠状,而全 sp² 是平面。
-        # 判不到东西的判据是个空壳,本仓在 `frame.rs` 上刚为这种写法栽过一次。
+        # 判不到东西的判据是个空壳 —— 喂空的判据不许打印"全部通过"。
         cp = cremer_pople(np.array([c[i] for i in ring]))
         if cp is None:
             continue

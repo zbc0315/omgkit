@@ -53,7 +53,7 @@ use std::path::PathBuf;
 /// 那条判据里钉死的 11 条例外顺带也是一道截短闸:截掉任何一条,"钉住的例外
 /// 不见了"当场红。但那只覆盖那 11 行,行数仍旧要在这里钉。
 const EXPECTED: &[(&str, usize)] = &[
-    // omgkit-conf 的五条判官(CI 第 6–8、11–14 步)
+    // omgkit-conf 的五条判官(在 CI 的主 job 里连着几步,别按步号找 —— 步号会挪)
     ("smoke.bounds.jsonl", 27),
     ("smoke.gram_eigs.jsonl", 27),
     ("smoke.chirality.jsonl", 150),

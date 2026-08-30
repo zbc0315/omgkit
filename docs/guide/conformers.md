@@ -11,7 +11,7 @@ experimental geometry.
 >>> conf
 <omgkit.Conformer atoms=13 energy=0.000e0 converged=True chiral=1/1>
 >>> conf.coords[0]
-(-1.1906..., -0.8985..., -0.0732...)
+(-1.1906..., -0.8985..., -0.0731...)
 ```
 
 ## It is deterministic

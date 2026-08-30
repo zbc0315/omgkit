@@ -1,6 +1,7 @@
 //! 逐行解析 SMARTS 语料,输出 `SMARTS<TAB>原子数<TAB>键数`,失败输出 `ERR<TAB>原因`。
 //!
-//! 供 `harness/check_smarts.py` 与外部实现对拍。
+//! 供与外部实现对拍用。(写出那一档的判官是 `harness/check_smarts_write.py`,
+//! 它吃的是 `dump_smarts_written` 的输出,不是这个例子的。)
 
 use std::io::{BufWriter, Write};
 

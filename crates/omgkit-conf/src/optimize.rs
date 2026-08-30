@@ -96,7 +96,10 @@ pub struct Report {
     /// **它一大就说明线搜索出了问题** —— 头一版用 Armijo 回溯时,
     /// 8 维 Rosenbrock 上这个数是 4901/5000,而那正是它跑不动的原因。
     pub discarded: usize,
-    /// 线搜索总共回溯了多少次。
+    /// 线搜索总共**求值**了多少次(不是回溯次数 —— 累加的是 `ls.evals`)。
+    ///
+    /// 名字是历史遗留:头一版用 Armijo 回溯,那时两者相同;换成强 Wolfe 之后
+    /// 一次线搜索里既有回溯也有外推,累加的是两者之和。
     pub backtracks: usize,
 }
 
@@ -398,8 +401,9 @@ pub fn minimize(obj: &dyn Objective, x: &mut [f64], opts: &Options) -> Report {
         }
         let ys = dot(&s_new, &y_new);
         let ss = dot(&s_new, &s_new);
-        // Li–Fukushima 的谨慎条件。平底罚项上这一条会**经常**触发,那是正常的 ——
-        // 边界跳变造出来的曲率信息本来就不该用。
+        // Li–Fukushima 的谨慎条件。强 Wolfe 保证 `y·s > 0`,所以它**本来就该
+        // 几乎不触发** —— 见模块文档"谨慎更新因此从主力退成保险"那一段,以及
+        // `discarded` 的反向断言。触发得多恰恰说明线搜索坏了。
         const CAUTION: f64 = 1e-8;
         if ys > CAUTION * ss && ss > 0.0 {
             if s_hist.len() == m {

@@ -92,14 +92,14 @@ So the coverage table matters more than any single judge:
 | SMARTS **chirality** reference frame | `check_smarts_chirality.py` (with a discriminating-power check) |
 | Product-side **chirality**, four instruction kinds | `check_product_chirality.py` (with a discriminating-power check) |
 | Drawing (L9) | `omgkit-depict --example audit` over the whole corpus — see below |
-| Graph descriptors for ML | `check_descriptors.py` — all sixteen, atom by atom and bond by bond, over four corpora |
+| Graph descriptors for ML | `check_descriptors.py` — sixteen of the nineteen values, atom by atom and bond by bond, over five corpora |
 
 **When adding a path, ask this table first.** Which cell does it fall in? No
 cell means a new gap.
 
 ## A deliberate divergence
 
-`check_reactions.py` reports **717 identical / 24 different**. Those 24 are not
+`check_reactions.py` reports **719 identical / 22 different**. Those 22 are not
 defects — they are a chosen semantics, and they all have the same shape:
 a template like `[C:1][O:2][C:3]>>[C:1][O:2].[C:3]` applied to a **cyclic**
 ether or lactone.
@@ -123,7 +123,7 @@ product leaves topology, valence and stereochemistry all self-consistent — onl
 the atom count is wrong, and no other judge was looking at that number. So a
 dedicated test was added for it (`products_never_invent_atoms`).
 
-**If that count of 24 changes, investigate.** Going up means a new shape has
+**If that count of 22 changes, investigate.** Going up means a new shape has
 appeared; going down means the behaviour was reverted by accident.
 
 ## Chasing a hit rate assumes the ground truth is right
@@ -152,10 +152,10 @@ term produced no slowdown at all — because the shape injected was
 loop-invariant and the compiler hoisted it out of the inner loop. A threshold
 calibrated against an injection that never ran is worth nothing.
 
-## Drawing: six decidable properties, run over the whole corpus
+## Drawing: eight decidable properties, run over the whole corpus
 
 A picture cannot be judged by "does it look right". What *can* be decided is
-whether it says something false about the molecule. Six properties, all run
+whether it says something false about the molecule. Eight properties, all run
 over `harness/corpus/large.smi` — 8831 molecules × 2 styles:
 
 ```shell
@@ -327,7 +327,7 @@ labels together exceed the bond length dropped from **2.77% to 1.26%** of
 
 | Judge | Guards | How it is fooled alone |
 |---|---|---|
-| `a_bond_stops_at_the_label_box_not_at_its_circumscribed_circle` | tight enough | make `trim` cut nothing — it looks better, and the letters get struck through |
+| `a_bond_stops_at_the_glyphs_not_at_the_box_around_the_whole_string` | tight enough | make `trim` cut nothing — it looks better, and the letters get struck through |
 | `no_drawn_line_runs_across_an_atom_label` | far enough | go back to the circumscribed circle — still green |
 
 Mutation-verified and orthogonal: the circle only reddens the first; cutting
@@ -434,34 +434,39 @@ collisions 1189 → 1167, crossings 281 → 278, clean 91.3% → **91.4%**.
 ```
 property              checked   violations
 inside the canvas       17662            0
-writing-independent     17660          257
-  … full 5 rewrites     17405            0
+writing-independent     17660            0
+  … compared in full    17646            0
   … never checked           2            0
-no atoms coincident     17662           76
-wedges readable           602            0
-wedges drawn              602            0
-ring double bonds       12731            0
-no pinched angle        16155          287
-bond lengths equal      16155            0
+no atoms coincident     17662            2
+wedges readable           622            0
+wedges drawn              622            0
+ring double bonds       13600            0
+lines clear of labels   17584            0
+no pinched angle        17140            0
+bond lengths equal      17140            0
 ```
 
-Writing-independence is **257 / 17662 (1.5%)**. That is higher than the 134
-recorded earlier — **not because the pictures got worse, but because replacing
-the shuffler exposed the half that had been invisible** (see above).
+Re-measured 2026-08-30; two consecutive runs give the same table.
 
-The attribution below was done on the old set of 45 pairs. It has **not been
-redone** on the new 257 and is pending recheck. Fitting each failing pair with
-its best rigid transform:
+!!! warning "The two earlier copies of this table were both stale"
 
-| Lines still differing | Pairs |
-|---|---|
-| 0 | 2 — pose only |
-| **1** | **35 — one substituent points a different way** |
-| 2–4 | 4 |
+    This block previously read `257` for writing-independence, `76` for
+    coincident atoms and `287` for pinched angles; `harness/README.md` carried a
+    third set (`223 / 77 / 180`). Neither had been re-measured for several
+    rounds — the numbers were carried forward by hand while the drawing code
+    moved on. **A "current standing" that is copied rather than re-run stops
+    being current the first time anyone forgets**, and nothing reports it.
 
-Nine cases in ten come down to a single bond; the canonical orientation step
-then flips the whole picture to minimise its key, which is why the primitive
-count reads "all different". The remaining root cause is localised to
-substituent placement (ring systems themselves come out point-for-point
-identical) and is documented in `harness/README.md`, along with the hypotheses
-already ruled out.
+    That is what `cargo run -p omgkit-depict --release --example audit` is for:
+    the table above is its output, not a transcription of someone's memory
+    of it.
+
+Writing-independence now measures **0 / 17660**. A judge reporting zero is worth
+exactly as much as its denominator, so read the `checked` column with it: 17660
+pairs were compared, 17646 of them across the full set of rewrites, and only 2
+molecules could not be checked at all. A zero on top of a denominator of two
+would mean nothing.
+
+The remaining two coincident atoms are the same molecule in both styles — a
+nickel complex whose ligands cannot all be placed — and it is **already reported**
+in `Depiction::unresolved`, so the picture says so rather than pretending.

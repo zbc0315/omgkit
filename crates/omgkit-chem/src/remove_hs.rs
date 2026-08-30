@@ -59,6 +59,9 @@ pub fn remove_hs(mol: &mut MolBuilder) -> usize {
             .filter(|(_, (other, _))| doomed[*other as usize])
             .map(|(pos, _)| pos)
             .collect();
+        // 合并**之前**这个原子有几个邻居 —— 括号氢要搬到最后一格,
+        // 搬几步取决于这个数,见 `rebased_tag`。
+        let degree_before = mol.neighbors(a).count();
         if !positions.is_empty() {
             let merged = u8::try_from(positions.len()).unwrap_or(u8::MAX);
             // 氢该进哪个槽,取决于宿主是不是"氢数我说了算"的方括号原子。
@@ -75,7 +78,7 @@ pub fn remove_hs(mol: &mut MolBuilder) -> usize {
             } else {
                 data.num_implicit_hs = data.num_implicit_hs.saturating_add(merged);
             }
-            data.chiral_tag = rebased_tag(data.chiral_tag, &positions);
+            data.chiral_tag = rebased_tag(data.chiral_tag, &positions, degree_before);
         }
         new_idx[a as usize] = out.add_atom_data(data);
     }
@@ -116,26 +119,35 @@ fn translate(idx: u32, new_idx: &[u32]) -> u32 {
 
 /// 删掉若干邻居位上的氢之后,四面体标记要不要翻。
 ///
-/// # 括号氢在参照系里的位置是固定的
+/// # 括号氢排在参照系的**末尾**
 ///
-/// 标记相对**邻居存储顺序**。氢写成图里的原子时,它就在存储序的某个位置 k;
-/// 写成括号里的计数时,按 SMILES 的约定它落在"紧跟着前一个邻居"的位置,
-/// 也就是概念上的**第 1 位**(解析器对"手性原子恰好是串首"那种写法做的那次
-/// 翻转,正是把第 0 位搬到第 1 位)。
+/// 标记相对**邻居存储顺序**。氢写成图里的原子时,它在存储序的某个位置 `k`;
+/// 并进括号里的计数之后,它落在这个中心全部配体的**最后一格** —— 解析器把
+/// `chiral_tag` 归一化成"相对存储序、隐式氢不参与置换"就是这个意思,
+/// [`crate::add_explicit_hs`] 把补出来的氢追加到邻居表末尾也是照着它做的。
+/// 那两处与这里是同一条约定的三个用法,**约定只写在这里**。
 ///
-/// 所以合并一个氢 = 把它从第 k 位搬到第 1 位,需要 `|k − 1|` 次相邻对换,
-/// 奇数次就翻。
+/// 所以合并一个氢 = 把它从第 `k` 位搬到第 `m − 1` 位(`m` 是合并前的邻居数),
+/// 需要 `m − 1 − k` 次相邻对换,奇数次就翻。
+///
+/// # 先前写的是"搬到第 1 位",而那与另外两处对不上
+///
+/// `|k − 1|` 与 `m − 1 − k` 的奇偶只在 **`m` 是偶数**时一致。四配位的碳
+/// (`m = 4`)恰好是偶数,所以这条错了很久也没露馅;三配位带孤对的中心
+/// (膦、胂,`m = 3`)是奇数,`C[P@H]CC` 走一趟"补氢 → 删氢"就翻成对映体,
+/// 而 `Conformer::chiral_ok` 那一侧按"末尾"的约定算,仍然报满分 ——
+/// **同一份几何,两处给出相反的答案**。
 ///
 /// # 一个中心上删掉两个以上的氢时不动标记
 ///
 /// 那时中心至少挂着两个氢,两个相同的取代基交换是自同构 —— 它本就不是手性
 /// 中心,标记没有内容可言。硬翻一次只是把一个无意义的值换成另一个。
-fn rebased_tag(tag: ChiralTag, removed_positions: &[usize]) -> ChiralTag {
+fn rebased_tag(tag: ChiralTag, removed_positions: &[usize], degree_before: usize) -> ChiralTag {
     if !tag.is_tetrahedral() || removed_positions.len() != 1 {
         return tag;
     }
     let k = removed_positions[0];
-    if k.abs_diff(1) % 2 == 1 {
+    if (degree_before - 1 - k) % 2 == 1 {
         tag.inverted()
     } else {
         tag
@@ -202,4 +214,49 @@ pub fn is_removable(mol: &MolBuilder, atom: u32) -> bool {
     !mol.bonds()
         .iter()
         .any(|bb| bb.stereo_atoms[0] == atom || bb.stereo_atoms[1] == atom)
+}
+
+#[cfg(test)]
+mod chirality_tests {
+    /// **补氢再删氢必须是恒等变换。** 邻居数是奇数时先前不是。
+    ///
+    /// 两处都在处理"括号氢排在参照系哪一格"这同一件事:`add_explicit_hs` 把它
+    /// 追加到**末尾**,而 `rebased_tag` 先前按"搬到第 1 位"算。两式的奇偶只在
+    /// 邻居数为偶数时一致 —— 四配位碳(4 个)恰好偶数,三配位带孤对的膦、胂
+    /// (3 个)是奇数,于是 `C[P@H]CC` 走一趟就翻成对映体,而没有任何判据在看。
+    ///
+    /// 断的是**性质**(一个往返不许改变构型),不是某个元素当时的表现。判据两侧
+    /// 都以"氢已经并好"的形态收尾,所以比的是同一种写法。
+    #[test]
+    fn adding_hydrogens_and_removing_them_again_leaves_the_configuration_alone() {
+        let canon = |m: &omgkit_core::MolBuilder| omgkit_io::canon::canonical_smiles(m).smiles;
+        let mut checked = 0;
+        for smi in [
+            "C[C@H](N)C(=O)O",     // 四配位碳,隐式氢在中间
+            "[H][C@](C)(N)C(=O)O", // 同一个中心,氢写成独立原子
+            "C[P@H]CC",            // 三配位磷:邻居数是奇数
+            "C[As@H]CC",           // 胂
+            "[C@H](N)(O)C",        // 手性原子写在串首
+            "C[C@H]1CC1",          // 带环闭合数
+            "C[C@@H](O)[C@H](N)C", // 两个中心
+        ] {
+            let mut base = omgkit_io::smiles::parse(smi).expect("测试用的 SMILES 该能解析");
+            crate::sanitize(&mut base).expect("测试用的分子该能净化");
+            if !base.atoms().iter().any(|a| a.chiral_tag.is_tetrahedral()) {
+                continue;
+            }
+            checked += 1;
+            let mut round = base.clone();
+            // 两侧都以"氢并好了"的形态收尾
+            super::remove_hs(&mut base);
+            let want = canon(&base);
+
+            let order: Vec<u32> = (0..u32::try_from(round.num_atoms()).unwrap()).collect();
+            crate::add_explicit_hs(&mut round, &order);
+            super::remove_hs(&mut round);
+
+            assert_eq!(canon(&round), want, "{smi}: 补氢再删氢改掉了构型");
+        }
+        assert!(checked >= 6, "只查到 {checked} 个手性分子 —— 这一档在空过");
+    }
 }

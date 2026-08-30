@@ -2,7 +2,7 @@
 //!
 //! # 数从哪儿来
 //!
-//! `data/mmff.bonds.tsv` 与 `data/mmff.angles.tsv`,是从 **8532 个分子的
+//! `data/mmff.bonds.tsv` 与 `data/mmff.angles.tsv`,是从 **8526 个分子的
 //! MMFF94 收敛几何**里量出来的(口径:ETKDGv3 种子 `0xf00d` +
 //! MMFF94 `maxIters=500`,只取收敛的;生成器 `harness/measure_params.py`)。
 //!

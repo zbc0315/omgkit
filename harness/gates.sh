@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 # 漏一处就是个不会报错的假数。CI 的头注释里记过同一个坑(那里原先写着
 # "四道闸门",而步骤早已加到八步)。这里由 `step` 计数,末尾自查:
 # 改了步骤忘了改 `TOTAL`,脚本最后一行会红。
-TOTAL=41
+TOTAL=46
 N=0
 step() {
     N=$((N + 1))
@@ -91,6 +91,17 @@ step "测试(release)"
 cargo test -q --release
 step "测试(debug —— 让 debug_assert 真的跑到)"
 cargo test -q --workspace
+
+# **可选 feature 里的测试也要跑到。** `omgkit-depict` 的 `raster`(出 PNG/JPEG)
+# 是 `default = []`,上面两条 `cargo test` 一次都编不到它 —— 那 6 条测试
+# 从写下来的那天起就没跑过,clippy 的 `-D warnings` 也照不到那个文件。
+# 闸进不了 CI 就不是闸,进得了 CI 却编不到同样不是。
+#
+# 不能用 `--all-features`:那会连 `omgkit-py` 的 `extension-module` 一起打开,
+# 而它一开 `cargo test` 就链不出可执行文件(理由见那个 crate 的 Cargo.toml)。
+step "测试 + clippy(raster feature —— 默认关着,上面两条编不到)"
+cargo clippy -q -p omgkit-depict --all-targets --features raster -- -D warnings
+cargo test -q -p omgkit-depict --features raster
 step "文档"
 cargo doc -q --workspace --no-deps --document-private-items
 
@@ -163,9 +174,12 @@ cargo run -q -p omgkit-conf --release --example conformer_oracle -- harness/base
 #
 # CI 里这一批在单独一个 job(`external`)里,版本钉在 `harness/requirements.lock`
 # (RDKit 2025.09.2 —— 仓库里 `harness/baseline/` 那批基准就是它导的)。
-# 开发机的 `.venv` 眼下是 2022.09.5,与 CI 不同:**这一批判据两边喂的是同一个
-# RDKit**,版本变化会对消,两版都实测过退 0。判据自己会打印版本号,别靠记。
-# 要跟 CI 完全对版就照 lock 重建 `.venv`。
+# 本脚本开头那道版本闸(`harness/requirements.lock`)对不上就**直接退出**,
+# 所以跑到这里时开发机与 CI 用的一定是同一个 2025.09.2。判据自己也会打印
+# 版本号,别靠记。
+#
+# (这一段先前写着"开发机眼下是 2022.09.5,版本变化会对消" —— 那是版本闸接进来
+# 之前的话。留着它会让人以为这里可以拿别的版本跑,而脚本压根不给跑。)
 
 # **基准与生成它的脚本脱钩了没有。** 两档:
 #
@@ -302,8 +316,8 @@ step "判官:配位几何的排列分组(与外部实现逐组比)"
 "$PY" harness/check_stereo_perm.py
 # 这一档**换 RDKit 版本会翻结论**:2022.09.5 与 2025.09.2 对同一批查询给出相反
 # 的匹配,而两版对同一串当 SMILES 读完全一致 —— 2022 的 SMARTS 与它自己的
-# SMILES 读法自相矛盾。仓库钉 2025.09.2;判据自己打印版本号。
-# 开发机的 .venv 若是 2022.09.5,这一条会红 48 条,那不是回归。
+# SMILES 读法自相矛盾。所以仓库把版本钉死在 2025.09.2,开头那道版本闸对不上
+# 就直接退出;判据自己也打印版本号。
 # **丙二烯型轴手性的裁判是 Indigo,不是 RDKit。** 后者在这一档上完全没有能力
 # (六条路实测都把 `@AL1` 与 `@AL2` 当成同一个东西)。这条判据比的同样是
 # **分组**,而且每族都放了几种把配体角色拆开的写法 —— 变异实测见
@@ -389,7 +403,8 @@ step "判官:图特征描述符(十六项,逐原子逐键)"
     harness/corpus/large.smi \
     --extra harness/corpus/hard.smi \
     --extra harness/corpus/smoke.smi \
-    --extra harness/corpus/descriptors.smi
+    --extra harness/corpus/descriptors.smi \
+    --extra harness/corpus/edge_shapes.smi
 
 # ---- 先前只在本地手动跑的那几条 ----
 #
@@ -436,11 +451,46 @@ cargo run -q -p omgkit-match --release --example dump_reactions -- harness/corpu
 
 # **冒烟语料也要跑写出。** CI 先前只拿 `large.smi` 跑这条判官,而那份语料里
 # 一条非四面体立体(`@SP` / `@TB` / `@OH`)都没有 —— 于是"读得回来、写不出去"
-# 这件事**一条判据都没守**。冒烟语料里有 6 条,现在按 SMILES 逐条钉死:
-# 写出器补上任何一条这里当场红,逼着把它从名单里划掉。
+# 这件事**一条判据都没守**。冒烟语料里造了 6 条,按 SMILES 逐条钉进
+# `check_write.py` 的 `NON_TETRAHEDRAL_GAP`,而那个名单是**双向**的。
+# 写出器后来把三类都补上了,名单因此**空了** —— 双向钉的好处正在这里:
+# 空了之后它继续守着反方向(名单里有、实际写得出来的同样红),不会退化成
+# 一句没人管的过期的话。
 step "判官:SMILES 写出(冒烟语料,严格 —— 非四面体立体那一档钉在这里)"
 cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/smoke.smi >"$WORK/wsmoke.tsv"
 "$PY" harness/check_write.py "$WORK/wsmoke.tsv" harness/corpus/smoke.smi --strict
+
+# **按结构挑的边界语料。** `large.smi` 是药物样分子、`hard.smi` 是照构型难处挑的,
+# 两份跑满了仍有六档一次都没走到 —— 2026-08-30 的三方审查读码找出九个"实现了但
+# 会静默给出错答案"的缺陷,其中六个的最小复现落在那六档里,而当时全部判据都是绿的。
+# **问题不在判据数量,在语料里缺那个形状。** 名单与理由见 `corpus/edge_shapes.smi`
+# 的文件头。
+#
+# 这三条走的是外部裁判当场求真值那一类判据(不入 l1/l2/l3 基准 —— 那三份照
+# `large.smi` 导,加行要重导,会把一次结构补充变成一次真值改动)。
+step "判官:边界形状语料 —— SMILES 写出(严格)"
+cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/edge_shapes.smi >"$WORK/wedge.tsv"
+"$PY" harness/check_write.py "$WORK/wedge.tsv" harness/corpus/edge_shapes.smi --strict
+step "判官:边界形状语料 —— 双键顺反的感知"
+cargo run -q -p omgkit-io --release --example dump_bond_stereo -- harness/corpus/edge_shapes.smi >"$WORK/ebs.tsv"
+"$PY" harness/check_bond_stereo.py "$WORK/ebs.tsv" harness/corpus/edge_shapes.smi
+# **文档里的示例也要跑。** 四十来道闸先前一条都不读 `docs/`,`mkdocs --strict`
+# 只查链接不查内容。于是代码往前走、文档留在原地:2026-08-30 的文档审查一次
+# 找出四处"示例输出与实测不符",其中两处是**凭空编的报错回显**(文档写英文
+# `ValueError: unclosed branch`,而实现报的是中文"括号不匹配",整个仓库都没有
+# `unclosed branch` 这个串)。
+#
+# 这条闸自带分母下限:少于 12 个块 / 40 条语句当场红 —— 文档被搬走、glob 写错、
+# 围栏正则漏掉缩进的块,都会先撞上那一条(缩进那一档正是第一版漏掉的)。
+#
+# 变异实测:把 molblock 示例里的键行改回旧值 → 1 个块红;指到一个没有文档的
+# 目录 → 分母下限红,退出码 1。
+step "判官:文档里的 Python 示例跑得出文档写的结果"
+"$PY" harness/check_docs_examples.py
+
+step "判官:边界形状语料 —— 写出时 E/Z 守不守恒"
+cargo run -q -p omgkit-io --release --example dump_written -- harness/corpus/edge_shapes.smi >"$WORK/edw.tsv"
+"$PY" harness/check_ez.py "$WORK/edw.tsv" harness/corpus/edge_shapes.smi
 
 # **自查。** 加了闸门忘了改 `TOTAL` 的话,这里红 —— 上面那些 `N/TOTAL`
 # 就不会悄悄变成假数。

@@ -25,8 +25,12 @@ cargo run -p omgkit-conf --release --example eigen_oracle  -- $SMOKE \
     harness/baseline/smoke.gram_eigs.jsonl
 ```
 
-(这一节的标题原先写着 "The five gates",而条数早已从四变五、现在是八 ——
-数字写进标题就会掉队。现在不写数字:要知道有几道,数上面的命令。)
+(这一节的标题原先写着 "The five gates",而条数一路在涨 —— 数字写进标题就会
+掉队。现在不写数字:要知道有几道,看 `harness/gates.sh` 里的 `TOTAL`。)
+
+**上面列的不是全部。** 那几条是不需要 Python 环境就能跑的一档;`gates.sh` 里
+还有几十条要 RDKit 的外部判官(以及一条跑文档里的示例)。别把这一小段当成
+"CI 就这些"。
 
 **语料判据要随算法一起回来。** 判据不进 CI,"违例不许涨"就只是文档里的一句话 ——
 上一轮正是这么漏的:判据只进了本地脚本,推送时一条都不执行,而 CI 一直是绿的。
@@ -36,15 +40,15 @@ cargo run -p omgkit-conf --release --example eigen_oracle  -- $SMOKE \
 脚本照样打印"全部通过"。那是自己造的绿。要看少几行,把管道加在**外面**:
 `bash harness/gates.sh 2>&1 | tail -40`。
 
-These are exactly what
-[CI](https://github.com/zbc0315/omgkit/actions/workflows/ci.yml) runs. Run them
-before opening a pull request.
+`harness/gates.sh` runs all of them and more — it is the local mirror of
+[CI](https://github.com/zbc0315/omgkit/actions/workflows/ci.yml), which stays
+the authority. Run it before opening a pull request.
 
 `cargo test --release` rather than debug: the differential tests run over a
 large corpus and a debug build is too slow to be useful.
 
 `cargo test --workspace` on top of it, in debug, for one reason: **`debug_assert!`
-is compiled out of a release build.** The workspace has 37 of them — "bond
+is compiled out of a release build.** The workspace has 38 of them — "bond
 geometry was written but cis/trans was never perceived", "canonical ranks are not
 injective", "a flip reached into another fragment" — and with only the release run
 in CI, not one of them had ever been executed by a gate. A guard that never runs
@@ -94,7 +98,7 @@ python harness/test_python.py
 
 The tests come in two tiers.
 
-**Smoke tier** — oracles are committed (about 1.3 MB), runs by default, green on
+**Smoke tier** — oracles are committed (about 2.2 MB), runs by default, green on
 a fresh clone.
 
 **Large-corpus tier** — marked `#[ignore]`, needs oracles you generate against
@@ -127,7 +131,7 @@ judge is guarding are documented in
 satisfy, run over the whole corpus rather than a hand-picked list:
 
 ```shell
-# six decidable properties over 8831 molecules × 2 styles
+# eight decidable properties over 8831 molecules × 2 styles
 cargo run -p omgkit-depict --release --example audit -- harness/corpus/large.smi
 
 # eyeball it: 17 molecules × 2 styles × svg/png/jpg

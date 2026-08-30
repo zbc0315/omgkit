@@ -118,9 +118,12 @@ pub fn write(mol: &MolBuilder) -> Written {
 ///
 /// 四面体手性与双键方向键(`/` `\`)会写出,两者都做过与解析器互逆的换算。
 ///
-/// 配位几何(`@SP`/`@TB`/`@OH`)目前**不输出**:那要一张排列换算表,属于 L6。
-/// 在那之前**宁可不写**,也好过写出一个可能是错的立体信息 —— 立体写错了
-/// 拓扑还是对的,只有分子是镜像的,极难发现。
+/// 配位几何(`@SP`/`@TB`/`@OH`)也会写出,靠 [`omgkit_core::polyhedron::renumber`]
+/// 那张排列换算表(从外部实现穷举量出来的,72 / 2400 / 21600 种写法)。
+/// **换算不出来的整个丢掉**,不猜一个序号:立体写错了拓扑还是对的,只有分子是
+/// 镜像的,极难发现。判据里"已知写不出"那份名单(`check_write.py` 的
+/// `NON_TETRAHEDRAL_GAP`)现在是空的,而它是**双向**钉的 —— 名单里有、实际却
+/// 写得出来的条目同样会红,所以它不会悄悄留成一句过期的话。
 ///
 /// # Panics
 /// `priority` 长度与原子数不符时 panic —— 这是调用方的编程错误。
@@ -473,7 +476,7 @@ fn output_chiral_tag(
     }
 
     let stored: Vec<u32> = mol.neighbors(atom).map(|(_, bond)| bond).collect();
-    let Some(mut odd) = super::permutation_is_odd(written_bonds, &stored) else {
+    let Some(mut odd) = omgkit_core::permutation_is_odd(written_bonds, &stored) else {
         // 两个序列不是同一个多重集 —— 只可能是本模块自己算错了邻居
         debug_assert!(false, "输出的邻居顺序与存储顺序不是同一组键");
         return (ChiralTag::Unspecified, 0);
@@ -708,8 +711,11 @@ fn write_atom(
         ChiralTag::Octahedral if perm != 0 => {
             let _ = write!(out, "@OH{perm}");
         }
-        // 丙二烯型轴手性。`@AL1` ≡ `@`、`@AL2` ≡ `@@`(实测外部实现),
-        // 这里写明确形式 —— `@` 写在两配位原子上容易被读成四面体。
+        // 丙二烯型轴手性。`@AL1` ≡ `@`、`@AL2` ≡ `@@`(实测),这里写明确形式 ——
+        // `@` 写在两配位原子上容易被读成四面体。
+        //
+        // **这一档的外部裁判是 Indigo,不是 RDKit**:后者在这一档上完全没有能力,
+        // 见 `harness/check_allene.py`。
         ChiralTag::Allene if perm != 0 => {
             let _ = write!(out, "@AL{perm}");
         }

@@ -64,6 +64,18 @@ pub enum WriteError {
         /// 第一根芳香键的下标
         bond: usize,
     },
+    /// 有一根键的键级在 V2000 里没有编号。
+    ///
+    /// 四重键就是这一档:V2000 的键型只到 4(芳香),再没有第五档。按单键写与
+    /// 芳香键落进单键是同一个安静的错 —— `[Re]$[Re]` 读回来是 `[ReH3][ReH3]`,
+    /// 键级错了还凭空多出六个氢。调用方要么自己降级并接受这件事,要么改用
+    /// 别的格式。**配位键不在此列** —— 它写成 9 号(见 `bond_type_code`)。
+    UnrepresentableBond {
+        /// 第一根写不出来的键的下标
+        bond: usize,
+        /// 它的键级
+        order: BondOrder,
+    },
     /// 数据字段的名字或值装不进 SDF 的格式。
     ///
     /// 名字里有 `<` / `>` / 换行,或者值里有**空行**、有单独一行 `$$$$`。
@@ -94,6 +106,11 @@ impl core::fmt::Display for WriteError {
                 f,
                 "第 {bond} 根键是芳香键,而调用方没给凯库勒化之后的键级 —— \
                  先跑 `omgkit_chem::kekulize`"
+            ),
+            Self::UnrepresentableBond { bond, order } => write!(
+                f,
+                "第 {bond} 根键是 {order:?},V2000 的键型里没有这一档 —— \
+                 按单键写会一声不响地改掉分子"
             ),
         }
     }
@@ -149,7 +166,10 @@ impl<'a> Record<'a> {
 ///
 /// # Errors
 ///
-/// 原子数或键数超过 999,或逐键数组长度与键数对不上。
+/// 原子数或键数超过 999([`WriteError::TooLarge`]);逐键数组长度与键数对不上
+/// ([`WriteError::BondArrayLen`]);有芳香键而调用方没给凯库勒化之后的键级
+/// ([`WriteError::AromaticBond`]);有 V2000 表示不了的键级
+/// ([`WriteError::UnrepresentableBond`],四重键与"未指定")。
 pub fn write_v2000(mol: &MolBuilder, rec: &Record) -> Result<String, WriteError> {
     let (na, nb) = (mol.num_atoms(), mol.num_bonds());
     if na > V2000_LIMIT || nb > V2000_LIMIT {
@@ -198,8 +218,19 @@ pub fn write_v2000(mol: &MolBuilder, rec: &Record) -> Result<String, WriteError>
         // 只在**必要时**写:作者钉过氢数(`NO_IMPLICIT`)或者带自由基电子。
         // 常规原子留 0,让读的一方按默认价补 —— 那正是它该做的。
         let valence = if a.flags.contains(AtomFlags::NO_IMPLICIT) || a.num_radical_electrons != 0 {
-            omgkit_core::valence::explicit_valence_nonstrict(mol, u32::try_from(i).unwrap_or(0))
-                .clamp(0, 14)
+            let v = omgkit_core::valence::explicit_valence_nonstrict(
+                mol,
+                u32::try_from(i).unwrap_or(0),
+            )
+            .clamp(0, 14);
+            // **0 在这个字段里是"没有标记",不是"零价"。** 零价的哨兵是 15
+            // (读入侧 `legacy_valence` 那一段就是这么读的)。孤立的原子氮价数
+            // 算出来是 0,照直写 0 等于什么都没说,读的一方按默认价补三个氢。
+            if v == 0 {
+                15
+            } else {
+                v
+            }
         } else {
             0
         };
@@ -226,11 +257,8 @@ pub fn write_v2000(mol: &MolBuilder, rec: &Record) -> Result<String, WriteError>
             }
         };
         let order = rec.orders.get(bi).copied().unwrap_or(b.order);
-        let ord = match order {
-            BondOrder::Double => 2,
-            BondOrder::Triple => 3,
-            _ => 1,
-        };
+        let ord =
+            bond_type_code(order).ok_or(WriteError::UnrepresentableBond { bond: bi, order })?;
         // **「顺反未知」压在楔形之上。** 两者不会撞车 —— 楔形只打在单键上 ——
         // 但真撞上的话该赢的是这一条:交叉双键说的是"这根键的构型不知道",
         // 而楔形码写在双键上本来就没有意义。
@@ -258,18 +286,45 @@ pub fn write_v2000(mol: &MolBuilder, rec: &Record) -> Result<String, WriteError>
             let _ = writeln!(out, "M  ISO  1{:>4}{:>4}", i + 1, a.isotope);
         }
         if a.num_radical_electrons != 0 {
-            // 规范的编码:1 = 双线态(1 个电子)、2 = 单线态、3 = 三线态(2 个)。
-            // 我们只记电子数,按 1 个 → 2(双线态)、2 个 → 3(三线态)写,
-            // 与 RDKit 的写法一致。
-            let code = match a.num_radical_electrons {
-                1 => 2,
-                n => i32::from(n) + 1,
+            // 规范的编码只有三档:1 = 单线态(2 个电子)、2 = 双线态(1 个)、
+            // 3 = 三线态(2 个)。**按奇偶写** —— 奇数个 → 2,偶数个 → 3,与参照
+            // 实现的 `nRadEs % 2 ? 2 : 3` 逐字对应。
+            //
+            // 先前这里写的是 `n => n + 1`,原子氮(3 个未成对电子)于是写出码 4
+            // —— 一个规范里不存在的码,读的一方按"未知"当成 0 个自由基,再按
+            // 默认价补三个氢,`[N]` 就成了氨。奇偶写法表达不出三个以上的未成对
+            // 电子(读回来是 1 个),但它写出去的每一个码都合法。
+            let code = if a.num_radical_electrons % 2 == 1 {
+                2
+            } else {
+                3
             };
             let _ = writeln!(out, "M  RAD  1{:>4}{code:>4}", i + 1);
         }
     }
     out.push_str("M  END\n");
     Ok(out)
+}
+
+/// 键级 → V2000 的键型编号。写不出来的返回 `None`。
+///
+/// 1/2/3 是单双三,4 是芳香(由调用方先凯库勒化掉,见
+/// [`WriteError::AromaticBond`]),**9 是配位键** —— 那是参照实现的扩展,它自己
+/// 的 V2000 读法认这一档(`MolFileParser.cpp` 的 `case 9`),所以写成 9 是忠实
+/// 且互通的。四重键与"未指定"没有编号:按单键写会一声不响地改掉分子,所以
+/// 返回 `None` 让调用方看见。
+///
+/// **配位键的两个端点不许对调** —— 电子由 `begin` 端提供,顺序有语义。写出侧
+/// 只在楔形键上换过端点顺序,而楔形只打在单键上,两者碰不到一起。
+fn bond_type_code(order: BondOrder) -> Option<i32> {
+    match order {
+        BondOrder::Single => Some(1),
+        BondOrder::Double => Some(2),
+        BondOrder::Triple => Some(3),
+        BondOrder::Aromatic => Some(4),
+        BondOrder::Dative => Some(9),
+        BondOrder::Quadruple | BondOrder::Unspecified => None,
+    }
 }
 
 /// 写一条 **SDF 记录**:molblock + 数据字段 + `$$$$`。
@@ -428,8 +483,15 @@ pub struct Molblock {
     pub unknown_stereo: Vec<bool>,
     /// 坐标是不是三维的(有任何一个 `z` 不为 0)。
     ///
-    /// 二维和三维的立体读法完全不同,而文件里没有哪个字段直说 —— 只能这么判,
-    /// 与 RDKit 同法。
+    /// 二维和三维的立体读法完全不同,所以这一位要判对。
+    ///
+    /// **判据是"有没有哪个 `z` 不为零",只看坐标。** 第二行第 21-22 列按规范
+    /// 确实写着维度码(`2D` / `3D`),参照实现也读它 —— 但那两列是**写的人填的**,
+    /// 而真正决定该走哪条读法的是坐标本身:标着 `2D` 而 `z` 全非零的文件读成
+    /// 二维,拿楔形去解一份三维坐标,结果是错的且不报错。
+    ///
+    /// 所以这里**不与参照实现同法**(它合判维度码与坐标),而是只信坐标 ——
+    /// 这一点先前写成了"文件里没有哪个字段直说""与 RDKit 同法",两句都不成立。
     pub is_3d: bool,
 }
 
@@ -549,6 +611,9 @@ pub fn read_v2000(text: &str) -> Result<Molblock, ReadError> {
             2 => BondOrder::Double,
             3 => BondOrder::Triple,
             4 => BondOrder::Aromatic,
+            // 9 是参照实现的配位键扩展 —— 它自己的 V2000 读法也认这一档。
+            // 写出侧的 `bond_type_code` 与这里是同一张表的两半。
+            9 => BondOrder::Dative,
             got => return Err(ReadError::BadBondType { line: ln, got }),
         };
         let (a, b) = (
@@ -579,6 +644,16 @@ pub fn read_v2000(text: &str) -> Result<Molblock, ReadError> {
             break;
         }
         let tag = field(line, 0, 6);
+        // **属性块只读这三种,其余(`M  SGP`/`M  STY` 的 S 组、`M  RGP` 的 R 基团、
+        // `M  ALS` 的原子列表……)一律略过,而且不报错。**
+        //
+        // 这是一处**有意的能力边界**,记在这里而不是让它成为一句没人知道的默契:
+        // 那几类描述的是"这个分子之外的东西"(聚合物重复单元、Markush 变量、
+        // 查询原子列表),读进一个具体的 `MolBuilder` 里没有对应的落脚点,
+        // 而硬读会得到一个**看起来正常、实际少了一层含义**的分子。
+        //
+        // 代价照实说:读一份带 S 组的 SDF,S 组静默消失;读一份 R 基团模板,
+        // 它变成一个普通分子。要用这两类的调用方现在拿不到任何信号。
         if !matches!(tag, "M  CHG" | "M  ISO" | "M  RAD") {
             continue;
         }
@@ -817,12 +892,20 @@ fn field_name(line: &str) -> Option<&str> {
     Some(&line[open + 1..close])
 }
 
-/// `M  RAD` 的编码 → 未成对电子数。1 = 双线态(1 个)、2 = 单线态(2 个)、
-/// 3 = 三线态(2 个)。
+/// `M  RAD` 的编码 → 未成对电子数。
+///
+/// **1 = 单线态(2 个)、2 = 双线态(1 个)、3 = 三线态(2 个)。** 码 1 与码 2 很容易
+/// 记反 —— 单线态卡宾的两个电子成对占同一个轨道,记的是"电子数 2";双线态才是
+/// 一个未成对电子。参照实现在 `MolFileParser.cpp` 里就是这三个分支
+/// (`case 1: 2 / case 2: 1 / case 3: 2`)。
+///
+/// 写出侧([`write_v2000`])是这张表的另一半:按奇偶写 —— 奇数个电子写码 2、
+/// 偶数个写码 3。规范只有这三档,**三个以上的未成对电子表达不出来**,读回来是
+/// 1 个;奇偶保住了,个数没保住。
 fn radical_electrons(code: i32) -> i32 {
     match code {
-        1 | 2 => code.min(2),
-        3 => 2,
+        1 | 3 => 2,
+        2 => 1,
         _ => 0,
     }
 }
@@ -830,6 +913,122 @@ fn radical_electrons(code: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omgkit_core::AtomData;
+
+    /// `M  RAD` 的两侧编码是同一张表的两半 —— 分开写就会分开错。
+    ///
+    /// 断的是**规范的编码**,不是当时代码里那张表:1 = 单线态(2 个电子)、
+    /// 2 = 双线态(1 个)、3 = 三线态(2 个)。先前读入侧写成 `1 | 2 => code.min(2)`
+    /// (码 1 与码 2 整个对调),而写出侧是对的,于是自家 molblock 往返一次
+    /// 自由基电子数就翻一倍。
+    #[test]
+    fn the_radical_codes_mean_what_the_spec_says_they_mean() {
+        assert_eq!(radical_electrons(1), 2, "码 1 是单线态,两个电子");
+        assert_eq!(radical_electrons(2), 1, "码 2 是双线态,一个未成对电子");
+        assert_eq!(radical_electrons(3), 2, "码 3 是三线态,两个未成对电子");
+        assert_eq!(radical_electrons(0), 0);
+        assert_eq!(radical_electrons(4), 0, "规范里没有码 4");
+    }
+
+    /// 写出去的码必须是规范里有的那三个,而且往返之后电子数不许自己长大。
+    ///
+    /// 先前写出侧是 `n => n + 1`,原子氮(3 个未成对电子)写出码 4 —— 规范里
+    /// 不存在,读的一方当成 0 个自由基,再按默认价补三个氢,`[N]` 成了氨。
+    #[test]
+    fn a_radical_count_survives_a_round_trip_without_growing() {
+        for n in 1u8..=6 {
+            let mut b = MolBuilder::new();
+            b.add_atom_data(AtomData {
+                atomic_num: 6,
+                num_radical_electrons: n,
+                flags: AtomFlags::NO_IMPLICIT,
+                ..AtomData::default()
+            });
+            let mb = write_v2000(&b, &Record::from_coords("t", &[[0.0; 3]])).unwrap();
+            let code: i32 = mb
+                .lines()
+                .find(|l| l.starts_with("M  RAD"))
+                .map(|l| l[13..].trim().parse().unwrap())
+                .unwrap();
+            assert!(
+                (1..=3).contains(&code),
+                "{n} 个电子写出了码 {code},而规范只有 1/2/3"
+            );
+            let back = read_v2000(&mb).unwrap();
+            let got = back.mol.atoms()[0].num_radical_electrons;
+            assert_eq!(
+                got % 2,
+                n % 2,
+                "{n} 个电子往返成了 {got} 个 —— 连奇偶都没保住"
+            );
+            assert!(got <= n, "{n} 个电子往返成了 {got} 个 —— 自己长大了");
+        }
+    }
+
+    /// 零价要写成 15。0 在这个字段里是"没有标记"。
+    #[test]
+    fn an_isolated_atom_writes_the_zero_valence_sentinel_not_a_zero() {
+        let mut b = MolBuilder::new();
+        b.add_atom_data(AtomData {
+            atomic_num: 7,
+            num_radical_electrons: 3,
+            flags: AtomFlags::NO_IMPLICIT,
+            ..AtomData::default()
+        });
+        let mb = write_v2000(&b, &Record::from_coords("t", &[[0.0; 3]])).unwrap();
+        let atom_line = mb.lines().nth(4).unwrap();
+        assert_eq!(
+            field(atom_line, 48, 51).trim(),
+            "15",
+            "孤立的氮价数是 0,照直写 0 等于什么都没说 —— 读的一方会补三个氢"
+        );
+        let back = read_v2000(&mb).unwrap();
+        assert_eq!(
+            back.mol.atoms()[0].num_explicit_hs,
+            0,
+            "读回来长出了氢 —— `[N]` 成了氨"
+        );
+    }
+
+    /// V2000 表示不了的键级要报错,不许按单键写。
+    ///
+    /// 这条与 [`WriteError::AromaticBond`] 是同一条规矩:安静地降级会改掉分子。
+    /// **配位键不在此列** —— 它有 9 号,写出去读得回来。
+    #[test]
+    fn a_bond_order_v2000_cannot_write_is_an_error_not_a_single_bond() {
+        for (order, want_err) in [
+            (BondOrder::Quadruple, true),
+            (BondOrder::Unspecified, true),
+            (BondOrder::Dative, false),
+            (BondOrder::Triple, false),
+        ] {
+            let mut b = MolBuilder::new();
+            for _ in 0..2 {
+                b.add_atom_data(AtomData {
+                    atomic_num: 75,
+                    flags: AtomFlags::NO_IMPLICIT,
+                    ..AtomData::default()
+                });
+            }
+            b.add_bond(0, 1, order).unwrap();
+            let got = write_v2000(&b, &Record::from_coords("t", &[[0.0; 3]; 2]));
+            assert_eq!(
+                got.is_err(),
+                want_err,
+                "{order:?}:写出去{}报错",
+                if want_err { "该" } else { "不该" }
+            );
+            if !want_err {
+                let mb = got.unwrap();
+                let back = read_v2000(&mb).unwrap();
+                assert_eq!(
+                    back.mol.bonds()[0].order,
+                    order,
+                    "{order:?} 往返之后变了键级"
+                );
+            }
+        }
+    }
 
     /// 两条极小的记录,第二条带数据字段(其中一个是多行的,还有一对同名的)。
     const TWO: &str = "\

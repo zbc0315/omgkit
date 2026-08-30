@@ -59,11 +59,27 @@ fn floats(v: &serde_json::Value) -> Vec<f64> {
         .unwrap_or_default()
 }
 
+/// **NaN 不许被洗掉。** `f64::max` 按 IEEE 忽略 NaN,一个吐 NaN 的特征分解会被
+/// 归约成偏差 0 —— 那是这条判据能给出的**最好**分数。
+///
+/// `omgkit-conf` 里那份叫 `linalg::max_nan_wins`,可它是 `pub(crate)`,
+/// examples 是独立 crate 够不着 —— 所以这里再写一份。**两处必须同语义**:
+/// 判据自己被 NaN 洗白,是最坏的一种绿。
+fn max_nan_wins(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else if a > b {
+        a
+    } else {
+        b
+    }
+}
+
 /// 两张距离表的最大逐对偏差。
 fn max_dist_dev(a: &[f64], b: &[f64]) -> f64 {
     a.iter()
         .zip(b)
-        .fold(0.0_f64, |w, (x, y)| w.max((x - y).abs()))
+        .fold(0.0_f64, |w, (x, y)| max_nan_wins(w, (x - y).abs()))
 }
 
 /// 由坐标算精确距离表。
@@ -88,12 +104,12 @@ fn eig_dev(mine: &[f64], theirs: &[f64]) -> Option<f64> {
     }
     let scale = theirs
         .iter()
-        .fold(0.0_f64, |w, v| w.max(v.abs()))
+        .fold(0.0_f64, |w, v| max_nan_wins(w, v.abs()))
         .max(1e-12);
     Some(
         mine.iter()
             .zip(theirs)
-            .fold(0.0_f64, |w, (a, b)| w.max((a - b).abs() / scale)),
+            .fold(0.0_f64, |w, (a, b)| max_nan_wins(w, (a - b).abs() / scale)),
     )
 }
 
@@ -278,6 +294,15 @@ fn main() {
     if n == 0 {
         println!("\n【判据红】一个分子都没量到");
         bad = true;
+    }
+    // **非有限的偏差要单列。** `NaN > 上限` 恒为 false —— 只写下面那两条比较,
+    // 一个吐 NaN 的特征分解拿到的是这条判据的**最好**分数。归约那侧已经用
+    // `max_nan_wins` 让 NaN 传上来了,这里再把它变成红。
+    for (what, w) in [("一(特征值)", worst_eig.0), ("二(回嵌)", worst_rt.0)] {
+        if !w.is_finite() {
+            println!("\n【判据{what}红】偏差是 {w} —— 非有限数,不是「很小」");
+            bad = true;
+        }
     }
     if worst_eig.0 > MAX_EIG_DEV {
         println!(

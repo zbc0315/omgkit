@@ -64,7 +64,15 @@ pub fn to_svg(scene: &Scene, style: &Style) -> String {
             } => {
                 // 一叠垂直于键的短横线,从窄到宽。间距由规范的 hash_spacing 定。
                 let len = from.dist(*to);
-                let n_lines = ((len / spacing).floor() as i32).max(2);
+                // **`spacing` 为 0 时 `len / 0` 是 `inf`,`inf as i32` 饱和成
+                // `i32::MAX`** —— 底下那个循环会画二十亿条线,不是报错,是把内存
+                // 吃光。规范里给 0 是调用方的编程错误,但错在这里的表现太难查了,
+                // 所以钳一道:非正的间距退回"两条线",与 `.max(2)` 同一条兜底。
+                let n_lines = if *spacing > 0.0 {
+                    ((len / spacing).floor() as i32).max(2)
+                } else {
+                    2
+                };
                 let d = (*to - *from).normalized();
                 let perp = crate::geom::Point2::new(-d.y, d.x);
                 for k in 1..=n_lines {
@@ -86,7 +94,14 @@ pub fn to_svg(scene: &Scene, style: &Style) -> String {
                 s.push_str(&format!(
                     "<text x=\"{:.2}\" y=\"{:.2}\" font-family=\"{}\" font-size=\"{:.2}\" \
                      text-anchor=\"middle\" dominant-baseline=\"central\" fill=\"#000\">",
-                    at.x, at.y, style.font_family, size
+                    at.x,
+                    at.y,
+                    // **字体名要转义。** 它是 `&'static str`,通常来自本仓的规范表,
+                    // 但 `Style` 是公开可构造的 —— 一个带 `"` 或 `&` 的字体名直插
+                    // 属性里会把整个 `<text>` 元素写坏,而写出来的 SVG 看着像是
+                    // 渲染的毛病。文本内容那一侧早就在转义了,属性这一侧漏了。
+                    escape(style.font_family),
+                    size
                 ));
                 // 每一段自带 `dy`,当前基线偏移显式记着。
                 //
@@ -233,6 +248,25 @@ mod tests {
         // 元素符号里现在没有这些字符,但漏转义一次就产出坏 XML。这条守的是
         // 那个函数本身,不是当下的元素表。
         assert_eq!(escape("a<b>c&d\"e'f"), "a&lt;b&gt;c&amp;d&quot;e&apos;f");
+    }
+
+    /// **属性里的字体名也要转义,间距为 0 不许把内存吃光。**
+    ///
+    /// 两条都是"公开可构造的 `Style` 里一个古怪的值",而两条的表现都不是报错:
+    /// 前者产出坏 XML(有的查看器打得开、有的打不开),后者 `len / 0.0` 是 `inf`,
+    /// `inf as i32` 饱和成 `i32::MAX`,循环画二十亿条线。
+    #[test]
+    fn a_hostile_style_does_not_produce_broken_xml_or_eat_the_memory() {
+        let mut style = Style::ACS_1996;
+        style.font_family = r#"Ari"al & <script>"#;
+        style.hash_spacing_pt = 0.0;
+        let svg = svg("C[C@H](N)C(=O)O", &style);
+        assert!(
+            !svg.contains(r#"font-family="Ari"al"#),
+            "字体名没转义,`\"` 把属性截断了"
+        );
+        assert!(svg.contains("&amp;") && svg.contains("&lt;script&gt;"));
+        assert!(svg.len() < 1_000_000, "间距为 0 画出了 {} 字节", svg.len());
     }
 
     #[test]

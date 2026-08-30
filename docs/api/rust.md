@@ -58,7 +58,7 @@ accumulate silently (one sweep found 16, all historical).
 | `omgkit.parse_smarts` | `omgkit_io::smarts::parse` |
 | `omgkit.parse_reaction` | `omgkit_io::smarts::parse_reaction` |
 | `Mol.sanitize` | `omgkit_chem::sanitize` |
-| `Mol.to_canonical_smiles` | `omgkit_io::smiles::write_canonical` |
+| `Mol.to_canonical_smiles` | `omgkit_io::canon::canonical_smiles` |
 | `Query.match` | `omgkit_match` matching entry points |
 | `Reaction.run` | `omgkit_match::run_reactants` |
 | `Reaction.run_on_substrate` | `omgkit_match::run_on_substrate` |

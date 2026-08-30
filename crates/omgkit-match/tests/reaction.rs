@@ -386,13 +386,48 @@ fn carried_over_bonds_keep_their_orientation() {
 }
 
 /// 配位键的箭头同样靠朝向表达,搬运时不能翻。
+///
+/// **底物里必须真的有一根配位键。** 先前这条喂的是 `OCC[N+](C)(C)C` —— 季铵是
+/// 用形式电荷写的,一根 `->` 都没有,而唯一会造出 `Dative` 的
+/// `cleanup_organometallics` 第一行就要求分子里有金属、直接返回。于是这条判据
+/// 退化成"产物里有 Cl",箭头翻没翻它一个字都没问。
 #[test]
 fn carried_over_dative_bonds_keep_their_arrow() {
     let rxn = "[C:1][OH:2]>>[C:1][Cl:2]";
-    let got = flat(rxn, &["OCC[N+](C)(C)C"]);
+    let sub = "OCC[N:1]->[Pt](Cl)(Cl)Cl";
+    let before = sanitized(sub);
+    let n_dative = before
+        .bonds()
+        .iter()
+        .filter(|b| b.order == omgkit_core::BondOrder::Dative)
+        .count();
+    assert!(n_dative > 0, "底物里一根配位键都没有 —— 这条判据在空过");
+
+    let got = flat(rxn, &[sub]);
     assert_eq!(got.len(), 1);
-    // 拓扑对齐即可 —— 这里要守的是"搬运不改朝向",不是具体写法
-    assert!(got[0].contains("Cl"), "产物 {}", got[0]);
+    let after = sanitized(&got[0]);
+    // 箭头的朝向靠端点顺序表达:给电子的那一端必须还是氮
+    for b in after.bonds() {
+        if b.order != omgkit_core::BondOrder::Dative {
+            continue;
+        }
+        assert_eq!(
+            after.atoms()[b.begin as usize].atomic_num,
+            7,
+            "产物 {} 里配位键的给体端不是氮 —— 搬运时把箭头翻了",
+            got[0]
+        );
+    }
+    assert_eq!(
+        after
+            .bonds()
+            .iter()
+            .filter(|b| b.order == omgkit_core::BondOrder::Dative)
+            .count(),
+        n_dative,
+        "产物 {} 里配位键的根数变了",
+        got[0]
+    );
 }
 
 /// 断**环**键给出的是一个开环分子,不是两片。
@@ -1421,5 +1456,132 @@ fn two_template_fragments_never_share_an_atom() {
             n_out <= n_in,
             "产物 {set:?} 有 {n_out} 个重原子,底物只有 {n_in} —— 原子被抢重了"
         );
+    }
+}
+
+/// **省略键符号不是单键。** 芳环合成的模板绝大多数就是这么写的。
+///
+/// SMARTS 里不写键符号的默认值是析取"单键或芳香键",而先前产物侧把整个析取
+/// 退回单键 —— Paal-Knorr 得到的是吡咯**烷**,五个芳香原子之间连五根单键。这样
+/// 的产物净化得过、不报任何错,所以没有任何东西会替调用方发现它。
+///
+/// 规矩与参照实现同源(`ReactionRunner.cpp:391-406`):省略键符号时看两端原子的
+/// 芳香性,都芳香就建芳香键,否则单键。
+#[test]
+fn omitting_the_bond_symbol_between_aromatic_atoms_builds_an_aromatic_bond() {
+    // 吡咯合成:1,4-二酮 + 伯胺
+    let got = products(
+        "[C:1](=O)[C:2][C:3][C:4](=O).[NH2:5]>>[c:1]1[c:2][c:3][c:4][n:5]1",
+        &["CC(=O)CCC(C)=O", "CN"],
+    );
+    assert!(
+        got.iter().any(|o| o == &vec!["Cn1c(C)ccc1C".to_string()]),
+        "省略键符号建出了饱和环,而不是吡咯:{got:?}"
+    );
+
+    // 两端不都芳香时仍是单键 —— 这一档不许跟着一起变
+    let got = products("[c:1][C:2]>>[c:1][C:2]", &["c1ccccc1C"]);
+    assert_eq!(
+        got,
+        vec![vec!["Cc1ccccc1".to_string()]],
+        "一端芳香一端不芳香,该建单键"
+    );
+}
+
+/// `~` 说的是"沿用底物那根键",不是单键。
+///
+/// 先前 `[C:1]=[C:2]>>[C:1]~[C:2]` 把丁烯的双键降级成单键,同样不报错。
+#[test]
+fn a_tilde_bond_in_the_product_keeps_the_order_the_substrate_had() {
+    for (rxn, sub, want) in [
+        ("[C:1]=[C:2]>>[C:1]~[C:2]", "CC=CC", "CC=CC"),
+        ("[C:1]#[C:2]>>[C:1]~[C:2]", "CC#CC", "CC#CC"),
+    ] {
+        // 对称的双键有两处匹配,每一组都该原样保住键级
+        let got = products(rxn, &[sub]);
+        assert!(!got.is_empty(), "{rxn} 在 {sub} 上一组产物都没给");
+        for o in &got {
+            assert_eq!(o, &vec![want.to_string()], "`~` 改掉了 {sub} 的键级");
+        }
+    }
+}
+
+/// **配位几何在产物里也要重定基。**
+///
+/// 四面体换参照系是"置换奇偶",配位几何有 3 / 20 / 30 种排列,奇偶说不清它。
+/// 先前这一档直接跳过:产物的邻居存储顺序一定变了(模板的键先建、搬运来的键
+/// 后建),`@SP1` 原样照抄进另一个参照系,指的是另一个几何异构体。
+///
+/// 断的是**性质**:反应只换了远端的一个取代基、这个中心的键一根没动,产物的
+/// 规范串就该等于"把底物那个取代基换掉"之后的规范串。比的是整个规范串而不是
+/// "标记还在不在" —— 后者对照抄进错参照系的序号照样为真。
+#[test]
+fn a_coordination_centre_the_reaction_does_not_touch_keeps_its_configuration() {
+    let canon = |smi: &str| canon::canonical_smiles(&sanitized(smi)).smiles;
+    let mut checked = 0;
+    // (底物, 把底物里的胺换成醇之后的同一个分子, 模板)
+    for (sub, want) in [
+        ("F[Pt@SP1](Cl)(Br)N", "F[Pt@SP1](Cl)(Br)O"),
+        ("F[Pt@SP2](Cl)(Br)N", "F[Pt@SP2](Cl)(Br)O"),
+        ("S[As@TB1](F)(Cl)(Br)N", "S[As@TB1](F)(Cl)(Br)O"),
+        ("O[Co@OH1](Cl)(C)(N)(F)P", "O[Co@OH1](Cl)(C)(O)(F)P"),
+    ] {
+        let m = sanitized(sub);
+        if !m.atoms().iter().any(|a| {
+            a.chiral_tag != omgkit_core::ChiralTag::Unspecified && !a.chiral_tag.is_tetrahedral()
+        }) {
+            continue;
+        }
+        checked += 1;
+        let got = products("[NX3;H2,H3:9]>>[O:9]", &[sub]);
+        assert!(!got.is_empty(), "{sub}: 一组产物都没给");
+        for outcome in got {
+            assert_eq!(
+                outcome,
+                vec![canon(want)],
+                "{sub}: 反应没碰配位中心的任何一根键,构型却变了"
+            );
+        }
+    }
+    assert!(checked >= 3, "只查到 {checked} 个配位中心 —— 这一档在空过");
+}
+
+/// **映射号写在析取式末尾时也要认得出来。**
+///
+/// `:n` 不是查询基元 —— 它说的是"这个原子在反应里叫几号",不参与匹配,也不受
+/// `,` / `;` 的辖制。但语法上它写在最后,按优先级会被吸进最后一个析取分支:
+/// `[C,N:9]` 先前解析成 `C 或 (N 且 :9)`,于是取映射号的那一步在最外层找不到它,
+/// **整个原子被当成没有映射号**。
+///
+/// 后果不是"少一个号":产物构建靠映射号认领反应物原子,认不出来就当成新建原子,
+/// 底物剩下的部分一个也搬不过来 —— `[C,N:9]>>[O:9]` 作用在 `CCN` 上产物只剩一个
+/// `O`,两个碳凭空消失,而且不报错。`[C,N:1]`、`[O,S:2]` 在真实模板里极常见。
+///
+/// 断的是**原子账**:反应只把一个原子换成另一个,重原子数就不许变。
+#[test]
+fn a_map_number_at_the_end_of_a_disjunction_is_still_the_atoms_map_number() {
+    for (rxn, sub, want_atoms) in [
+        ("[C,N:9]>>[O:9]", "CCN", 3),
+        ("[N,O:9]>>[S:9]", "CCN", 3),
+        ("[N;H2,H3:9]>>[O:9]", "CCN", 3),
+        ("[N;H2,H3:9]>>[O:9]", "CCCCN", 5),
+        // 对照:映射号不在析取里,先前就是对的
+        ("[N:9]>>[O:9]", "CCN", 3),
+    ] {
+        let got = products(rxn, &[sub]);
+        assert!(!got.is_empty(), "{rxn} 在 {sub} 上一组产物都没给");
+        for outcome in &got {
+            let atoms: usize = outcome
+                .iter()
+                .map(|p| {
+                    let m = smiles::parse(p).unwrap_or_else(|e| panic!("{p}: {}", e.render()));
+                    m.num_atoms()
+                })
+                .sum();
+            assert_eq!(
+                atoms, want_atoms,
+                "{rxn} 在 {sub} 上:产物 {outcome:?} 只剩 {atoms} 个重原子,底物有 {want_atoms} 个"
+            );
+        }
     }
 }

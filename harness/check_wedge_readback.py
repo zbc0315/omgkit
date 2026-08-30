@@ -288,14 +288,19 @@ def blocks(text):
 
 
 def expected_lines(corpus):
-    """语料里**该**出现在 dump 中的行号(0 基)。
+    """语料里**该**出现在 dump 中的行号(**1 基**,与 `dump_molblock` 同口径)。
 
     口径:RDKit 认为分子里有至少一个原子带四面体标记。实测 `large.smi` 上这个
     集合与 `dump_molblock` 实际导出的 311 个分子**逐个相同**,不多不少 ——
     所以它可以当硬判据用,而不只是个下限。
+
+    **两侧的行号基必须一致。** 先前这边是 0 基、`dump_molblock` 也是 0 基,
+    而 `audit.rs` 早就为"报出来的行号在语料里数不到"改成了 1 基;`dump_molblock`
+    跟上之后这边也要跟上。差一位的表现不是"少一条",是"多 187 条该出没出、
+    同时多 187 条不该出却出了" —— 一个偏移量伪装成两类缺陷。
     """
     want = set()
-    for i, line in enumerate(corpus.read_text(encoding="utf-8").splitlines()):
+    for i, line in enumerate(corpus.read_text(encoding="utf-8").splitlines(), start=1):
         fields = line.split()
         if not fields:
             continue

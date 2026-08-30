@@ -87,7 +87,13 @@ impl MolProps {
                         + u32::from(a.num_implicit_hs)
                         + neighbour_hydrogens(mol, i as u32),
                     implicit_hs: u32::from(a.num_implicit_hs),
-                    valence: valence_of(mol, i as u32),
+                    // **总价只有一处实现。** 先前这里自己写了一份"键级和四舍五入
+                    // 加氢数",少了 core 那份的芳香价回落:那一步只对**两根**芳香键
+                    // 成立,稠合位有三根,4.5 进位成 5,于是萘的两个稠合碳被判成
+                    // 5 价 —— 任何用 `[v4]` 挑碳的 SMARTS 在稠环上都漏掉稠合位。
+                    valence: omgkit_core::valence::total_valence_nonstrict(mol, i as u32)
+                        .max(0)
+                        .unsigned_abs(),
                     ring_count: ring_count[i],
                     min_ring_size: u32::from(rings.atom_min_ring_size[i]),
                     ring_bonds: ring_bond_count[i],
@@ -111,20 +117,6 @@ impl MolProps {
 
         Self { atoms, bonds }
     }
-}
-
-/// 总价 = 各键的键级之和(四舍五入)+ 总氢数。
-///
-/// 芳香键按 1.5 计,所以要先求和再取整 —— 逐键取整会让苯环的碳变成 2+2+1=5。
-fn valence_of(mol: &MolBuilder, atom: u32) -> u32 {
-    let a = mol.atoms()[atom as usize];
-    let sum: f32 = mol
-        .neighbors(atom)
-        .map(|(_, bi)| mol.bonds()[bi as usize].valence_contribution_to(atom))
-        .sum();
-    // 芳香环上每个原子的键级和是 x.5,进位与实际价一致
-    let bonds = sum.round() as u32;
-    bonds + u32::from(a.num_explicit_hs) + u32::from(a.num_implicit_hs)
 }
 
 /// 邻居里画成独立节点的氢原子数。

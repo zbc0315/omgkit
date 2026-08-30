@@ -604,21 +604,17 @@ fn hydrogen_special_case(inner: &[u8]) -> Option<AtomExpr> {
     })
 }
 
-/// `from` → `to` 的置换是否为奇。两者不是同一多重集时按偶处理(不翻)。
+/// `from` → `to` 的置换是否为奇。**两者不是同一多重集时按偶处理(不翻)。**
+///
+/// 宇称本身在 [`omgkit_core::permutation_is_odd`] 里,只有那一份。这里包一层的
+/// 是**边界上的取舍**:SMARTS 的查询原子可以写得比目标原子少一个配体(隐式氢、
+/// 空的配位位),那时两侧多重集本来就对不上,而这条路上的正确动作是"不翻",
+/// 不是"放弃这个标记"。
+///
+/// 那个取舍先前是靠一份自己的实现表达的,于是四份 `permutation_is_odd` 里
+/// **只有这一份在边界上给"偶"** —— 谁都没法从名字上看出来。现在它是显式的。
 pub(super) fn permutation_is_odd(from: &[u32], to: &[u32]) -> bool {
-    let mut cur = from.to_vec();
-    let mut swaps = 0usize;
-    for i in 0..to.len() {
-        if cur[i] == to[i] {
-            continue;
-        }
-        let Some(j) = (i + 1..cur.len()).find(|&j| cur[j] == to[i]) else {
-            return false;
-        };
-        cur.swap(i, j);
-        swaps += 1;
-    }
-    swaps % 2 == 1
+    omgkit_core::permutation_is_odd(from, to).unwrap_or(false)
 }
 
 /// 括号氢那一项该不该补。解析与写出**共用这一份**。

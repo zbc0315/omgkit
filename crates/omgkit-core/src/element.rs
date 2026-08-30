@@ -16,7 +16,18 @@ pub struct Element {
     pub symbol: &'static str,
     /// 周期
     pub period: u8,
-    /// 共价半径 (Å)
+    /// 共价半径 (Å)。
+    ///
+    /// **`1.9` 是上游的"未知"哨兵,不是一个测量值** —— `atomic_data.cpp:34`
+    /// 原话是 `rCov (…). 1.9 if unknown.`。转录时那句声明丢了,于是表里 19 处
+    /// `1.9` 里,Z=97..112 那连续 16 个是"没有数据",而 Y / Tm / Np 恰好真的
+    /// 就是 1.90 —— 下游分不出这两件事。
+    ///
+    /// 同一个 struct 里 [`electronegativity`](Self::electronegativity) 花五行
+    /// 文档反对的正是这种做法(用一个魔数当"不知道")。这里没有改成 `Option`,
+    /// 是因为下游(`omgkit-conf` 的界矩阵)拿它当兜底模型用,给 `None` 就得
+    /// 在那里再编一个数 —— 换汤不换药。**要改就得连同"没有共价半径的元素
+    /// 该怎么建界"一起改**,那是另一件事。
     pub rcov: f32,
     /// 范德华半径 (Å)
     pub rvdw: f32,
@@ -145,16 +156,23 @@ pub fn can_be_aromatic_lowercase(atomic_num: u8) -> bool {
 ///
 /// 亚砜、亚磺酰胺、亚砜亚胺的 S,膦、膦氧化物的 P,以及同族的 As / Se / Te。
 ///
-/// # 带正电的**目前**不算 —— 这是个已知的保守缺口,不是化学结论
+/// # 六族的 +1 也算:锍盐、硒盐、碲盐
 ///
-/// 头一版这里写着"`[S+]` 三配位是平面的",那是**假话**:锍盐 R₃S⁺ 恰恰是
-/// 三配体 + 一对孤对,构型稳定、可以拆分。真正没有孤对、四配体全在的是季铵 R₄N⁺。
+/// R₃S⁺ 是三配体 + 一对孤对(S⁺ 有 5 个价电子,三根键用掉 3 个,剩 2 个正好一对),
+/// 构型稳定、可以拆分。真正没有孤对、四配体全在的是季铵 R₄N⁺。
 ///
-/// 现在仍然排除带正电的,理由是**没有验证依据**:语料里带手性标记的三配位
-/// 阳离子中心 0 个,RDKit 2022.09.5 也把 `C[S@+](C)CC` 的标记清成
-/// `CHI_UNSPECIFIED` —— 外部判据看不见这一档,放开就是无据可依的改动。
-/// 这条约定继承自 `omgkit-depict`(那边经 `check_wedge_readback.py` 验过)。
-/// 要放开的话得先有能判它的判据。
+/// 这一档先前被整个排除,理由写的是"外部判据看不见":当时举的例子是
+/// `C[S@+](C)CC` —— 而那个分子**两个甲基一模一样,本来就不是手性中心**,
+/// 任何实现都会把标记清掉。换成真正的锍盐 `C[S@+](CC)CCC`,钉住的 RDKit 2025.09.2
+/// 给的是 `CHI_TETRAHEDRAL_CCW`。**拿一个非手性的例子论证"判据看不见",
+/// 论证的是别的事。**
+///
+/// 代价是实打实的:排除期间 `C[S@+](CC)CCC` 走一趟二维往返构型整个丢掉
+/// (`C[S@@+](CCC)CC` → `C[S+](CCC)CC`),不报错。
+///
+/// **五族(P / As)的 +1 仍然不算**,而且不是保守取舍:P⁺ 只有 4 个价电子,
+/// 三根键用掉 3 个,剩下的是**一个单电子**而不是一对 —— 那是膦自由基阳离子,
+/// 不是稳定的立体中心。四配位的鏻盐 R₄P⁺ 本来就走四邻居那条路。
 ///
 /// # 为什么这条要放在 core
 ///
@@ -167,7 +185,13 @@ pub fn can_be_aromatic_lowercase(atomic_num: u8) -> bool {
 /// 四个邻居就整个 `continue`,于是语料里 13 个分子、16 个中心的构型是掷硬币。)
 #[must_use]
 pub fn has_stereogenic_lone_pair(atomic_num: u8, formal_charge: i8) -> bool {
-    formal_charge <= 0 && matches!(atomic_num, 15 | 16 | 33 | 34 | 52) // P S As Se Te
+    match atomic_num {
+        // 六族:中性(亚砜等)与 +1(锍盐、硒盐、碲盐)都是三配体 + 一对孤对
+        16 | 34 | 52 => formal_charge <= 1,
+        // 五族:中性的膦、胂有孤对;+1 之后剩的是单电子,不是一对
+        15 | 33 => formal_charge <= 0,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -175,20 +199,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 孤对立体中心只认那五个元素() {
+    fn 孤对立体中心认哪几个元素与电荷() {
         for (z, chg, want) in [
             (16u8, 0i8, true), // S:亚砜
             (15, 0, true),     // P:膦
             (33, 0, true),     // As
             (34, 0, true),     // Se
             (52, 0, true),     // Te
-            // 下面两条锁的是**当前的保守取舍**,不是化学结论:
-            // 锍盐 R₃S⁺ 其实有孤对、构型稳定,只是外部判据看不见这一档。
-            (16, 1, false), // [S+]:已知缺口,见函数文档
-            (15, 1, false), // [P+]:四配位的鏻盐不走这一支
-            (7, 0, false),  // N:孤对翻转太快,不当立体中心
-            (6, 0, false),  // C:三配位是 sp²
-            (8, 0, false),  // O:三配位是 [O+]
+            // 六族的 +1 也算:锍盐 R₃S⁺ 是三配体 + 一对孤对,钉住的外部实现
+            // 对**真正**的锍盐(三个取代基不全同)给的是四面体标记。
+            (16, 1, true), // [S+]:锍盐
+            (34, 1, true), // [Se+]:硒盐
+            (52, 1, true), // [Te+]:碲盐
+            // 五族的 +1 不算,而且不是保守取舍:P⁺ 三配位剩的是单电子不是一对。
+            (15, 1, false), // [P+]
+            (33, 1, false), // [As+]
+            // 再往上就是四配位了,不走这一支
+            (16, 2, false),
+            (7, 0, false), // N:孤对翻转太快,不当立体中心
+            (6, 0, false), // C:三配位是 sp²
+            (8, 0, false), // O:三配位是 [O+]
         ] {
             assert_eq!(
                 has_stereogenic_lone_pair(z, chg),
@@ -317,21 +347,37 @@ mod tests {
         assert_eq!(by_symbol("H").unwrap().valences, &[1]);
     }
 
+    /// 多价元素的默认价表:**期望值写死,不许引用被测的那张表**。
+    ///
+    /// 先前这里写的是 `assert_eq!(s.default_valence_for(3), Some(s.valences[1]))`
+    /// —— 表一改两边一起动。把 S 的 `[2,4,6]` 变异成 `[2,5,6]` 它照样绿,而那个
+    /// 变异会让 `[SH](=O)C` 的隐式氢从 1 变 2。
+    ///
+    /// 而且先前只钉了六个**单值**列表,P `[3,5]` / S `[2,4,6]` / I `[1,3,5]`
+    /// 一个没钉 —— 多值那档才是抄错后果最重的。
     #[test]
     fn default_valence_selection() {
+        for (sym, want) in [
+            ("S", &[2, 4, 6][..]),
+            ("P", &[3, 5][..]),
+            ("I", &[1, 3, 5][..]),
+            ("Cl", &[1][..]),
+            ("N", &[3][..]),
+            ("C", &[4][..]),
+        ] {
+            let e = by_symbol(sym).unwrap();
+            assert_eq!(e.valences, want, "{sym} 的默认价表");
+        }
+
         let s = by_symbol("S").unwrap();
-        // S 是多价的;应选第一个 ≥ 已用价的
-        assert!(
-            s.valences.len() > 1,
-            "S 应有多个默认价,实际 {:?}",
-            s.valences
-        );
+        // 选的是第一个 ≥ 已用价的那一档
         assert_eq!(s.default_valence_for(2), Some(2));
-        assert_eq!(s.default_valence_for(3), Some(s.valences[1]));
+        assert_eq!(s.default_valence_for(3), Some(4));
+        assert_eq!(s.default_valence_for(5), Some(6));
+        assert_eq!(s.default_valence_for(7), None, "超过最大价就没有可用的了");
 
         let c = by_symbol("C").unwrap();
         assert_eq!(c.default_valence_for(4), Some(4));
-        // 超价:无可用默认价
         assert_eq!(c.default_valence_for(5), None);
     }
 

@@ -4,8 +4,9 @@
 //!
 //! `omgkit-io/tests/roundtrip_smarts.rs` 判的是"写出幂等 + 原子数键数不变",
 //! 而它的文档自己写着"语义等价要外部实现当判官,那是另一档"。
-//! 问题是那一档的判官(`harness/check_smarts_write.py`)**不在 CI 里**,
-//! 于是这一档实际上没人守 —— 而幂等这条**挡不住把谓词写成常量**:
+//! 那一档的判官是 `harness/check_smarts_write.py`(现在在 CI 里)。它要 RDKit,
+//! 而**这个文件不要** —— 一条不依赖外部环境的判据先在这里把最粗的错挡住,
+//! 因为幂等那条**挡不住把谓词写成常量**:
 //!
 //! ```text
 //! 把 write.rs 里 `AtomPrim::Charge(c) => charge_string(*c)` 改成

@@ -41,7 +41,7 @@ cargo doc --workspace --no-deps --document-private-items
 ```
 
 (How many gates there are is deliberately not written here. The count has gone
-from four to five to forty as judges were added, and a number in prose falls
+from four to five to forty-something as judges were added, and a number in prose falls
 behind without anything reporting it — `TOTAL` in `harness/gates.sh` is the one
 place it lives. See [Building and testing](building.md).)
 

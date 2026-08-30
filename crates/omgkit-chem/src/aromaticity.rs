@@ -302,7 +302,11 @@ fn is_arom_candidate(mol: &MolBuilder, idx: u32) -> bool {
     let atom = mol.atoms()[idx as usize];
     let z = atom.atomic_num;
 
-    // 只允许周期表前两行,外加 Se 与 Te
+    // 只允许周期表**前三行**(Z ≤ 18),外加 Se 与 Te。
+    //
+    // 参照实现 `Aromaticity.cpp:422-424` 的注释写的是"前两行",而它的代码同样
+    // 是 `z > 18` —— **那句注释在上游就是错的**,两边的行为一致。照抄行为,
+    // 不照抄那句话。
     if z > 18 && z != 34 && z != 52 {
         return false;
     }

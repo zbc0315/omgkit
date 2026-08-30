@@ -154,6 +154,21 @@ fn assign_with(mol: &MolBuilder, coords: &[Point2], ranks: &[u32], taboo: Taboo)
     // 按规范秩处理 —— 谁先挑走一根键会影响后面的选择
     centres.sort_by_key(|a| (ranks[*a as usize], *a));
 
+    // **配位几何画不出来,那就说出来。**
+    //
+    // `@SP` / `@TB` / `@OH` 的构型没法用一根楔形表达(平面四方形在纸面上根本
+    // 不是"出平面/入平面"的事,三角双锥与八面体要两根以上),这一版不画。
+    // 但先前它们**连报都不报**:上面那道 filter 只收 `Cw | Ccw`,于是这些中心
+    // 既不指派楔形,也不进 `unwedged`,`is_clean()` 照样为真 ——
+    // `[Pt@SP1](Cl)(Cl)(N)N` 画出来读回去就是 `[Pt](Cl)(Cl)(N)N`,构型整个
+    // 消失而诊断全绿。README 说"画不好会说出来",这里没说。
+    out.unwedged.extend(
+        (0..u32::try_from(mol.num_atoms()).expect("原子数超出 u32")).filter(|a| {
+            let tag = mol.atoms()[*a as usize].chiral_tag;
+            tag != ChiralTag::Unspecified && !tag.is_tetrahedral()
+        }),
+    );
+
     for a in centres {
         let want = mol.atoms()[a as usize].chiral_tag;
         let mut done = false;
@@ -364,6 +379,21 @@ pub(crate) fn fix_cis_trans(mol: &MolBuilder, coords: &mut [Point2], ranks: &[u3
         }
     }
     fixed
+}
+
+/// 画出来的几何与记录的顺反**不符**的那些双键。
+///
+/// 照**最终坐标**量,所以掰不动的(环上的键,两侧是同一片原子)与掰对了又被消
+/// 冲突挪反的都在里面。记着顺反、而几何读不出确定值的也算 —— 那同样是"读图的人
+/// 拿不到作者写的那句话"。
+pub(crate) fn stereo_mismatches(mol: &MolBuilder, coords: &[Point2]) -> Vec<u32> {
+    (0..u32::try_from(mol.num_bonds()).expect("键数超出 u32"))
+        .filter(|&bi| {
+            let want = mol.bonds()[bi as usize].stereo;
+            matches!(want, BondStereo::Cis | BondStereo::Trans)
+                && read_bond_stereo(mol, coords, bi) != Some(want)
+        })
+        .collect()
 }
 
 /// 断开键 `bond` 之后,`start` 那一侧的原子。绕回去(环上的键)返回 `None`。
@@ -921,6 +951,102 @@ mod tests {
                 checked > 0,
                 "{smi} 一根带顺反的双键都没查到 —— 这一档在空过"
             );
+            assert!(
+                d.misdrawn_stereo.is_empty(),
+                "{smi} 明明画对了,却被报成画错"
+            );
         }
+    }
+
+    /// **画不出来的要说出来。** 环内的顺反就是画不出来的那一档。
+    ///
+    /// 掰顺反靠"把一侧整个镜像过去",而环上的键两侧是同一片原子,镜像动不了它;
+    /// 环按凸多边形画,环内双键一律成顺式。八元以上的环里记着反式的,画出来必反。
+    ///
+    /// 先前这一档谁都不报 —— `fix_cis_trans` 的返回值被丢掉,四个诊断字段一个也
+    /// 装不下,`is_clean()` 照样为真。断的是**契约**("画不好就说出来"),不是
+    /// "环内顺反画不出来"这个当时的能力上限:哪天环画法能容下反式了,这条判据
+    /// 会因为 `checked == 0` 而红,逼人来改,而不是悄悄空过。
+    #[test]
+    fn a_ring_double_bond_it_cannot_draw_is_reported_not_hidden() {
+        let mut checked = 0;
+        for n in 8..=14usize {
+            // n 元环里一根记着反式的双键
+            let smi = format!("C/1{}\\C=C1", "C".repeat(n - 3));
+            let Ok(mut m) = omgkit_io::smiles::parse(&smi) else {
+                continue;
+            };
+            if omgkit_chem::pipeline::sanitize(&mut m).is_err() {
+                continue;
+            }
+            omgkit_io::stereo::perceive_bond_stereo(&mut m);
+            let want: Vec<u32> = (0..u32::try_from(m.num_bonds()).unwrap())
+                .filter(|&b| {
+                    matches!(
+                        m.bonds()[b as usize].stereo,
+                        BondStereo::Cis | BondStereo::Trans
+                    )
+                })
+                .collect();
+            if want.is_empty() {
+                continue;
+            }
+            let d = generate(&m, &Style::ACS_1996);
+            for b in want {
+                checked += 1;
+                if read_bond_stereo(&m, &d.coords, b) != Some(m.bonds()[b as usize].stereo) {
+                    assert!(
+                        d.misdrawn_stereo.contains(&b),
+                        "{smi}: 键 {b} 画反了,而诊断里没有它"
+                    );
+                    assert!(!d.is_clean(), "{smi}: 画反了还报 is_clean");
+                }
+            }
+        }
+        assert!(checked > 0, "一根环内的顺反键都没查到 —— 这一档在空过");
+    }
+
+    /// **配位几何画不出来,要报进 `unwedged`,不许一声不响地丢掉。**
+    ///
+    /// 先前挑立体中心那道 filter 只收 `Cw | Ccw`,于是 `@SP`/`@TB`/`@OH` 既不
+    /// 指派楔形也不进诊断:`[Pt@SP1](Cl)(Cl)(N)N` 画出来读回去构型整个消失,
+    /// 而 `is_clean()` 为真。
+    ///
+    /// 断的是契约,不是"这一版画不出配位几何"这个能力上限 —— 哪天画得出来了,
+    /// 这条会因为中心不在 `unwedged` 里而红,逼人来改判据,而不是悄悄空过。
+    #[test]
+    fn a_coordination_geometry_it_cannot_draw_goes_into_unwedged() {
+        let mut checked = 0;
+        for smi in [
+            "F[Pt@SP1](Cl)(Br)I",
+            "S[As@TB1](F)(Cl)(Br)N",
+            "O[Co@OH1](Cl)(C)(N)(F)P",
+        ] {
+            let Ok(mut m) = omgkit_io::smiles::parse(smi) else {
+                continue;
+            };
+            if omgkit_chem::pipeline::sanitize(&mut m).is_err() {
+                continue;
+            }
+            let centres: Vec<u32> = (0..u32::try_from(m.num_atoms()).unwrap())
+                .filter(|a| {
+                    let t = m.atoms()[*a as usize].chiral_tag;
+                    t != ChiralTag::Unspecified && !t.is_tetrahedral()
+                })
+                .collect();
+            if centres.is_empty() {
+                continue;
+            }
+            let d = generate(&m, &Style::ACS_1996);
+            for a in centres {
+                checked += 1;
+                assert!(
+                    d.unwedged.contains(&a),
+                    "{smi}: 原子 {a} 的配位构型没画出来,诊断里也没有它"
+                );
+            }
+            assert!(!d.is_clean(), "{smi}: 构型丢了还报 is_clean");
+        }
+        assert!(checked > 0, "一个配位中心都没查到 —— 这一档在空过");
     }
 }

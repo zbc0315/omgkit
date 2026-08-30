@@ -508,17 +508,25 @@ mod tests {
         }
     }
 
+    /// 三配位但**没有孤对**的不算立体中心;有孤对的要认出来。
+    ///
+    /// 两个方向一起断,否则这条只会越守越松:只断否定那半边的话,把
+    /// `has_stereogenic_lone_pair` 改成恒 `false` 它照样绿,而那会让亚砜、膦、
+    /// 锍盐的构型集体变成掷硬币。
+    ///
+    /// (这条先前举的反例是 `C[S+](C)C`,理由写着"`[S+]` 三配位是平面的" ——
+    /// 那句在 `element.rs` 里早就被自己标成假话了:锍盐 R₃S⁺ 是三配体 + 一对
+    /// 孤对。它之所以不算中心,是因为三个甲基一模一样,与配位数无关。)
     #[test]
     fn 三配位但没有孤对的不算立体中心() {
-        // `[S+]` 三配位是平面的,`[N+]`/`[C]` 三配位是 sp² —— 都不是四面体中心。
-        // 这条守的是"别把任何凑不够四邻居的带标记原子都当成三配位中心"。
-        for smi in ["C[S+](C)C", "C[N+](C)C"] {
+        // 硼、碳、氮的三配位是 sp² 平面,没有可当第四配体的孤对
+        for smi in ["C[N+](C)C", "C[B](C)C"] {
             let mut m = omgkit_io::smiles::parse(smi).expect("解析");
             omgkit_chem::pipeline::sanitize(&mut m).expect("净化");
             // 强行按四面体标记,看 `centers` 会不会上钩
             for i in 0..m.num_atoms() as u32 {
                 let z = m.atoms()[i as usize].atomic_num;
-                if z == 16 || z == 7 {
+                if matches!(z, 5 | 7) {
                     if let Some(a) = m.atom_mut(i) {
                         a.chiral_tag = omgkit_core::ChiralTag::Ccw;
                     }
@@ -533,6 +541,18 @@ mod tests {
                     c.atom
                 );
             }
+        }
+
+        // 反方向:真有孤对的三配位中心必须抽得出来
+        for smi in ["C[S@](=O)CC", "C[P@H]CC", "C[S@+](CC)CCC", "C[Se@+](CC)CCC"] {
+            let mut m = omgkit_io::smiles::parse(smi).expect("解析");
+            omgkit_chem::pipeline::sanitize(&mut m).expect("净化");
+            let r = omgkit_io::canon::classed_ranks(&m);
+            omgkit_chem::add_explicit_hs(&mut m, &r);
+            assert!(
+                chiral::centers(&m).iter().any(Center::is_three_coordinate),
+                "{smi}:三配位的立体中心一个都没抽出来"
+            );
         }
     }
 

@@ -458,10 +458,6 @@ fn prep(smi: &str) -> Option<MolBuilder> {
     Some(m)
 }
 
-/// 被摆成 180° 而**本来不该是 180°** 的骨架原子有几个。
-///
-/// sp 原子(有三键、或两根双键)本来就该 180°,不算。剩下的是布局把 sp3 摆直了
-/// —— 渲染那边会补个符号让它看得见,但坐标本身的毛病要单独报,不许被补符号盖住。
 /// 有几处取代基被挤到离另一根键 **< `CRAMPED`** 的地方。
 ///
 /// # 为什么要单独数
@@ -525,6 +521,10 @@ fn labels_really_overlap(m: &MolBuilder, d: &omgkit_depict::Depiction, style: &S
         .count()
 }
 
+/// 被摆成 180° 而**本来不该是 180°** 的骨架原子有几个。
+///
+/// sp 原子(有三键、或两根双键)本来就该 180°,不算。剩下的是布局把 sp3 摆直了
+/// —— 渲染那边会补个符号让它看得见,但坐标本身的毛病要单独报,不许被补符号盖住。
 fn accidental_collinear(m: &MolBuilder, d: &omgkit_depict::Depiction) -> usize {
     use omgkit_core::BondOrder;
     use omgkit_depict::render::is_collinear;

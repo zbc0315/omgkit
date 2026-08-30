@@ -116,6 +116,19 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
         depiction.wedges.len(),
         mol.num_bonds()
     );
+    // **规范也要对得上号。** [`Depiction::matches`] 是为拦"拿另一套规范渲染
+    // 已有坐标"而生的,而这里是全库**唯一**同时拿到图与规范的地方 —— 先前它
+    // 的调用方只有三条测试,机制有、闸口没有。
+    //
+    // 用 `debug_assert!`:错配画出来的图是"能看但布局是按另一套排的",不是崩,
+    // release 下拦下来的收益抵不上给每次渲染加一次比较;debug 与全部判据都跑
+    // debug,所以真错配会在那里现形。
+    debug_assert!(
+        depiction.matches(style),
+        "这张图是按另一套规范排的(指纹 {:#x} vs {:#x})—— 坐标不是这套规范的",
+        depiction.style_fingerprint,
+        style.layout_fingerprint()
+    );
 
     // 芳香键要按凯库勒式画,否则苯环只剩一圈单线。只取键级,不动调用方的分子。
     let orders = drawn_orders(mol);
@@ -468,10 +481,12 @@ pub fn label_place(mol: &MolBuilder, atom: u32, coords: &[Point2]) -> LabelPlace
 ///
 /// # 为什么不写成 `label_dir(..).h_side()`
 ///
-/// 竖排还没接进绘制。在那之前把上下两向折成 `East`,等于**丢掉**这批标签本来
-/// 定得好好的左右选择 —— 全量语料实测 `—— 有标签在键上塞不下` 从 1271 涨到
-/// **1356(+85)**。所以这里就是老口径本身:只看 x 分量。上下两向要等
-/// [`crate::label::Label`] 会竖排了才接得上。
+/// 这个函数问的是"氢挂左边还是右边",而竖排(`LabelPlace::Stacked`)说的是
+/// 上下 —— 把上下两向折成 `East` 会**丢掉**这批标签本来定得好好的左右选择,
+/// 全量语料实测 `—— 有标签在键上塞不下` 从 1271 涨到 **1356(+85)**。
+/// 所以这里就是老口径本身:只看 x 分量。竖排本身早已接进绘制
+/// (见 [`crate::label::LabelPlace::Stacked`] 与本文件里那条断言乙酰氨基酚的氮
+/// 就是竖排的判据),它走的是另一条路,不经过这里。
 ///
 /// 阈值用的是模块里那一份 `TIE`,**不另抄一个字面量** —— 抄一份就会漂,而漂了
 /// 之后没有判据守得住(实测:把这里的 `1e-3` 改成 `0.0`,116 条判据全绿)。

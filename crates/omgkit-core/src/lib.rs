@@ -47,6 +47,7 @@ pub mod batch;
 pub mod builder;
 pub mod element;
 pub mod error;
+pub mod permutation;
 pub mod polyhedron;
 pub mod types;
 pub mod valence;
@@ -58,6 +59,7 @@ pub use batch::{MolBatch, MolBatchBuilder};
 pub use builder::{AtomData, BondData, BondMut, MolBuilder, Neighbors};
 pub use element::Element;
 pub use error::{Error, Result};
+pub use permutation::permutation_is_odd;
 pub use types::{
     AtomFlags, BondDirection, BondFlags, BondOrder, BondStereo, ChiralTag, Hybridization,
 };

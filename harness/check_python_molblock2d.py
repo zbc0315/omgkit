@@ -48,7 +48,10 @@ def blocks(path):
         if line.startswith(">>> "):
             lineno, smi = line[4:].rstrip("\n").split("\t", 1)
             buf = []
-        elif line.startswith("#unwedged"):
+        elif line.startswith("#"):
+            # Rust 侧的诊断行(`#unwedged` 等)不是 molblock 的内容。
+            # 按前缀整体跳过,而不是只认 `#unwedged` —— 那边加一行诊断,
+            # 这边就会把它当成 molblock 的一行,报出来的分歧指向错的东西。
             continue
         elif line.rstrip("\n") == "$$$$":
             yield lineno, smi, "".join(buf)

@@ -42,6 +42,10 @@ use omgkit_core::{BondOrder, MolBuilder};
 /// `order` 是与写法无关的原子秩,长度必须与原子数一致 —— 补出来的氢按它排序,
 /// 见模块文档。返回补了几个氢。
 ///
+/// # Panics
+///
+/// `order` 长度与原子数不符时 panic —— 那是调用方的编程错误。
+///
 /// **在 `sanitize` 之后调用。** 净化会重算隐式氢计数,补完再净化会把补出来的
 /// 氢又算一遍(中心的计数已经清零,所以不会重复补,但价键检查会看到不同的分子)。
 ///
@@ -51,10 +55,12 @@ use omgkit_core::{BondOrder, MolBuilder};
 /// 返回之后仍然有效 —— 有判据钉住。
 pub fn add_explicit_hs(mol: &mut MolBuilder, order: &[u32]) -> usize {
     let n = mol.num_atoms();
-    debug_assert_eq!(order.len(), n, "秩与原子数必须一一对应");
-    if order.len() != n {
-        return 0;
-    }
+    // **与 [`crate::adjust_hs`] 同一口径:前置条件不符就 panic,不静默返回。**
+    //
+    // 先前是 `debug_assert_eq!` 加 `return 0`,而 0 同时也是"本来就没氢要补"的
+    // 正常返回值 —— release 下把一个编程错误吞成了一个看着正常的结果。
+    // 同一个 crate 里两个同类函数用两种口径,落地的偏偏是静默那条。
+    assert_eq!(order.len(), n, "秩与原子数必须一一对应");
 
     // 先把"谁要补几个"收集齐,再按秩排 —— 边遍历边加原子会把 `num_atoms` 搅乱
     let mut todo: Vec<(u32, u8)> = Vec::new();

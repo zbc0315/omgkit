@@ -96,8 +96,8 @@ yet" and different from zero.
 `gasteiger_valid` is `False` when the atom falls outside the Gasteiger parameter
 set, which covers H, C, N, O, F, Si, P, S, Cl, Br, I, B, Be, Mg and Al. Most
 metals do not, and the failure **spreads along the graph**: a carbon bonded to a
-sodium ends up with a `nan` charge too. Across the four corpora the gate runs on
-(9 051 molecules), 4 192 atoms came out invalid — and RDKit produces `nan` for
+sodium ends up with a `nan` charge too. Across the five corpora the gate runs on
+(9 088 molecules), 4 226 atoms came out invalid — and RDKit produces `nan` for
 exactly the same ones.
 
 Both are reported honestly rather than filled in with a default. A default would
@@ -159,13 +159,26 @@ boundary, where there is no enum to hand over.
 
 ## How this is checked
 
-Every one of the sixteen descriptors is compared atom-by-atom and bond-by-bond
-against RDKit over four corpora (9 051 molecules) by
+Sixteen of the nineteen values are compared against RDKit atom-by-atom and
+bond-by-bond over five corpora (9 088 molecules) by
 `harness/check_descriptors.py`, which runs in CI. Seven deliberate divergences
 are pinned by name, each one a documented blind spot on the reference side — for
 instance RDKit cannot represent allene axial chirality at all.
 
-The one thing that gate cannot see is the **value** of the Pauling
-electronegativity, since RDKit exposes no API for it; that is pinned by a unit
-test in `omgkit-core` instead. Both facts are written down in the judge's header,
-along with the mutation runs that establish them.
+**Which three are not in that count, and where each is guarded instead:**
+
+| Not compared there | Why | Guarded by |
+|---|---|---|
+| `begin`, `end` | bond endpoints, not descriptors | the graph itself |
+| `stereo_atoms` | the reference atoms a `stereo` value is measured against | `harness/check_bond_stereo.py` |
+
+And two things that gate can see only partly:
+
+- the **value** of the Pauling electronegativity — RDKit exposes no API for it,
+  so a unit test in `omgkit-core` pins the table instead;
+- the **value** of `stereo` (`cis` vs `trans`) — compared by
+  `harness/check_bond_stereo.py`, not here; this gate only checks *which* bonds
+  carry a configuration.
+
+All of that is written down in the judge's own header, along with the mutation
+runs that establish it.

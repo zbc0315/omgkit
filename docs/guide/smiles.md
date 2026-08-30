@@ -17,9 +17,8 @@ Malformed input raises `ValueError` with a caret view:
 >>> omgkit.parse_smiles("CC(C")
 Traceback (most recent call last):
   ...
-ValueError: unclosed branch
-    CC(C
-      ^
+ValueError: CC(C
+    ^ 括号不匹配
 ```
 
 ## Two ways to write it back

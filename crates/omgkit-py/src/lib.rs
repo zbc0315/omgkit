@@ -267,6 +267,42 @@ impl PyMol {
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
+    /// 画这个分子时**没能画好的地方**,返回 `dict[str, list]`。
+    ///
+    /// | 键 | 内容 |
+    /// |---|---|
+    /// | `degraded` | 布局不得不退化的地方(桥环等),每项一个说明串 |
+    /// | `unresolved` | 消冲突之后仍然挤在一起的原子对 |
+    /// | `crossings` | 仍然交叉的键对 |
+    /// | `unwedged` | 没能画出构型的立体中心。配位几何(`@SP`/`@TB`/`@OH`)这一版画不出来,一律在这里 |
+    /// | `misdrawn_stereo` | 画出来的几何与记录的顺反**不符**的双键。八元以上的环里的反式双键会落在这里 —— 环按凸多边形画,环内双键一律画成顺式 |
+    ///
+    /// 五个都是空的,这张图才把分子完整地表达出来了。
+    ///
+    /// 下标相对**被画的那个分子** —— 为了承载楔形可能补了显式氢,那时原子数比
+    /// `num_atoms` 大;前 `num_atoms` 个与本分子逐项对应。
+    ///
+    /// 净化过不去时抛 `ValueError`。
+    fn depiction_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let mut mol = self.inner.clone();
+        omgkit_chem::sanitize(&mut mol).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        omgkit_io::stereo::perceive_bond_stereo(&mut mol);
+        let d = omgkit_depict::generate(&mol, &omgkit_depict::style::Style::ACS_1996);
+        let out = PyDict::new(py);
+        out.set_item(
+            "degraded",
+            d.degraded
+                .iter()
+                .map(|g| format!("{g:?}"))
+                .collect::<Vec<_>>(),
+        )?;
+        out.set_item("unresolved", d.unresolved.clone())?;
+        out.set_item("crossings", d.crossings.clone())?;
+        out.set_item("unwedged", d.unwedged.clone())?;
+        out.set_item("misdrawn_stereo", d.misdrawn_stereo.clone())?;
+        Ok(out)
+    }
+
     /// 逐原子的描述符,按存储顺序。返回 `list[dict]`。
     ///
     /// 每个字典 12 个键:
@@ -375,7 +411,6 @@ impl PyMol {
     }
 }
 
-/// 解析 SMILES。解析失败时抛 `ValueError`,消息里带插字号视图指出出错位置。
 /// 一个三维构型。
 ///
 /// 由 `Mol.conformer()` 产出。里面既有坐标,也有**坐标对应的
@@ -507,7 +542,8 @@ pub struct PyMolblock {
 
 #[pymethods]
 impl PyMolblock {
-    /// 分子。**已经净化过,立体也打上了**(二维图的情形)。
+    /// 分子。**已经净化过,立体也打上了** —— 二维靠楔形与平面投影,
+    /// 三维靠有符号体积与二面角,两条路都接上了。
     #[getter]
     fn mol(&self) -> PyMol {
         self.mol.clone()
@@ -549,6 +585,31 @@ impl PyMolblock {
     }
 }
 
+/// 读完之后共用的那三步:净化,再从坐标与楔形回来打立体标记。
+///
+/// 单条(`parse_molblock`)与整份 SDF(`read_sdf`)都走它。**只有这一处** ——
+/// 两处各写一遍的话,迟早一边打了立体、另一边没打,而那种差别不报错。
+fn finish(got: omgkit_io::molblock::Molblock) -> Result<PyMolblock, String> {
+    let mut mol = got.mol;
+    omgkit_chem::sanitize(&mut mol).map_err(|e| e.to_string())?;
+    // 净化**之后**才打得上:手性要知道中心有几个隐式氢,顺反要用对称等价类。
+    // 两个函数自己认出三维就整个不做,绑定这一层不加判断 —— 加了的话,
+    // "什么时候读得出立体"就有了两个住处。
+    let _ = omgkit_io::stereo::assign_chirality_2d(&mut mol, &got.coords, &got.wedges);
+    let _ = omgkit_io::stereo::assign_bond_stereo_2d(&mut mol, &got.coords, &got.unknown_stereo);
+    // 三维那两个。四个 `assign_*` 各自认出维数,不合的那一对返回 0 ——
+    // 由它们自己判、而不是在这里 `if is_3d`,是为了让"什么时候读得出立体"
+    // 只有一个住处。
+    let _ = omgkit_io::stereo::assign_chirality_3d(&mut mol, &got.coords);
+    let _ = omgkit_io::stereo::assign_bond_stereo_3d(&mut mol, &got.coords, &got.unknown_stereo);
+    Ok(PyMolblock {
+        mol: PyMol { inner: mol },
+        coords: got.coords,
+        title: got.title,
+        is_3d: got.is_3d,
+    })
+}
+
 /// 读一条 V2000 molblock(`.mol` 文件的内容,或 `.sdf` 里 `$$$$` 之前的一段)。
 ///
 /// 读不出来时抛 `ValueError`,消息里说明是哪一行的什么字段 —— V3000 会被明确
@@ -576,27 +637,6 @@ impl PyMolblock {
 ///
 /// 单条(`parse_molblock`)与整份 SDF(`read_sdf`)都走它。两处各写一遍的话,
 /// 迟早一边打了立体、另一边没打,而那种差别不报错。
-fn finish(got: omgkit_io::molblock::Molblock) -> Result<PyMolblock, String> {
-    let mut mol = got.mol;
-    omgkit_chem::sanitize(&mut mol).map_err(|e| e.to_string())?;
-    // 净化**之后**才打得上:手性要知道中心有几个隐式氢,顺反要用对称等价类。
-    // 两个函数自己认出三维就整个不做,绑定这一层不加判断 —— 加了的话,
-    // "什么时候读得出立体"就有了两个住处。
-    let _ = omgkit_io::stereo::assign_chirality_2d(&mut mol, &got.coords, &got.wedges);
-    let _ = omgkit_io::stereo::assign_bond_stereo_2d(&mut mol, &got.coords, &got.unknown_stereo);
-    // 三维那两个。四个 `assign_*` 各自认出维数,不合的那一对返回 0 ——
-    // 由它们自己判、而不是在这里 `if is_3d`,是为了让"什么时候读得出立体"
-    // 只有一个住处。
-    let _ = omgkit_io::stereo::assign_chirality_3d(&mut mol, &got.coords);
-    let _ = omgkit_io::stereo::assign_bond_stereo_3d(&mut mol, &got.coords, &got.unknown_stereo);
-    Ok(PyMolblock {
-        mol: PyMol { inner: mol },
-        coords: got.coords,
-        title: got.title,
-        is_3d: got.is_3d,
-    })
-}
-
 #[pyfunction]
 fn parse_molblock(text: &str) -> PyResult<PyMolblock> {
     let got =
@@ -682,7 +722,8 @@ impl PySdfRecord {
 /// # 立体与 `parse_molblock` 同一条路
 ///
 /// 每条都是"读 → 净化 → 回来打立体标记",与单条那个函数共用同一段代码。
-/// 三维文件同样眼下不读立体,理由见 `parse_molblock`。
+/// 三维文件的立体同样读得出来(有符号体积定手性、二面角定顺反),
+/// 走哪条由坐标自己说了算 —— 理由见 `parse_molblock`。
 #[pyfunction]
 fn read_sdf(text: &str) -> Vec<PySdfRecord> {
     omgkit_io::molblock::read_sdf(text)
@@ -708,6 +749,12 @@ fn read_sdf(text: &str) -> Vec<PySdfRecord> {
         .collect()
 }
 
+/// 解析 SMILES,返回一个 `Mol`。
+///
+/// 解析失败时抛 `ValueError`,消息里带插字号视图指出出错在第几个字符。
+///
+/// **只解析,不净化。** 芳香标志、环信息、隐式氢数、杂化都还是空的 ——
+/// 要用它们(或者要写规范 SMILES、要画图、要描述符)先调 `Mol.sanitize()`。
 #[pyfunction]
 fn parse_smiles(smiles: &str) -> PyResult<PyMol> {
     match omgkit_io::smiles::parse(smiles) {

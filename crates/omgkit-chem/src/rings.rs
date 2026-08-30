@@ -20,7 +20,11 @@ use omgkit_core::{AtomFlags, BondFlags, BondOrder, MolBuilder};
 /// 一次环感知的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RingPerception {
-    /// 每原子的最小环大小;0 表示不在任何环中
+    /// 每原子的最小环大小。
+    ///
+    /// **0 表示"这里没有数",不等于"不在环中"** —— 环大过 [`MAX_RING_SIZE`]
+    /// 时同样是 0。要问在不在环里,读 [`atom_in_ring`](Self::atom_in_ring)。
+    /// 两者混为一谈过一次:256 元以上的环原子会同时报"在环里"和"不在任何环中"。
     pub atom_min_ring_size: Vec<u8>,
     /// 每原子是否在环中
     pub atom_in_ring: Vec<bool>,
@@ -28,8 +32,26 @@ pub struct RingPerception {
     pub bond_in_ring: Vec<bool>,
 }
 
-/// 环大小的上限。超过此值的环不记录大小,记为 0。
-pub const MAX_RING_SIZE: usize = 20;
+/// 环大小的上限:**存这个数的字段有多宽**([`RingPerception::atom_min_ring_size`]
+/// 是 `u8`)。比这还大的环记为 0。
+///
+/// 先前是 20,而那个数字挡住的是真实存在的东西:30 元大环在 `hard.smi` 里就有,
+/// 三十元的环内酯与环肽在天然产物里也不罕见。抬到 255 之后压力语料(环原子挂
+/// 200 长尾、30 元环每个环原子挂 20 长尾)实测与 20 无法区分 —— BFS 的深度上限
+/// 在**第一轮**之后就被 `best` 剪枝接管了,上限只影响第一轮。
+///
+/// **仍然碰不到的那一档:256 元以上的环。** 它们的 `atom_min_ring_size` 是 0,
+/// 而"在不在环里"由 [`RingPerception::atom_in_ring`] 独立回答,不受这个上限影响
+/// —— SMARTS 的 `[r0]` / `[R0]` 读的是后者,所以不会把大环原子说成非环原子。
+pub const MAX_RING_SIZE: usize = 255;
+
+/// 先按这个上限跑一遍。真实分子的环几乎全在这里面,一遍就出结果。
+///
+/// **这个数只影响代价,不影响结果** —— 找不到 ≤ 它的环时会用
+/// [`MAX_RING_SIZE`] 再跑一遍,答案与只跑一遍大上限相同。判据
+/// `a_ring_reports_its_own_size_all_the_way_up_to_the_field_width` 一路扫到
+/// 60 元环,正好跨过这条线,所以"两遍给的答案与一遍相同"这件事是被守着的。
+const COMMON_RING_MAX: usize = 20;
 
 /// 对分子做环感知,并就地设置 [`AtomFlags::IN_RING`] / [`BondFlags::IN_RING`]。
 ///
@@ -68,9 +90,36 @@ pub fn perceive_rings(mol: &mut MolBuilder) -> RingPerception {
     let mut dist = vec![u32::MAX; n_atoms];
     let mut queue: Vec<u32> = Vec::new();
     for a in 0..n_atoms {
-        if atom_in_ring[a] {
-            atom_min_ring_size[a] = shortest_cycle_through(&adj, a as u32, &mut dist, &mut queue);
+        if !atom_in_ring[a] {
+            continue;
         }
+        // **两遍。** 先用 [`COMMON_RING_MAX`] 跑一遍 —— 真实分子的环几乎全在这个
+        // 范围里,一遍就出结果,代价与只有小上限时一模一样。
+        //
+        // 只有那一遍找不到环的原子才付大上限那笔钱。这一层不是优化,是**必须的**:
+        // BFS 的深度上限直接是它的代价上限,而稠合体系里每根键都是环键,剪枝
+        // 之前的首轮会一直走到深度上限。上限一律用 255 时,`tests/scaling.rs` 的
+        // "单个大稠合体系(线性并苯)"那一档从 2.47 µs/原子涨到 3.16 —— 平方项。
+        let small = shortest_cycle_through(
+            &adj,
+            a as u32,
+            &bond_in_ring,
+            COMMON_RING_MAX,
+            &mut dist,
+            &mut queue,
+        );
+        atom_min_ring_size[a] = if small != 0 {
+            small
+        } else {
+            shortest_cycle_through(
+                &adj,
+                a as u32,
+                &bond_in_ring,
+                MAX_RING_SIZE,
+                &mut dist,
+                &mut queue,
+            )
+        };
     }
     debug_assert!(
         dist.iter().all(|&d| d == u32::MAX),
@@ -206,6 +255,8 @@ fn find_bridges(adj: &Adjacency) -> Vec<bool> {
 
 /// 过原子 `v` 的最短环长度;不在环中或超过 [`MAX_RING_SIZE`] 时返回 0。
 ///
+/// **返回 0 有两种意思**,调用方要问"在不在环里"得看 `atom_in_ring`。
+///
 /// 做法:把 `v` 摘掉,从它的每个邻居做一次 BFS,取任意两个邻居之间的最短距离,
 /// 环长 = 该距离 + 2。摘掉 `v` 保证得到的一定是**简单环** —— 这比"从 v 做一次
 /// BFS 再撞非树边"的经典写法更容易证明正确。
@@ -217,22 +268,38 @@ fn find_bridges(adj: &Adjacency) -> Vec<bool> {
 ///
 /// 1. `dist` / `queue` 由调用方提供并复用,不在函数内分配
 /// 2. 复位只动**本次访问过**的下标(它们全在 `queue` 里),不整体刷一遍
-/// 3. BFS 深度截到 `MAX_RING_SIZE - 2` —— 再远的点凑不出 ≤ 20 的环。
-///    没有这一条,首轮 BFS(此时 `best` 还是无穷,剪枝不生效)会走遍整个连通分量
+/// 3. **只走环键。** 过 `v` 的环只可能由环键组成,桥一根也用不上 —— 于是 BFS
+///    走不出 `v` 所在的那个环系,深度天然被环系大小卡住。先前靠的是
+///    `MAX_RING_SIZE - 2` 这个深度上限,而那让上限的值直接变成性能参数:
+///    把它从 20 抬到 255(为了让 30 元大环报得出大小),首轮 BFS 就会溜进无环的
+///    尾巴,`tests/scaling.rs` 的"很多个独立小环系"那一档当场从 1.98 µs/原子
+///    涨到 2.79。深度上限仍然留着,但它现在只管"装不装得进 `u8`",不再管代价。
 ///
 /// 三条都做之后,代价正比于 `v` 附近的局部邻域,与分子总大小无关。
 ///
 /// 约定:`dist` 进入时必须全为 `u32::MAX`,返回时恢复原样。
 /// 这条约定由调用方在**全部原子处理完之后**查一次(见 [`perceive_rings`])——
 /// 逐次检查是 O(原子数²);漏清理的项会一直留到最后,末尾查同样抓得到。
-fn shortest_cycle_through(adj: &Adjacency, v: u32, dist: &mut [u32], queue: &mut Vec<u32>) -> u8 {
-    let nbrs: Vec<u32> = adj.neighbors(v).iter().map(|&(u, _)| u).collect();
+fn shortest_cycle_through(
+    adj: &Adjacency,
+    v: u32,
+    bond_in_ring: &[bool],
+    max_size: usize,
+    dist: &mut [u32],
+    queue: &mut Vec<u32>,
+) -> u8 {
+    let nbrs: Vec<u32> = adj
+        .neighbors(v)
+        .iter()
+        .filter(|&&(_, bi)| bond_in_ring[bi as usize])
+        .map(|&(u, _)| u)
+        .collect();
     if nbrs.len() < 2 {
         return 0;
     }
 
     // 环长 = 两邻居间距 + 2,要 ≤ MAX_RING_SIZE 就得间距 ≤ MAX_RING_SIZE - 2
-    let max_dist = (MAX_RING_SIZE - 2) as u32;
+    let max_dist = (max_size - 2) as u32;
     let mut best = usize::MAX;
 
     for (i, &start) in nbrs.iter().enumerate() {
@@ -253,9 +320,12 @@ fn shortest_cycle_through(adj: &Adjacency, v: u32, dist: &mut [u32], queue: &mut
             if best != usize::MAX && dx as usize + 2 >= best {
                 continue;
             }
-            for &(y, _) in adj.neighbors(x) {
+            for &(y, bi) in adj.neighbors(x) {
                 if y == v {
                     continue; // v 已摘除
+                }
+                if !bond_in_ring[bi as usize] {
+                    continue; // 桥凑不出环,走进去只是白走
                 }
                 if dist[y as usize] == u32::MAX {
                     dist[y as usize] = dx + 1;
@@ -275,7 +345,7 @@ fn shortest_cycle_through(adj: &Adjacency, v: u32, dist: &mut [u32], queue: &mut
         }
     }
 
-    if best == usize::MAX || best > MAX_RING_SIZE {
+    if best == usize::MAX || best > max_size {
         0
     } else {
         u8::try_from(best).unwrap_or(0)
@@ -379,6 +449,53 @@ mod tests {
             "配位键不参与成环,剩下的边全变成桥"
         );
         assert!(r.atom_in_ring.iter().all(|&x| !x));
+    }
+
+    /// **环大小逐个扫过去,不只扫小环。**
+    ///
+    /// 先前这条不变量只在一张最大到六元环的表上跑,而实现里有一个 20 的上限:
+    /// 21 元以上的环 `atom_min_ring_size` 是 0,于是同一个原子同时报"在环里"
+    /// (桥判定说的)和"不在任何环中"(0 被这么读)。判据的参照侧那时写的是
+    /// `range(3, 21)` —— **与被测常量是同一个数**,两边一起给 0,一次都没红过。
+    ///
+    /// 这里断的是契约:**环有多大,`atom_min_ring_size` 就报多大**,一直到存这个
+    /// 数的字段装不下为止。上限碰不到的那一档(256 元以上)由下一条判据管。
+    #[test]
+    fn a_ring_reports_its_own_size_all_the_way_up_to_the_field_width() {
+        for n in 3..=60usize {
+            let smi = format!("C1{}1", "C".repeat(n - 1));
+            let (_, r) = perceive(&smi);
+            assert!(
+                r.atom_in_ring.iter().all(|&x| x),
+                "{n} 元环:有原子没被判成环原子"
+            );
+            for (i, &size) in r.atom_min_ring_size.iter().enumerate() {
+                assert_eq!(
+                    usize::from(size),
+                    n,
+                    "{n} 元环的第 {i} 个原子报的最小环大小是 {size}"
+                );
+            }
+        }
+    }
+
+    /// **上限之外那一档也要写下来。** 全绿的校准表会被读成"守住了"。
+    ///
+    /// 256 元以上的环装不进 `u8`,`atom_min_ring_size` 只能是 0。那一档仍然必须
+    /// 由 `atom_in_ring` 独立答对 —— 两个字段来自两个算法,大环只让其中一个失效。
+    #[test]
+    fn a_ring_too_big_for_the_field_still_knows_it_is_a_ring() {
+        let n = MAX_RING_SIZE + 40;
+        let smi = format!("C1{}1", "C".repeat(n - 1));
+        let (_, r) = perceive(&smi);
+        assert!(
+            r.atom_in_ring.iter().all(|&x| x),
+            "{n} 元环的原子没被判成环原子 —— 上限把两个字段一起打翻了"
+        );
+        assert!(
+            r.atom_min_ring_size.iter().all(|&s| s == 0),
+            "{n} 元环居然报出了大小,那 MAX_RING_SIZE 的注释就过期了"
+        );
     }
 
     /// 内部一致性:原子在环中 ⟺ 有有限的最小环大小。

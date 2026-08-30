@@ -6,7 +6,7 @@
 //! 只输出有命中的组合 —— 绝大多数组合是零命中,全写出来的话文件里
 //! 99% 是噪声。
 //!
-//! 用法见 `harness/README.md`。
+//! 用法:`dump_matches <分子.smi> <模式.txt> [分子数上限] [模式数上限]`。
 
 use std::io::{BufWriter, Write};
 

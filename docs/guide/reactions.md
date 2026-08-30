@@ -13,6 +13,8 @@ never mentioned in it; the water on the right is not in it either — that comes
 from [byproduct reconstruction](byproducts.md).*
 
 ```pycon
+>>> acid = omgkit.parse_smiles("CC(=O)O"); acid.sanitize()
+>>> amine = omgkit.parse_smiles("CCN"); amine.sanitize()
 >>> rxn = omgkit.parse_reaction("[C:1](=[O:2])[OH].[N:3]>>[C:1](=[O:2])[N:3]")
 >>> rxn.num_reactant_templates, rxn.num_product_templates
 (2, 1)

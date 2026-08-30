@@ -76,6 +76,18 @@ jobs:
       - name: 测试(debug —— 让 debug_assert 真的跑到)
         run: cargo test --workspace
 
+      # **可选 feature 里的测试也要跑到。** `omgkit-depict` 的 `raster`(出 PNG/JPEG)
+      # 是 `default = []`,上面两步一次都编不到它 —— 那 6 条测试从写下来的那天起
+      # 就没跑过,clippy 的 `-D warnings` 也照不到那个文件。**闸进得了 CI 却编不到
+      # 同样不是闸。** 接进来之后测试数 171 → 179。
+      #
+      # 不能用 `--all-features`:那会连 `omgkit-py` 的 `extension-module` 一起打开,
+      # 而它一开 `cargo test` 就链不出可执行文件(理由见那个 crate 的 Cargo.toml)。
+      - name: 测试 + clippy(raster feature —— 默认关着)
+        run: |
+          cargo clippy -p omgkit-depict --all-targets --features raster -- -D warnings
+          cargo test -p omgkit-depict --features raster
+
       # rustdoc 的断链等三项在 Cargo.toml 里已是 deny,这一步让它真的跑到。
       # **要带 `--document-private-items`**:不带的话 rustdoc 根本不给私有条目
       # 建档,指向它们的断链一条都报不出来 —— 实测漏过三条(两条指向私有 fn
@@ -163,10 +175,11 @@ jobs:
   # numpy 也钉了:只钉 RDKit 的话 pip 会自己解 numpy,而版本配错会让
   # `_ARRAY_API not found` / SIGSEGV。同样见那个文件。
   #
-  # 开发机的 `.venv` 眼下是 2022.09.5,与这里不同。这一批判据**两边喂的是同一个
-  # RDKit**(参考侧与读回侧),所以版本变化会对消,判据断的是上限而不是精确计数
-  # —— 两版都实测过退 0(2022.09.5 构型一致 498,2025.09.2 是 495,差的 3 个是
-  # 参考侧丢了 CIP 码)。判据现在会**打印它跑在哪个版本上**,别靠记。
+  # 版本钉在 `harness/requirements.lock`(2025.09.2),`harness/gates.sh` 开头那道
+  # 版本闸对不上就直接退出,所以本地与这里跑的是同一个。这一批判据**两边喂的是
+  # 同一个 RDKit**(参考侧与读回侧),断的是上限而不是精确计数 —— 换版本时那个
+  # 上限还成立(实测 2022.09.5 构型一致 498、2025.09.2 是 495,差的 3 个是参考侧
+  # 丢了 CIP 码)。判据自己会**打印它跑在哪个版本上**,别靠记。
   external:
     name: 外部实现判官(RDKit)
     runs-on: ubuntu-latest
@@ -384,7 +397,8 @@ jobs:
             harness/corpus/large.smi \
             --extra harness/corpus/hard.smi \
             --extra harness/corpus/smoke.smi \
-            --extra harness/corpus/descriptors.smi
+            --extra harness/corpus/descriptors.smi \
+            --extra harness/corpus/edge_shapes.smi
 
       # ---- 先前只在本地手动跑的那四条 ----
       #
@@ -480,13 +494,51 @@ jobs:
       # 非四面体立体(`@SP` / `@TB` / `@OH`:平面四方、三角双锥、八面体)都没有
       # —— 于是"读得回来、写不出去"这件事先前**一条判据都没守**。
       #
-      # 冒烟语料里有 6 条,`--strict` 下当场 6 条分歧。现在按 SMILES **逐条钉死**
+      # 冒烟语料里造了 6 条,`--strict` 下当场 6 条分歧。按 SMILES **逐条钉死**
       # 在 `check_write.py` 的 `NON_TETRAHEDRAL_GAP` 里,而不是设一个上限:
-      # 上限只能变松,钉死的集合**两个方向都红** —— 写出器补上任何一条,这里当场
-      # 红,逼着把它从名单里划掉;在别的分子上退化,那个分子不在名单里,照旧算分歧。
+      # 上限只能变松,钉死的集合**两个方向都红**。写出器后来把三类都补上了,
+      # 名单因此**空了** —— 双向钉的好处正在这里:空了之后它继续守着反方向
+      # (名单里有、实际写得出来的同样红),不会退化成一句没人管的过期的话。
       - name: 判官:SMILES 写出(冒烟语料,严格)
         shell: bash
         run: |
           set -euo pipefail
           cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/smoke.smi > "$RUNNER_TEMP/wsmoke.tsv"
           python harness/check_write.py "$RUNNER_TEMP/wsmoke.tsv" harness/corpus/smoke.smi --strict
+
+      # ---- 按结构挑的边界语料 ----
+      #
+      # `large.smi` 是药物样分子、`hard.smi` 是照构型难处挑的,两份跑满了仍有六档
+      # 一次都没走到 —— 2026-08-30 的三方审查读码找出九个"实现了但会静默给出错
+      # 答案"的缺陷,其中六个的最小复现落在那六档里,而当时全部判据都是绿的。
+      # **问题不在判据数量,在语料里缺那个形状。** 名单与理由见语料文件头。
+      - name: 判官:边界形状语料 —— SMILES 写出(严格)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -q -p omgkit-io --release --example write_smiles -- harness/corpus/edge_shapes.smi > "$RUNNER_TEMP/wedge.tsv"
+          python harness/check_write.py "$RUNNER_TEMP/wedge.tsv" harness/corpus/edge_shapes.smi --strict
+
+      - name: 判官:边界形状语料 —— 双键顺反的感知
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -q -p omgkit-io --release --example dump_bond_stereo -- harness/corpus/edge_shapes.smi > "$RUNNER_TEMP/ebs.tsv"
+          python harness/check_bond_stereo.py "$RUNNER_TEMP/ebs.tsv" harness/corpus/edge_shapes.smi
+
+      - name: 判官:边界形状语料 —— 写出时 E/Z 守不守恒
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -q -p omgkit-io --release --example dump_written -- harness/corpus/edge_shapes.smi > "$RUNNER_TEMP/edw.tsv"
+          python harness/check_ez.py "$RUNNER_TEMP/edw.tsv" harness/corpus/edge_shapes.smi
+
+      # **文档里的示例也要跑。** 这一整套闸先前一条都不读 `docs/`,而
+      # `mkdocs build --strict`(在 docs.yml 里)只查链接不查内容。于是代码往前走、
+      # 文档留在原地:一次文档审查找出四处"示例输出与实测不符",其中两处是凭空
+      # 编的报错回显(文档写英文 `ValueError: unclosed branch`,而实现报的是中文
+      # "括号不匹配",整个仓库都没有 `unclosed branch` 这个串)。
+      #
+      # 判据自带分母下限,少于 12 个块 / 40 条语句当场红。
+      - name: 判官:文档里的 Python 示例跑得出文档写的结果
+        run: python harness/check_docs_examples.py

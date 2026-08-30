@@ -33,7 +33,7 @@ std::fs::write("aspirin.svg", to_svg(&s, &Style::ACS_1996)).unwrap();
 For PNG and JPEG, enable the `raster` feature:
 
 ```toml
-omgkit-depict = { version = "0.1", features = ["raster"] }
+omgkit-depict = { version = "0.0.6", features = ["raster"] }
 ```
 
 ```rust
@@ -130,7 +130,7 @@ producing a picture whose configuration cannot be read, `Depiction` says so:
 
 ![Bridged systems report degraded](../assets/degraded.svg)
 
-*Both of these are drawn, and both report `degraded = 1`. The report is about
+*Both of these are drawn, and both report one entry in `degraded`. The report is about
 how the layout was reached — ring systems that fell back to spring relaxation —
 not a claim that the picture is wrong.*
 
@@ -139,7 +139,8 @@ not a claim that the picture is wrong.*
 | `degraded` | ring systems that fell back to spring relaxation — bond lengths and angles are no longer guaranteed |
 | `unresolved` | atom pairs still overlapping after collision relief |
 | `crossings` | bond pairs still crossing |
-| `unwedged` | stereocentres whose configuration could not be drawn |
+| `unwedged` | stereocentres whose configuration could not be drawn — coordination geometry (`@SP`/`@TB`/`@OH`) is always here, this version cannot draw it |
+| `misdrawn_stereo` | double bonds whose **drawn geometry disagrees with the recorded one**. A ring is laid out as a convex polygon, so a double bond inside a ring always comes out *cis*; a *trans* one in an eight-membered-or-larger ring therefore cannot be drawn, and lands here |
 
 ```rust
 let d = generate(&m, &style);
@@ -147,6 +148,24 @@ if !d.is_clean() {
     // your call: render anyway, fall back, or ask a human
 }
 ```
+
+From Python the same five lists come back from
+[`Mol.depiction_report()`](../api/python.md#omgkit.Mol.depiction_report):
+
+```pycon
+>>> m = omgkit.parse_smiles("C1CCCCCCC/C=C/1"); m.sanitize()
+>>> m.depiction_report()["misdrawn_stereo"]      # trans in an eight-ring
+[8]
+>>> m = omgkit.parse_smiles("CCO"); m.sanitize()
+>>> all(v == [] for v in m.depiction_report().values())
+True
+```
+
+!!! warning "`to_molblock_2d` does not raise on any of these"
+
+    A picture that says something false about the molecule is still a valid
+    molblock. If you are writing files that other people will read, check the
+    report — nothing else will.
 
 Collision relief only uses **flips** — mirroring one side of a rotatable bond.
 That is the only operator that preserves bond lengths and angles exactly.

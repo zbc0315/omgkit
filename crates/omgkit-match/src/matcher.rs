@@ -54,8 +54,8 @@ pub struct MatchOptions {
     /// # 为什么摆成显式选项
     ///
     /// 这个开关的影响面很大:2000 个分子 × 776 条模式里,开与不开结果有差别的
-    /// 组合占 **23%**。这种规模的分歧不能由一个默认值悄悄定下,所以做成必须
-    /// 填的字段,逼每个调用点自己表态。
+    /// 组合占 **23%**。这种规模的分歧值得每个调用点自己想一遍 —— 不过
+    /// [`MatchOptions`] 有 [`Default`],所以"想一遍"不是类型强制的,只是约定。
     ///
     /// 默认 **`true`(判)**:作者写了 `[C@]` 或 `/C=C/` 却被忽略时不会报错,
     /// 只会悄悄多出一批匹配 —— 那种错要等到下游才暴露,而且很难回溯。
@@ -79,10 +79,6 @@ impl Default for MatchOptions {
 /// 一次匹配:`mapping[i]` 是查询原子 `i` 对应的目标原子。
 pub type Mapping = Vec<u32>;
 
-/// 找出查询在分子中的全部匹配。
-///
-/// `props` 必须由**同一个** `mol` 算出来 —— 两者不一致时匹配结果没有意义,
-/// 而且不会报错。
 /// 一次搜索花了多少工夫。
 ///
 /// # 为什么要把这个数交出来
@@ -512,7 +508,7 @@ fn chirality_ok(query: &QueryMol, mapping: &Mapping, mol: &MolBuilder) -> bool {
         }
         let mut query_side = imaged.clone();
         query_side.extend(extra);
-        let Some(odd) = permutation_is_odd(&query_side, &stored) else {
+        let Some(odd) = omgkit_core::permutation_is_odd(&query_side, &stored) else {
             continue;
         };
         let effective = if odd { got.inverted() } else { got };
@@ -521,24 +517,6 @@ fn chirality_ok(query: &QueryMol, mapping: &Mapping, mol: &MolBuilder) -> bool {
         }
     }
     true
-}
-
-/// `from` → `to` 置换的宇称。两者不是同一多重集时返回 `None`。
-fn permutation_is_odd(from: &[u32], to: &[u32]) -> Option<bool> {
-    if from.len() != to.len() {
-        return None;
-    }
-    let mut cur = from.to_vec();
-    let mut swaps = 0usize;
-    for i in 0..to.len() {
-        if cur[i] == to[i] {
-            continue;
-        }
-        let j = (i + 1..cur.len()).find(|&j| cur[j] == to[i])?;
-        cur.swap(i, j);
-        swaps += 1;
-    }
-    Some(swaps % 2 == 1)
 }
 
 #[allow(clippy::too_many_arguments)]

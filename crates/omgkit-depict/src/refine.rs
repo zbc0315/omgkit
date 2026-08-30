@@ -538,7 +538,9 @@ pub(crate) fn crossings(mol: &MolBuilder, pos: &BTreeMap<u32, Point2>) -> Vec<(u
 ///
 /// # 两处平局都不许照抄 RDKit
 ///
-/// RDKit 的 `flipAboutSpiroCenter` 固定翻 `rings[0]`,而 `rings` 来自
+/// 参照实现在这一档只有 `flipAboutBond`(**没有** `flipAboutSpiroCenter` 这个
+/// 函数 —— 先前这里把一套存储序取舍归给了一个不存在的实现)。它固定翻
+/// `rings[0]`,而 `rings` 来自
 /// `getRingInfo()->atomRings()` 是**存储序**;要翻哪一侧又是从
 /// `atomNeighbors` 的第一个取的,同样是存储序。照抄这两处,同一个分子换种
 /// 写法就会翻不同的环、得到不同的图。这里两处都按规范秩定。

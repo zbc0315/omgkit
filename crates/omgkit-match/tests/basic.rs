@@ -315,3 +315,27 @@ fn a_direction_written_on_an_aromatic_bond_still_matches() {
         "键级放宽了,几何约束不能跟着丢"
     );
 }
+
+/// **总价只有一处实现。** 稠环的稠合位是这条的压力点。
+///
+/// `omgkit-match` 先前自己写了一份"键级和四舍五入加氢数"。它对**两根**芳香键
+/// 的原子与 `omgkit-core` 那份一致,而稠合位有**三根**芳香键:4.5 进位成 5,于是
+/// 萘的两个稠合碳被判成五价 —— 任何用 `[v4]` 挑碳的 SMARTS 在稠环上都漏掉稠合位。
+///
+/// 断的是**性质**,不是当时那份实现的输出:芳香碳一律四价,五价的一个都不该有。
+#[test]
+fn a_fused_aromatic_carbon_is_tetravalent_like_every_other_carbon() {
+    for (smi, carbons) in [
+        ("c1ccccc1", 6),                // 苯:全是两根芳香键
+        ("c1ccc2ccccc2c1", 10),         // 萘:两个稠合位有三根
+        ("c1ccc2c(c1)ccc1ccccc12", 14), // 蒽/菲骨架:四个稠合位
+        ("c1ccc2[nH]ccc2c1", 8),        // 吲哚:杂环也一样
+    ] {
+        assert_eq!(count("[v5;#6]", smi), 0, "{smi}: 有芳香碳被判成五价");
+        assert_eq!(
+            count("[v4;#6]", smi),
+            carbons,
+            "{smi}: 四价碳的个数不对 —— 稠合位多半又被算成五价了"
+        );
+    }
+}

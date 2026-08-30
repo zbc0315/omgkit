@@ -50,14 +50,18 @@ impl BondOrder {
     }
 
     /// SMILES 中的键符号。单键与芳香键按惯例省略,故返回 `None`。
+    ///
+    /// **配位键也返回 `None`** —— 它的符号是 `->` / `<-` 两个字符,而且**带方向**,
+    /// 装不进一个 `char`。先前这里返回 `'>'`,而单独一个 `>` 不是合法的 SMILES
+    /// 键符号(解析器只认 `->` 与 `<-`),照它写出去的串读不回来。
+    /// 写出器走的是自己那条带方向的分支,不经过这里。
     #[must_use]
     pub fn smiles_symbol(self) -> Option<char> {
         match self {
-            Self::Single | Self::Aromatic | Self::Unspecified => None,
+            Self::Single | Self::Aromatic | Self::Unspecified | Self::Dative => None,
             Self::Double => Some('='),
             Self::Triple => Some('#'),
             Self::Quadruple => Some('$'),
-            Self::Dative => Some('>'),
         }
     }
 }
@@ -186,9 +190,15 @@ pub enum BondStereo {
     /// 未指定
     #[default]
     None = 0,
-    /// Z(CIP 优先级较高的取代基同侧)
+    /// Z(CIP 优先级较高的取代基同侧)。
+    ///
+    /// **本仓库自己从不产出 Z/E** —— 它要 CIP 排序,而这里没有实现 CIP。
+    /// 两个变体留着,是因为读外部数据(molblock 的立体标志、别家导出的基准)
+    /// 时会遇到它们,而把它们折成 `Cis`/`Trans` 等于替作者改了话。
+    /// 消费它们的地方要自己想清楚:`omgkit-conf` 的界矩阵把 Z 当 Cis 用,
+    /// 那是**几何上的**近似,在那个上下文里成立,不是说两者等价。
     Z = 1,
-    /// E
+    /// E。见 [`Z`](Self::Z) 那条说明。
     E = 2,
     /// 顺(相对于记录的参照原子,不涉及 CIP)
     Cis = 3,

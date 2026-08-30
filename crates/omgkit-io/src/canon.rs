@@ -376,7 +376,7 @@ fn stereo_descriptor(mol: &MolBuilder, a: u32, classes: &[u32]) -> u8 {
     by_class.sort_unstable_by_key(|&(c, _)| c);
     let class_order: Vec<u32> = by_class.iter().map(|&(_, b)| b).collect();
 
-    let odd = crate::smiles::permutation_is_odd(&storage, &class_order).unwrap_or(false);
+    let odd = omgkit_core::permutation_is_odd(&storage, &class_order).unwrap_or(false);
     let tag = if odd {
         at.chiral_tag.inverted()
     } else {

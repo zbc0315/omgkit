@@ -166,7 +166,7 @@ means and when the answer is trustworthy.
 >>> conf
 <omgkit.Conformer atoms=13 energy=0.000e0 converged=True chiral=1/1>
 >>> conf.coords[0]
-(-1.1906..., -0.8985..., -0.0732...)
+(-1.1906..., -0.8985..., -0.0731...)
 ```
 
 No random seed and no retry loop — the same molecule always gives the same

@@ -28,7 +28,7 @@ L-alanine
   2  1  1  6  0  0  0
   2  3  1  0  0  0  0
   2  4  1  0  0  0  0
-  4  5  2  0  0  0  0
+  4  5  2  3  0  0  0
   4  6  1  0  0  0  0
 M  END
 ```
@@ -77,7 +77,8 @@ by whether any `z` is non-zero.
 ## Reading
 
 ```pycon
->>> rec = omgkit.parse_molblock(open("L-alanine.mol").read())
+>>> block = m.to_molblock_2d(title="L-alanine")   # or: open("L-alanine.mol").read()
+>>> rec = omgkit.parse_molblock(block)
 >>> rec
 <omgkit.Molblock 6 atoms 2D "L-alanine">
 >>> rec.is_3d, rec.title
@@ -162,7 +163,13 @@ for i, rec in enumerate(omgkit.read_sdf(open("library.sdf").read())):
     `block` set to `None`, and the records after it read fine.
 
     ```pycon
-    >>> recs = omgkit.read_sdf(text)      # three records, the last one truncated
+    >>> one = omgkit.parse_smiles("CCO"); one.sanitize()
+    >>> two = omgkit.parse_smiles("c1ccccc1"); two.sanitize()
+    >>> def record(mol, smi):
+    ...     return mol.to_molblock_2d() + "> <SMILES>" + chr(10) + smi + chr(10) * 2 + "$$$$" + chr(10)
+    >>> text = record(one, "CCO") + record(two, "c1ccccc1")
+    >>> text += one.to_molblock_2d()[:40]     # third record: cut off mid-file
+    >>> recs = omgkit.read_sdf(text)          # three records, the last one truncated
     >>> [(r.error, r.data) for r in recs]
     [(None, [('SMILES', 'CCO')]),
      (None, [('SMILES', 'c1ccccc1')]),
@@ -176,7 +183,7 @@ for i, rec in enumerate(omgkit.read_sdf(open("library.sdf").read())):
 ### Data fields are a list of pairs, not a dict
 
 ```pycon
->>> rec.data
+>>> recs[0].data
 [('SMILES', 'CCO')]
 ```
 

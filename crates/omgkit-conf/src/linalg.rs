@@ -385,7 +385,7 @@ mod tests {
         assert_eq!(max_nan_wins(3.0, 1.0), 3.0);
         assert_eq!(max_nan_wins(0.0, 0.0), 0.0);
         assert_eq!(max_nan_wins(f64::INFINITY, 1e300), f64::INFINITY);
-        // 两个方向都要试:`f64::max` 正是两个方向都washed
+        // 两个方向都要试:`f64::max` 正是两个方向都会把 NaN 洗掉
         assert!(max_nan_wins(0.0, f64::NAN).is_nan(), "NaN 在右");
         assert!(max_nan_wins(f64::NAN, 0.0).is_nan(), "NaN 在左");
         assert!(max_nan_wins(f64::NAN, f64::NAN).is_nan());

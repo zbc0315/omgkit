@@ -17,6 +17,7 @@ exclude_docs: |
   /design.md
   /requirements.txt
   /sync_sources.py
+  /figures/make_figures.py
 
 site_name: omgkit
 site_description: Cheminformatics toolkit in Rust with Python bindings

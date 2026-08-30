@@ -244,9 +244,12 @@ fn layout_component(
             }
             let (local, deg) = rings::layout_local(mol, &systems[s], ranks, over);
             note_degraded(deg, local.keys().copied(), &mut degraded, &mut off_grid);
-            // **求和的次序必须定死。** `pos` 是 BTreeMap,它的迭代顺序每个
-            // 进程随机播种,而这里是浮点求和 —— 同一个分子同一份代码,两次
-            // 运行就可能得到方向差一点点的 `away`,进而摆出不同的图。
+            // **求和的次序必须定死 —— 按秩,不按存储下标。**
+            //
+            // `pos` 是 `BTreeMap`,迭代顺序按键定序,是确定的(会随机播种的是
+            // `HashMap`,见本文件模块注释);这里要挡的不是进程间的不确定,是
+            // **写法依赖**:同一个分子换个 SMILES 写法,原子的存储下标就变,
+            // 浮点求和的次序跟着变,`away` 的方向差一点点,图就摆得不一样。
             // 实测:全量语料的违例数在 141/142 之间来回跳。
             let mut placed: Vec<(u32, Point2)> =
                 pos.iter().map(|(k, v)| (ranks[*k as usize], *v)).collect();

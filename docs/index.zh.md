@@ -12,7 +12,7 @@ import omgkit
 
 m = omgkit.parse_smiles("OC(=O)c1ccccc1N")
 m.sanitize()
-m.to_canonical_smiles()          # 'Nc1ccccc1C(=O)O'
+m.to_canonical_smiles()          # 'c1cccc(c1C(O)=O)N'
 ```
 
 !!! warning "状态:开发中"
@@ -76,12 +76,12 @@ RDKit ETKDGv3 2025.09.2 失败 36 个(0.41%),omgkit 失败 1 个(0.01%)。
 
     ```toml
     [dependencies]
-    omgkit-core   = "0.0.5"
-    omgkit-io     = "0.0.5"
-    omgkit-chem   = "0.0.5"
-    omgkit-match  = "0.0.5"
-    omgkit-depict = "0.0.5"
-    omgkit-conf   = "0.0.5"
+    omgkit-core   = "0.0.6"
+    omgkit-io     = "0.0.6"
+    omgkit-chem   = "0.0.6"
+    omgkit-match  = "0.0.6"
+    omgkit-depict = "0.0.6"
+    omgkit-conf   = "0.0.6"
     ```
 
 按需取用,每一层只依赖它下面的层。完整说明见[安装](getting-started/install.md)。

@@ -34,7 +34,7 @@ m.to_canonical_smiles()          # 'c1cccc(c1C(O)=O)N'
 | **Read and write `.mol` / `.sdf`** | V2000 molblocks and multi-record SDF, in 2D and 3D, with stereochemistry read and written both ways |
 | **Draw structures** | 2D coordinates and SVG/PNG/JPEG output, in two drawing styles — with an explicit report of anything it could not draw well |
 | **Generate 3D structures** | One deterministic conformer per molecule — no random seed, no retry loop |
-| **Featurize for ML** | The sixteen per-atom and per-bond descriptors a graph neural network reads, Gasteiger partial charges included |
+| **Featurize for ML** | Twelve per-atom and seven per-bond descriptors a graph neural network reads, Gasteiger partial charges included |
 | **Work in batches** | A columnar `MolBatch` with zero-copy per-molecule views |
 
 ## What makes it different
@@ -85,12 +85,12 @@ to prove it does not pass vacuously. The whole suite runs on every push. See
 
     ```toml
     [dependencies]
-    omgkit-core   = "0.0.5"
-    omgkit-io     = "0.0.5"
-    omgkit-chem   = "0.0.5"
-    omgkit-match  = "0.0.5"
-    omgkit-depict = "0.0.5"
-    omgkit-conf   = "0.0.5"
+    omgkit-core   = "0.0.6"
+    omgkit-io     = "0.0.6"
+    omgkit-chem   = "0.0.6"
+    omgkit-match  = "0.0.6"
+    omgkit-depict = "0.0.6"
+    omgkit-conf   = "0.0.6"
     ```
 
 Take only the layers you need; each depends only on the ones below it.
@@ -103,7 +103,7 @@ Full instructions in [Installation](getting-started/install.md).
 - **[Quickstart](getting-started/quickstart.md)** — parse, sanitize, match and
   react in five minutes
 - **[Guides](guide/index.md)** — one page per capability, task first
-- **[Descriptors for ML](guide/descriptors.md)** — the sixteen values a graph
+- **[Descriptors for ML](guide/descriptors.md)** — the per-atom and per-bond values a graph
   model reads, and why they come back as names rather than one-hot vectors
 - **[Python API](api/python.md)** — every callable, with signatures
 - **[Developing](dev/index.md)** — build, test, and the full pre-push gate suite

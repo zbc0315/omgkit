@@ -21,7 +21,7 @@ that cannot be kekulized.
 | Conjugation | which bonds are part of a conjugated system |
 | Hybridization | per-atom hybridization state |
 
-Then a final step converts the SMILES *directional* bonds (`/` and `\\`) into
+Then a final step converts the SMILES *directional* bonds (`/` and `\`) into
 the double bonds' own cis/trans property. Direction is a property of the
 single bonds around the double bond in the input syntax; geometry is a property
 of the double bond itself. Keeping the two apart is what lets the writer put

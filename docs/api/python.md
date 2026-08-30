@@ -43,7 +43,7 @@ configure; the same molecule always comes back with the same coordinates.
 >>> conf.mol.num_atoms          # 13, not 6 — generation adds explicit hydrogens
 13
 >>> conf.coords[0]
-(-1.191..., -0.899..., -0.073...)
+(-1.1906..., -0.8985..., -0.0731...)
 ```
 
 !!! warning "The coordinates belong to `conf.mol`, not to the molecule you called it on"
@@ -81,13 +81,15 @@ byte-identical output.
 contents of a `.mol` file, or one record of an `.sdf` up to its `$$$$`:
 
 ```pycon
->>> rec = omgkit.parse_molblock(open("aminoethanol.mol").read())
+>>> m = omgkit.parse_smiles("C[C@H](N)O"); m.sanitize()
+>>> block = m.to_molblock_2d(title="C[C@H](N)O")   # or: open("aminoethanol.mol").read()
+>>> rec = omgkit.parse_molblock(block)
 >>> rec
 <omgkit.Molblock 4 atoms 2D "C[C@H](N)O">
 >>> rec.mol.to_canonical_smiles()   # the wedge bond in the file is what makes this @
 'C[C@H](N)O'
 >>> rec.is_3d, len(rec.coords), rec.coords[0]
-(False, 4, (-1.299, -0.75, 0.0))
+(False, 4, (-0.866, -0.5, 0.0))
 ```
 
 !!! info "It sanitizes for you — and it has to"
@@ -215,9 +217,8 @@ character:
 >>> omgkit.parse_smiles("CC(C")
 Traceback (most recent call last):
   ...
-ValueError: unclosed branch
-    CC(C
-      ^
+ValueError: CC(C
+    ^ 括号不匹配
 ```
 
 !!! warning "`sanitize` is in place and may leave a partial result"

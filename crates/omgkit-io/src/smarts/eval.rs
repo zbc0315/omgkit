@@ -54,7 +54,8 @@ pub struct AtomProps {
     pub valence: u32,
     /// `R` —— 该原子属于几个环
     pub ring_count: u32,
-    /// `r` —— 最小环的大小;0 表示不在任何环中
+    /// `r` —— 最小环的大小。**0 表示"没有这个数"**(不在环里,或者环大过实现的
+    /// 上限),不等于"不在环中" —— 后者要读 [`ring_count`](Self::ring_count)。
     pub min_ring_size: u32,
     /// `x` —— 该原子上的环键数
     pub ring_bonds: u32,
@@ -134,7 +135,14 @@ fn prim_matches(p: &AtomPrim, a: &AtomProps, recursive: &mut dyn FnMut(&QueryMol
         // 裸写的 `R` / `x` 是"任意非零",带数字才比具体值
         AtomPrim::RingCount(n) => n.map_or(a.ring_count > 0, |k| a.ring_count == k),
         AtomPrim::RingBondCount(n) => n.map_or(a.ring_bonds > 0, |k| a.ring_bonds == k),
-        AtomPrim::RingSize(n) => n.map_or(a.min_ring_size > 0, |k| a.min_ring_size == k),
+        // `[r]` 与 `[r0]` 问的是"在不在环里",要读环成员数而不是最小环大小 ——
+        // 后者对大过上限的环是 0,而 0 在那个字段里是"没有数",不是"不在环中"。
+        // 混用过一次:30 元环的原子同时命中 `[R1]` 与 `[r0]`。
+        AtomPrim::RingSize(n) => match *n {
+            None => a.ring_count > 0,
+            Some(0) => a.ring_count == 0,
+            Some(k) => a.min_ring_size == k,
+        },
         AtomPrim::Charge(c) => a.charge == *c,
         AtomPrim::Isotope(i) => a.isotope == *i,
         // 映射号是**标签不是条件**。`[C:99]` 匹配任何碳,与目标原子自己的

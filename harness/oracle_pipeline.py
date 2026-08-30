@@ -171,8 +171,11 @@ def encode_atoms_l2(mol) -> list[list[int]]:
         min_ring = 0
         if a.IsInRing():
             try:
-                sizes = [s for s in range(3, 21) if ri.IsAtomInRingOfSize(idx, s)]
-                min_ring = sizes[0] if sizes else 0
+                # **不许写成 `range(3, 上限)`。** 先前这里是 `range(3, 21)`,
+                # 与被测的 `MAX_RING_SIZE = 20` 是同一个数,于是 21 元以上的环
+                # 两边一起给 0,判据永远打不红 —— 30 元环的原子在被测实现里
+                # 同时报"在环里"和"不在任何环中",这条判据一次都没看见。
+                min_ring = ri.MinAtomRingSize(idx)
             except RuntimeError:
                 min_ring = -1  # 环感知步骤未运行
         out.append(

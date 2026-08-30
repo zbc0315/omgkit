@@ -101,7 +101,8 @@ pub fn genuine_tetrahedral(mol: &MolBuilder) -> Vec<bool> {
 /// `/` 与 `\` 写什么都不改变几何。
 ///
 /// 八元是化学事实,不是拍脑袋的阈值:反式环辛烯是能分离出来的最小反式环烯,
-/// 七元及以下的反式在几何上根本搭不起来。外部实现(RDKit `MinBondRingSize < 8`)
+/// 七元及以下的反式在几何上根本搭不起来。外部实现
+/// (RDKit `Chirality::minRingSizeForDoubleBondStereo`,`Chirality.h:31`)
 /// 用的是同一条线 —— 实测四到七元一律不标、八元起才标。
 const MIN_STEREOGENIC_RING: usize = 8;
 
@@ -542,7 +543,9 @@ pub fn assign_chirality_2d(mol: &mut MolBuilder, coords: &[[f64; 3]], wedges: &[
 /// 这与 `omgkit_conf::chiral::center_volume` 是同一个量、同一个号 ——
 /// 那边把它标定过:`@` 对应正、`@@` 对应负,真实构象上 127/127 与 120/120。
 /// 两处的一致由 `omgkit-conf` 里的
-/// `the_center_volume_convention_agrees_with_reading_it_back` 钉住。
+/// `omgkit_conf::chiral` 里的 `写出去的号与读回来的标记是同一套` 钉住 ——
+/// 那条测试直接调本模块的 `assign_chirality_3d`,把回路闭上了。
+/// **跨 crate 的引用要记住归属**:只跑 `cargo test -p omgkit-io` 时这条约定是敞着的。
 ///
 /// **不用四配体那个行列式**(`det[l₁−l₀, l₂−l₀, l₃−l₀]`,楔形那条路在用)。
 /// 它完全不看中心原子在哪:中心被挤到配体四面体外面(伞形翻转)时它一点不变,
@@ -716,11 +719,6 @@ pub fn cis_trans_from_points(
     })
 }
 
-/// 这根双键是不是立体源,是的话两侧各挑一个参照原子。
-///
-/// **只管资格与参照,不碰几何** —— 二维那条路(投影同侧/异侧)与三维那条路
-/// (二面角)接在它后面。资格判断各写一遍的话,同一根键会在一种坐标下算立体源、
-/// 另一种下不算,而那种差别不报错。
 /// 这根双键**几何上分得出顺反,而分子里还没有顺反信息**。
 ///
 /// 两处在用,而且必须是同一个判断:
@@ -782,6 +780,11 @@ pub fn unspecified_cis_trans(mol: &MolBuilder) -> Vec<bool> {
         .collect()
 }
 
+/// 这根双键是不是立体源,是的话两侧各挑一个参照原子。
+///
+/// **只管资格与参照,不碰几何** —— 二维那条路(投影同侧/异侧)与三维那条路
+/// (二面角)接在它后面。资格判断各写一遍的话,同一根键会在一种坐标下算立体源、
+/// 另一种下不算,而那种差别不报错。
 fn stereo_candidate(
     mol: &MolBuilder,
     unknown: &[bool],
