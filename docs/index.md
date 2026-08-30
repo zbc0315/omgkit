@@ -85,12 +85,12 @@ to prove it does not pass vacuously. The whole suite runs on every push. See
 
     ```toml
     [dependencies]
-    omgkit-core   = "0.0.4"
-    omgkit-io     = "0.0.4"
-    omgkit-chem   = "0.0.4"
-    omgkit-match  = "0.0.4"
-    omgkit-depict = "0.0.4"
-    omgkit-conf   = "0.0.4"
+    omgkit-core   = "0.0.5"
+    omgkit-io     = "0.0.5"
+    omgkit-chem   = "0.0.5"
+    omgkit-match  = "0.0.5"
+    omgkit-depict = "0.0.5"
+    omgkit-conf   = "0.0.5"
     ```
 
 Take only the layers you need; each depends only on the ones below it.
