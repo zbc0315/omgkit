@@ -14,6 +14,12 @@ experimental geometry.
 (-1.1906..., -0.8985..., -0.0731...)
 ```
 
+![Three conformers drawn in the ball-and-stick style](../assets/three-gallery.svg)
+
+*Coordinates from `Mol.conformer()`, drawn by omgkit — the ring puckers and the
+substituent orientations are what the numbers below actually contain. Drawing
+them is [3D molecule figures](depict3d.md).*
+
 ## It is deterministic
 
 **There is no random seed, and there is no retry loop.** The same molecule
@@ -161,6 +167,12 @@ same molecule twice gives byte-identical output.
 
 Reading such a file back gives the stereochemistry back too; see
 [Reading and writing `.mol` and `.sdf` files](molfiles.md).
+
+## Drawing it
+
+[`Conformer.to_svg()`](../api/python.md#omgkit.Conformer.to_svg) draws the
+conformer as a space-filling, ball-and-stick, stick or wireframe figure — see
+[3D molecule figures](depict3d.md).
 
 ## Errors
 

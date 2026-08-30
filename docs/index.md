@@ -66,6 +66,13 @@ distance table turns out to be unsatisfiable. On the same 8831-molecule corpus,
 RDKit ETKDGv3 2025.09.2 fails on 36 molecules (0.41%) and omgkit on 1 (0.01%).
 See [3D structures](guide/conformers.md).
 
+**And it draws them.** Space-filling, ball-and-stick, stick and wireframe, in
+CPK colours, with the viewpoint set from the molecule's principal axes — and
+never mirrored, because in a 3D figure the configuration is the coordinates
+themselves. See [3D molecule figures](guide/depict3d.md).
+
+![Aspirin in four 3D styles](assets/three-styles.svg)
+
 **Every claim has a judge behind it.** Correctness is not asserted, it is
 checked record by record against an external implementation, and each judge has
 to prove it does not pass vacuously. The whole suite runs on every push. See
@@ -85,12 +92,12 @@ to prove it does not pass vacuously. The whole suite runs on every push. See
 
     ```toml
     [dependencies]
-    omgkit-core   = "0.0.6"
-    omgkit-io     = "0.0.6"
-    omgkit-chem   = "0.0.6"
-    omgkit-match  = "0.0.6"
-    omgkit-depict = "0.0.6"
-    omgkit-conf   = "0.0.6"
+    omgkit-core   = "0.0.7"
+    omgkit-io     = "0.0.7"
+    omgkit-chem   = "0.0.7"
+    omgkit-match  = "0.0.7"
+    omgkit-conf   = "0.0.7"
+    omgkit-depict = "0.0.7"
     ```
 
 Take only the layers you need; each depends only on the ones below it.

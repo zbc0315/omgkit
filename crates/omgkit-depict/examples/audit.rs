@@ -708,6 +708,11 @@ fn fingerprint(s: &Scene) -> Vec<String> {
             Primitive::Wedge { from, to, .. } => format!("W {} {}", q(*from), q(*to)),
             Primitive::Hash { from, to, .. } => format!("H {} {}", q(*from), q(*to)),
             Primitive::Text { at, runs, .. } => format!("T {} {runs:?}", q(*at)),
+            // 这份审计跑的是**二维**结构式那条路,`render::scene` 一根球棍也
+            // 不发。真收到就说明审计拿错了场景,指纹会静默地把两种图混在一起比。
+            Primitive::Ball { .. } | Primitive::Stick { .. } => {
+                unreachable!("二维审计收到了三维图元 —— 场景拿错了")
+            }
         })
         .collect();
     v.sort();
@@ -1180,6 +1185,10 @@ fn inside_canvas(m: &MolBuilder, d: &omgkit_depict::Depiction, s: &Scene, style:
                 ]
             }
             Primitive::Text { .. } => continue, // 文字单独走下面那段
+            // 同上:二维审计不该见到三维图元。
+            Primitive::Ball { .. } | Primitive::Stick { .. } => {
+                unreachable!("二维审计收到了三维图元 —— 场景拿错了")
+            }
         };
         for (p, rx, ry) in pts {
             if p.x - rx < -0.01

@@ -162,6 +162,13 @@ Two methods, for the two kinds of file:
 | **2D** | [`Mol.to_molblock_2d`](#omgkit.Mol.to_molblock_2d) | wedge bonds (column 4 of the bond block) |
 | **3D** | [`Conformer.to_molblock`](#omgkit.Conformer.to_molblock) | the coordinates themselves |
 
+To draw the conformer instead of writing it out,
+[`Conformer.to_svg`](#omgkit.Conformer.to_svg) gives a space-filling,
+ball-and-stick, stick or wireframe figure, and
+[`Conformer.depiction_3d_report`](#omgkit.Conformer.depiction_3d_report) tells
+you where each atom landed on that canvas — see
+[3D molecule figures](../guide/depict3d.md).
+
 ```python
 open("alanine.mol", "w").write(
     omgkit.parse_smiles("C[C@H](N)C(=O)O").to_molblock_2d(title="alanine")

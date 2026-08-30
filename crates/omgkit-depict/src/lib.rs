@@ -127,6 +127,9 @@ pub mod hydrogens;
 pub mod label;
 pub mod layout;
 pub mod orient;
+/// Jmol 的 CPK 元素配色 —— 三维图按元素上色用的那张表。
+pub mod palette;
+mod palette_data;
 // 位图输出(PNG / JPEG)。模块自己的 `//!` 已经写清楚了 —— 这里再挂一层 `///`
 // 的话,两段文档会合并,而合并后整段的链接是按**外层**(crate 根)的作用域解析的,
 // 于是 `[`to_png`]` 这类同模块内的链接全部解析不了,`cargo doc` 直接报错。
@@ -144,6 +147,7 @@ pub mod style;
 pub mod svg;
 /// 桥环骨架的预存坐标表。见模块文档。
 pub mod templates;
+pub mod three;
 
 use std::collections::BTreeMap;
 
@@ -677,6 +681,9 @@ mod tests {
                 // 楔形分方向:窄端宽端不是一回事
                 render::Primitive::Wedge { from, to, .. } => format!("W {} {}", q(*from), q(*to)),
                 render::Primitive::Hash { from, to, .. } => format!("H {} {}", q(*from), q(*to)),
+                render::Primitive::Ball { .. } | render::Primitive::Stick { .. } => {
+                    unreachable!("二维那条路的场景里没有球棍 —— 收到就说明拿错了场景")
+                }
                 // **文本连内容一起比。** 只比落点的话,`OH` 变成 `HO`、
                 // 竖排翻成横排这类退化看不见 —— 而那正是坐标全同、图元不同的
                 // 另一大类。

@@ -95,6 +95,19 @@ jobs:
       - name: 文档
         run: cargo doc --workspace --no-deps --document-private-items
 
+      # **CPK 配色表与生成它的脚本没脱钩。** `crates/omgkit-depict/src/palette_data.rs`
+      # 是从 `harness/params/jmol_colors.tsv` 生成的。手改一个字节不会有任何报错,
+      # 只会让某种元素在三维图里穿别人的衣服 —— 而"图上颜色不对"没人会去查表。
+      # 重生成一遍再逐字节比,与 `check_baseline_schema.py` 守基准是同一招。
+      #
+      # 生成器只用标准库,所以这一步不必等 `external` 那个装了 RDKit 的 job。
+      - name: 判官:CPK 配色表与生成它的脚本没脱钩
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 harness/gen_palette.py --out "$RUNNER_TEMP/palette_data.rs"
+          diff -u crates/omgkit-depict/src/palette_data.rs "$RUNNER_TEMP/palette_data.rs"
+
       # ---- omgkit-conf 的三个外部判官 ----
       #
       # **闸不进 CI 就不是闸。** 这三条先前只在本地手动跑,于是"光滑化与 RDKit
@@ -532,6 +545,28 @@ jobs:
           set -euo pipefail
           cargo run -q -p omgkit-io --release --example dump_written -- harness/corpus/edge_shapes.smi > "$RUNNER_TEMP/edw.tsv"
           python harness/check_ez.py "$RUNNER_TEMP/edw.tsv" harness/corpus/edge_shapes.smi
+
+      # **三维分子图。** 导出的是产品真正吐出来的那段 SVG,判官从里面把圆和线
+      # 读回来,再拿坐标、旋转矩阵、RDKit 的范德华半径、Jmol 的配色表独立算一遍
+      # 该是什么样 —— 不读我们自己算的中间量,那等于自己跟自己比。
+      #
+      # 400 个分子 × 4 套样式。全语料(8831)要十几分钟、导出上 G,而这一条判的是
+      # 几何与转录、不是统计量:400 个分子上有 40525 对重叠球、73552 段圆柱、
+      # 476 根并排的多重键、12 种元素,该抓的都抓得住。
+      #
+      # 变异实测(全在 400 个分子上打红):碳改成 Rasmol 的灰、球半径 23%→25%、
+      # 画家算法反着排、视角行列式取 −1、键两半同色、并排方向不投到屏幕平面、
+      # 二阶矩的累加次序退回按秩 —— 最后那一条只有全语料抓得住,十个分子的
+      # 单元判据够不着。
+      - name: 判官:三维分子图(圆与线从 SVG 反读)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -q -p omgkit-depict --release --example dump_depict3d -- harness/corpus/large.smi 400 > "$RUNNER_TEMP/three.jsonl"
+          python harness/check_depict3d.py "$RUNNER_TEMP/three.jsonl"
+
+      - name: 判官:三维图的 Python 绑定(与 Rust 逐字节比)
+        run: python harness/check_python_depict3d.py "$RUNNER_TEMP/three.jsonl"
 
       # **文档里的示例也要跑。** 这一整套闸先前一条都不读 `docs/`,而
       # `mkdocs build --strict`(在 docs.yml 里)只查链接不查内容。于是代码往前走、

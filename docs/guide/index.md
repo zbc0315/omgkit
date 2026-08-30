@@ -38,6 +38,11 @@ which crate the code lives in.
     2D coordinates and SVG/PNG/JPEG output, the two drawing styles, and what
     gets reported when a structure cannot be drawn well.
 
+- **[3D molecule figures](depict3d.md)**
+
+    Space-filling, ball-and-stick, stick and wireframe, in CPK colours — how
+    the viewpoint is chosen, and when it carries no information.
+
 - **[3D structures](conformers.md)**
 
     One deterministic conformer per molecule — why there is no random seed,

@@ -1,0 +1,131 @@
+# Jmol 的 CPK 元素配色。**这是绘图惯例,不是物性** —— 所以不放元素表里。
+#
+# 列:原子序数 \t 元素符号 \t RRGGBB
+#
+# 出处与核对
+# ----------
+# 上游是 Jmol 自己的表(https://jmol.sourceforge.net/jscolors/)。这里没有
+# 直接抄那张网页 —— 它把颜色画成色块,文本抽不出来 —— 而是取了**两份互相
+# 独立的转录**,逐项比对之后才入库:
+#
+#   1. 3Dmol.js `src/colors.ts` 的 `elementColors.Jmol`(十六进制整数)
+#   2. ASE `ase/data/colors.py` 的 `jmol_colors`(按原子序数排的三位小数浮点)
+#
+# 两份的表达形式不同(hex vs 浮点)、转录路径不同,而 `round(f*255)` 之后
+# **109 个元素逐字节相同,一处不差**。一份抄错会与另一份对不上。
+#
+# 表里到 Mt(109)为止。110-118 上游没有,取 Jmol 的未知元素色 deeppink
+# (#ff1493)—— 那不是"这个元素是粉的",是"表里没有"。
+#
+# 改这份表要连 `crates/omgkit-depict/src/palette_data.rs` 一起重生成:
+#     python3 harness/gen_palette.py
+# 闸门 `check_palette` 会重跑一遍再逐字节比,脱钩当场红。
+1	H	ffffff
+2	He	d9ffff
+3	Li	cc80ff
+4	Be	c2ff00
+5	B	ffb5b5
+6	C	909090
+7	N	3050f8
+8	O	ff0d0d
+9	F	90e050
+10	Ne	b3e3f5
+11	Na	ab5cf2
+12	Mg	8aff00
+13	Al	bfa6a6
+14	Si	f0c8a0
+15	P	ff8000
+16	S	ffff30
+17	Cl	1ff01f
+18	Ar	80d1e3
+19	K	8f40d4
+20	Ca	3dff00
+21	Sc	e6e6e6
+22	Ti	bfc2c7
+23	V	a6a6ab
+24	Cr	8a99c7
+25	Mn	9c7ac7
+26	Fe	e06633
+27	Co	f090a0
+28	Ni	50d050
+29	Cu	c88033
+30	Zn	7d80b0
+31	Ga	c28f8f
+32	Ge	668f8f
+33	As	bd80e3
+34	Se	ffa100
+35	Br	a62929
+36	Kr	5cb8d1
+37	Rb	702eb0
+38	Sr	00ff00
+39	Y	94ffff
+40	Zr	94e0e0
+41	Nb	73c2c9
+42	Mo	54b5b5
+43	Tc	3b9e9e
+44	Ru	248f8f
+45	Rh	0a7d8c
+46	Pd	006985
+47	Ag	c0c0c0
+48	Cd	ffd98f
+49	In	a67573
+50	Sn	668080
+51	Sb	9e63b5
+52	Te	d47a00
+53	I	940094
+54	Xe	429eb0
+55	Cs	57178f
+56	Ba	00c900
+57	La	70d4ff
+58	Ce	ffffc7
+59	Pr	d9ffc7
+60	Nd	c7ffc7
+61	Pm	a3ffc7
+62	Sm	8fffc7
+63	Eu	61ffc7
+64	Gd	45ffc7
+65	Tb	30ffc7
+66	Dy	1fffc7
+67	Ho	00ff9c
+68	Er	00e675
+69	Tm	00d452
+70	Yb	00bf38
+71	Lu	00ab24
+72	Hf	4dc2ff
+73	Ta	4da6ff
+74	W	2194d6
+75	Re	267dab
+76	Os	266696
+77	Ir	175487
+78	Pt	d0d0e0
+79	Au	ffd123
+80	Hg	b8b8d0
+81	Tl	a6544d
+82	Pb	575961
+83	Bi	9e4fb5
+84	Po	ab5c00
+85	At	754f45
+86	Rn	428296
+87	Fr	420066
+88	Ra	007d00
+89	Ac	70abfa
+90	Th	00baff
+91	Pa	00a1ff
+92	U	008fff
+93	Np	0080ff
+94	Pu	006bff
+95	Am	545cf2
+96	Cm	785ce3
+97	Bk	8a4fe3
+98	Cf	a136d4
+99	Es	b31fd4
+100	Fm	b31fba
+101	Md	b30da6
+102	No	bd0d87
+103	Lr	c70066
+104	Rf	cc0059
+105	Db	d1004f
+106	Sg	d90045
+107	Bh	e00038
+108	Hs	e6002e
+109	Mt	eb0026

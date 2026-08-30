@@ -13,6 +13,9 @@
 //! [`label`](crate::label) 按 AFM 字宽算出来的不一致,于是布局时按标签留出的
 //! 空隙对不上。要求到哪都像素级一致的场合,应当先转成位图再分发。
 
+use std::collections::BTreeSet;
+
+use crate::geom::Point2;
 use crate::label::Run;
 use crate::render::{Primitive, Scene};
 use crate::style::Style;
@@ -31,6 +34,41 @@ pub fn to_svg(scene: &Scene, style: &Style) -> String {
         "<rect width=\"{:.2}\" height=\"{:.2}\" fill=\"#fff\"/>\n",
         scene.width, scene.height
     ));
+
+    // 三维图的球要一个径向渐变才立体。渐变只能定义在 `<defs>` 里,所以先扫一遍
+    // 用到了哪些颜色 —— 一种颜色一个渐变,而不是一个球一个:一张空间填充图有
+    // 几百个球,逐球定义会让文件里塞满几乎相同的 `<radialGradient>`。
+    //
+    // 用 `BTreeSet` 而不是 `HashSet`:`<defs>` 里的次序要与分子无关且可复现,
+    // 哈希序做不到这一点。
+    let mut balls: BTreeSet<[u8; 3]> = BTreeSet::new();
+    let mut sticks: BTreeSet<Cyl> = BTreeSet::new();
+    for it in &scene.items {
+        match it {
+            Primitive::Ball { color, .. } => {
+                balls.insert(*color);
+            }
+            Primitive::Stick {
+                from,
+                to,
+                width,
+                color,
+            } => {
+                sticks.insert(cyl_of(*from, *to, *width, *color));
+            }
+            _ => {}
+        }
+    }
+    if !balls.is_empty() || !sticks.is_empty() {
+        s.push_str("<defs>\n");
+        for c in &balls {
+            s.push_str(&sphere_gradient(*c));
+        }
+        for c in &sticks {
+            s.push_str(&cylinder_gradient(*c));
+        }
+        s.push_str("</defs>\n");
+    }
 
     for item in &scene.items {
         match item {
@@ -90,6 +128,39 @@ pub fn to_svg(scene: &Scene, style: &Style) -> String {
                     ));
                 }
             }
+            Primitive::Ball { at, r, color } => {
+                // 描一圈暗边。没有它,两个同色的球贴在一起时看不出是两个 ——
+                // 而空间填充图里同色球贴在一起是常态。
+                s.push_str(&format!(
+                    "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\" fill=\"url(#{})\" \
+                     stroke=\"{}\" stroke-width=\"{:.2}\"/>\n",
+                    at.x,
+                    at.y,
+                    r,
+                    gradient_id(*color),
+                    hex(shade(*color, -RIM)),
+                    (r * RIM_WIDTH).max(0.25)
+                ));
+            }
+            Primitive::Stick {
+                from,
+                to,
+                width,
+                color,
+            } => {
+                // 圆头端帽不是装饰:圆柱的两端在投影上就是半个圆,而**棍状样式
+                // 全靠这个圆头当原子球** —— 换成平头端帽,每个接头都会出现缺口。
+                s.push_str(&format!(
+                    "<line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" \
+                     stroke=\"url(#{})\" stroke-width=\"{:.2}\" stroke-linecap=\"round\"/>\n",
+                    from.x,
+                    from.y,
+                    to.x,
+                    to.y,
+                    cyl_id(cyl_of(*from, *to, *width, *color)),
+                    width
+                ));
+            }
             Primitive::Text { at, runs, size } => {
                 s.push_str(&format!(
                     "<text x=\"{:.2}\" y=\"{:.2}\" font-family=\"{}\" font-size=\"{:.2}\" \
@@ -142,6 +213,167 @@ pub fn to_svg(scene: &Scene, style: &Style) -> String {
     s
 }
 
+/// 球心那一点提亮多少(向白色插值的比例)。
+const HIGHLIGHT: f64 = 0.55;
+/// 球边缘压暗多少(向黑色插值的比例)。
+const RIM: f64 = 0.45;
+/// 描边宽度占球半径的比例。
+const RIM_WIDTH: f64 = 0.04;
+
+/// 把颜色向白(`t > 0`)或向黑(`t < 0`)插值 `|t|`。
+fn shade(c: [u8; 3], t: f64) -> [u8; 3] {
+    let mut out = [0u8; 3];
+    for k in 0..3 {
+        let v = f64::from(c[k]);
+        let x = if t >= 0.0 {
+            v + (255.0 - v) * t
+        } else {
+            v * (1.0 + t)
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        {
+            out[k] = x.round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    out
+}
+
+fn hex(c: [u8; 3]) -> String {
+    format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
+}
+
+/// `<defs>` 里那个渐变的 id。取颜色本身,所以同一种颜色永远同一个 id ——
+/// 与分子、与图元次序都无关。
+fn gradient_id(c: [u8; 3]) -> String {
+    format!("s{:02x}{:02x}{:02x}", c[0], c[1], c[2])
+}
+
+/// 一个球的径向渐变:高光偏在左上,边缘压暗。
+///
+/// 高光的位置(`fx`/`fy`)与光源方向是一回事 —— 全图共用一个方向,否则每个球
+/// 看起来都被不同的灯照着。左上是各家分子软件的默认光位。
+fn sphere_gradient(c: [u8; 3]) -> String {
+    format!(
+        "<radialGradient id=\"{}\" cx=\"0.5\" cy=\"0.5\" r=\"0.55\" \
+         fx=\"0.32\" fy=\"0.30\">\
+         <stop offset=\"0\" stop-color=\"{}\"/>\
+         <stop offset=\"0.55\" stop-color=\"{}\"/>\
+         <stop offset=\"1\" stop-color=\"{}\"/>\
+         </radialGradient>\n",
+        gradient_id(c),
+        hex(shade(c, HIGHLIGHT)),
+        hex(c),
+        hex(shade(c, -RIM))
+    )
+}
+
+/// 一根圆柱的横向渐变,用**量化过的整数**表示,好让共线的切片落进同一个渐变。
+///
+/// 三个字段:法向(垂直于圆柱轴、指向光源那一侧)、这条轴到原点的有向距离、
+/// 半宽,外加颜色。**不含圆柱的位置沿轴的分量** —— 一根键被切成六片之后,
+/// 六片的中点各不相同,而横向渐变只沿法向变化,六片该拿同一个渐变。按中点存
+/// 的话会发出六个几乎相同的 `<defs>` 条目,而且片与片的接缝上会差最后一位。
+type Cyl = ([i64; 2], i64, i64, [u8; 3]);
+
+/// 渐变量化的精度(每磅多少格)。
+const GRAD_QUANT: f64 = 1000.0;
+
+/// 光源方向,SVG 坐标(y 朝下),**左上**。
+///
+/// 与球的高光位置(`fx`/`fy` 偏左上)是同一个方向。两处不一致的话,球被左上
+/// 的灯照着、棍被别处的灯照着,整张图看着说不出哪里不对。
+const LIGHT: [f64; 2] = [
+    -std::f64::consts::FRAC_1_SQRT_2,
+    -std::f64::consts::FRAC_1_SQRT_2,
+];
+
+fn qg(x: f64) -> i64 {
+    let v = (x * GRAD_QUANT).round();
+    if v > i64::MAX as f64 {
+        i64::MAX
+    } else if v < i64::MIN as f64 {
+        i64::MIN
+    } else {
+        v as i64
+    }
+}
+
+fn cyl_of(from: Point2, to: Point2, width: f64, color: [u8; 3]) -> Cyl {
+    let d = to - from;
+    let len = (d.x * d.x + d.y * d.y).sqrt();
+    // 长度为 0 的一段(键的两端重合)没有轴向,法向随便取一个定值 —— 画出来是
+    // 一个圆点,渐变往哪边都一样,但**必须是确定的**,否则同一分子两次跑出来
+    // 的 `<defs>` 不一样。
+    let mut n = if len > f64::EPSILON {
+        [-d.y / len, d.x / len]
+    } else {
+        [1.0, 0.0]
+    };
+    // 法向指向光源那一侧,于是高光永远在同一边。正好垂直于光时取"x 分量为正"
+    // 这个确定的分支。
+    let lit = n[0] * LIGHT[0] + n[1] * LIGHT[1];
+    if lit < 0.0 || (lit == 0.0 && n[0] < 0.0) {
+        n = [-n[0], -n[1]];
+    }
+    let offset = from.x * n[0] + from.y * n[1];
+    ([qg(n[0]), qg(n[1])], qg(offset), qg(width / 2.0), color)
+}
+
+fn cyl_id(c: Cyl) -> String {
+    let ([nx, ny], off, w, col) = c;
+    format!(
+        "c{nx}_{ny}_{off}_{w}_{:02x}{:02x}{:02x}",
+        col[0], col[1], col[2]
+    )
+    .replace('-', "m")
+}
+
+/// 圆柱的横向渐变:亮边在光源那一侧,另一侧压暗。
+///
+/// 这不只是好看。**纯白的氢在白底上没有渐变就是隐形的** —— 第一版画出来,
+/// 每根 C–H 键都像是只画了一半(靠碳那半是灰的,靠氢那半是白的,和背景一个色)。
+/// 球有一圈暗描边所以看得见,棍没有。给圆柱上渐变把这一档补上,同时让球棍图
+/// 真的像是三维的。
+///
+/// 描边解决不了这件事:一根键被切成若干片(见
+/// [`DEPTH_SLICE`](crate::three::DEPTH_SLICE)),而切片是按深度分开画的,
+/// 给每一片描边会在片
+/// 与片的接缝上留下一道暗痕。渐变只沿法向变化,共线的片拿到同一个渐变,
+/// 接缝上一个像素都不差。
+fn cylinder_gradient(c: Cyl) -> String {
+    let ([nx, ny], off, w, col) = c;
+    let (nx, ny, off, w) = (
+        nx as f64 / GRAD_QUANT,
+        ny as f64 / GRAD_QUANT,
+        off as f64 / GRAD_QUANT,
+        w as f64 / GRAD_QUANT,
+    );
+    // 渐变向量:沿法向,从暗的一侧到亮的一侧,长度是圆柱的直径。
+    // 起点取"轴线往负法向让开半宽"的那一点 —— 它只由 (法向, 有向距离) 决定,
+    // 与这一片在轴上的位置无关,所以共线的片给出**逐字节相同**的定义。
+    let (x1, y1) = (nx * (off - w), ny * (off - w));
+    let (x2, y2) = (nx * (off + w), ny * (off + w));
+    format!(
+        "<linearGradient id=\"{}\" gradientUnits=\"userSpaceOnUse\" \
+         x1=\"{x1:.3}\" y1=\"{y1:.3}\" x2=\"{x2:.3}\" y2=\"{y2:.3}\">\
+         <stop offset=\"0\" stop-color=\"{}\"/>\
+         <stop offset=\"0.4\" stop-color=\"{}\"/>\
+         <stop offset=\"0.75\" stop-color=\"{}\"/>\
+         <stop offset=\"1\" stop-color=\"{}\"/>\
+         </linearGradient>\n",
+        cyl_id(c),
+        hex(shade(col, -CYL_RIM)),
+        hex(col),
+        hex(shade(col, CYL_HIGHLIGHT)),
+        hex(shade(col, -CYL_RIM))
+    )
+}
+
+/// 圆柱背光那一侧压暗多少。
+const CYL_RIM: f64 = 0.42;
+/// 圆柱迎光那一条带提亮多少。
+const CYL_HIGHLIGHT: f64 = 0.42;
+
 /// XML 转义。
 ///
 /// 元素符号与数字里没有这些字符,但**电荷用的 `+`/`-` 之外将来可能出现别的记号**,
@@ -176,6 +408,64 @@ mod tests {
     fn svg(smi: &str, style: &Style) -> String {
         let m = prep(smi);
         to_svg(&scene(&m, &generate(&m, style), style), style)
+    }
+
+    /// **纯白的原子在白底上必须看得见。**
+    ///
+    /// 氢是 CPK 里的纯白 `#ffffff`,而画布也是纯白 —— 球没有暗描边、棍没有
+    /// 渐变的话,那个原子和它的键在图上**根本不存在**,而 SVG 本身一点毛病没有。
+    /// 这不是审美问题:读图的人会以为那个位置是空的。
+    ///
+    /// 实测(变异标定):把球的描边从暗色改成球本身的颜色,全语料判官
+    /// `harness/check_depict3d.py` 一声不吭地全绿 —— 那条判官读的是圆心、
+    /// 半径、颜色、画序,看不见"这个圆在背景上分不分得出来"。这一条补的就是
+    /// 那个洞,球与圆柱两边各钉一下。
+    #[test]
+    fn 纯白的原子与键在白底上分得出来() {
+        use crate::three::{depict, Style3D};
+        let mut m = omgkit_io::smiles::parse("CO").unwrap();
+        let c = omgkit_conf::pipeline::conformer_for(&mut m).unwrap();
+
+        // 球:白球必须描一圈与白底分得开的边
+        let d = depict(&m, &c.coords, &Style3D::SPACE_FILLING).unwrap();
+        let svg = to_svg(&d.scene, &Style::ACS_1996);
+        let white_balls: Vec<&str> = svg
+            .lines()
+            .filter(|l| l.contains("<circle") && l.contains("url(#sffffff)"))
+            .collect();
+        assert!(!white_balls.is_empty(), "甲醇该有白色的氢球,判据没东西可判");
+        for line in white_balls {
+            let stroke = line
+                .split("stroke=\"")
+                .nth(1)
+                .and_then(|t| t.split('"').next())
+                .expect("球该有描边");
+            assert!(
+                stroke != "#ffffff" && stroke != "#fff",
+                "白球的描边也是白的,在白底上看不见了:{line}"
+            );
+        }
+
+        // 棍:白色圆柱的渐变必须有一档不是白的
+        let d = depict(&m, &c.coords, &Style3D::STICK).unwrap();
+        let svg = to_svg(&d.scene, &Style::ACS_1996);
+        let grads: Vec<&str> = svg
+            .lines()
+            .filter(|l| l.contains("<linearGradient") && l.contains("#ffffff"))
+            .collect();
+        assert!(!grads.is_empty(), "甲醇该有白色的 C–H 圆柱,判据没东西可判");
+        for g in grads {
+            let stops: Vec<&str> = g
+                .split("stop-color=\"")
+                .skip(1)
+                .filter_map(|t| t.split('"').next())
+                .collect();
+            assert!(stops.len() >= 2, "白圆柱的渐变只有 {} 档:{g}", stops.len());
+            assert!(
+                stops.iter().any(|c| *c != "#ffffff"),
+                "白圆柱的渐变从头到尾都是白的,在白底上看不见了:{g}"
+            );
+        }
     }
 
     #[test]

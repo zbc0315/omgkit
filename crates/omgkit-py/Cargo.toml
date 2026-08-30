@@ -26,15 +26,18 @@ name = "omgkit"
 crate-type = ["cdylib"]
 
 [dependencies]
-omgkit-core = { path = "../omgkit-core", version = "0.0.6" }
-omgkit-io = { path = "../omgkit-io", version = "0.0.6" }
-omgkit-chem = { path = "../omgkit-chem", version = "0.0.6" }
-omgkit-match = { path = "../omgkit-match", version = "0.0.6" }
-omgkit-conf = { path = "../omgkit-conf", version = "0.0.6" }
-# 只为 `Mol.to_molblock_2d`:二维坐标与楔形是画图算出来的,写出器在 io 那边。
-# `default-features = false` 关掉位图输出(resvg 那一串外部依赖)—— 绑定这一层
-# 眼下不出图,只要那套布局。
-omgkit-depict = { path = "../omgkit-depict", version = "0.0.6", default-features = false }
+omgkit-core = { path = "../omgkit-core", version = "0.0.7" }
+omgkit-io = { path = "../omgkit-io", version = "0.0.7" }
+omgkit-chem = { path = "../omgkit-chem", version = "0.0.7" }
+omgkit-match = { path = "../omgkit-match", version = "0.0.7" }
+omgkit-conf = { path = "../omgkit-conf", version = "0.0.7" }
+# 两件事要它:`Mol.to_molblock_2d` 的二维坐标与楔形(布局算出来的,写出器在 io
+# 那边),以及 `Conformer.to_svg` 的三维图。
+#
+# `default-features = false` 关掉的是**位图**输出(resvg 那一串外部依赖)——
+# 三维图走的是 SVG,不需要它。要在 Python 侧出 PNG 才需要把 `raster` 打开,
+# 而那会给 wheel 带进一串外部依赖。
+omgkit-depict = { path = "../omgkit-depict", version = "0.0.7", default-features = false }
 
 # 0.27 是 MSRV 还在 1.74 的最后一档,正好压在工作区的 1.75 之下 ——
 # 0.28 起要 1.83,用它就得为绑定一个 crate 抬高整个工作区的 MSRV。

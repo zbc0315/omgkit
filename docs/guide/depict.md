@@ -9,6 +9,13 @@ SVG, PNG or JPEG.
 itself; the script is
 [`docs/figures/make_figures.py`](https://github.com/zbc0315/omgkit/blob/main/docs/figures/make_figures.py).*
 
+!!! note "This page is the 2D structure diagram"
+
+    For space-filling, ball-and-stick, stick and wireframe pictures of a
+    conformer, see [3D molecule figures](depict3d.md). The two share one SVG
+    backend but nothing else: a structure diagram is a drawing convention with
+    a style manual behind it, a 3D figure is a projection of real coordinates.
+
 !!! note "Rendering is Rust-only; the layout is not"
 
     Python gets the **layout** through
@@ -33,7 +40,7 @@ std::fs::write("aspirin.svg", to_svg(&s, &Style::ACS_1996)).unwrap();
 For PNG and JPEG, enable the `raster` feature:
 
 ```toml
-omgkit-depict = { version = "0.0.6", features = ["raster"] }
+omgkit-depict = { version = "0.0.7", features = ["raster"] }
 ```
 
 ```rust

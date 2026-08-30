@@ -58,6 +58,12 @@ SMILES 写法,必须净化成同一个东西、匹配同样的查询、按同样
 RDKit ETKDGv3 2025.09.2 失败 36 个(0.41%),omgkit 失败 1 个(0.01%)。
 见[三维构型](guide/conformers.md)。
 
+**而且画得出来。** 空间填充、球棍、棍状、线框四套样式,CPK 配色,视角取分子的
+主轴 —— 而且**绝不镜像**:三维图的构型就是坐标本身,镜一下每个手性中心都反了,
+图上没有一处看得出来。见[三维分子图](guide/depict3d.md)。
+
+![阿司匹林的四套三维样式](assets/three-styles.zh.svg)
+
 **每一条声明后面都有判据。** 正确性不是宣称出来的,是逐条对着外部实现比出来的,
 而且每条判据都必须先证明自己**不会空过**。整套闸在每次推送时跑一遍。
 见[正确性](dev/correctness.md)。
@@ -76,12 +82,12 @@ RDKit ETKDGv3 2025.09.2 失败 36 个(0.41%),omgkit 失败 1 个(0.01%)。
 
     ```toml
     [dependencies]
-    omgkit-core   = "0.0.6"
-    omgkit-io     = "0.0.6"
-    omgkit-chem   = "0.0.6"
-    omgkit-match  = "0.0.6"
-    omgkit-depict = "0.0.6"
-    omgkit-conf   = "0.0.6"
+    omgkit-core   = "0.0.7"
+    omgkit-io     = "0.0.7"
+    omgkit-chem   = "0.0.7"
+    omgkit-match  = "0.0.7"
+    omgkit-conf   = "0.0.7"
+    omgkit-depict = "0.0.7"
     ```
 
 按需取用,每一层只依赖它下面的层。完整说明见[安装](getting-started/install.md)。

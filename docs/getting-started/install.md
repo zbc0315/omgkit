@@ -43,18 +43,18 @@ engine.
 
 ```toml
 [dependencies]
-omgkit-core   = "0.0.6"   # data structures
-omgkit-io     = "0.0.6"   # SMILES, SMARTS, .mol/.sdf
-omgkit-chem   = "0.0.6"   # sanitization
-omgkit-match  = "0.0.6"   # matching, reactions, byproducts
-omgkit-depict = "0.0.6"   # 2D coordinates and drawing
-omgkit-conf   = "0.0.6"   # 3D structure generation
+omgkit-core   = "0.0.7"   # data structures
+omgkit-io     = "0.0.7"   # SMILES, SMARTS, .mol/.sdf
+omgkit-chem   = "0.0.7"   # sanitization
+omgkit-match  = "0.0.7"   # matching, reactions, byproducts
+omgkit-conf   = "0.0.7"   # 3D structure generation
+omgkit-depict = "0.0.7"   # 2D coordinates, 2D and 3D drawing
 ```
 
 Or with `cargo add`:
 
 ```shell
-cargo add omgkit-core omgkit-io omgkit-chem omgkit-match omgkit-depict omgkit-conf
+cargo add omgkit-core omgkit-io omgkit-chem omgkit-match omgkit-conf omgkit-depict
 ```
 
 | Crate | Depends on | Gives you |
@@ -63,8 +63,8 @@ cargo add omgkit-core omgkit-io omgkit-chem omgkit-match omgkit-depict omgkit-co
 | `omgkit-io` | core | SMILES and SMARTS parsing and writing |
 | `omgkit-chem` | core | the sanitization pipeline, valence, aromaticity |
 | `omgkit-match` | core, io, chem | substructure matching, reaction templates, byproducts |
-| `omgkit-depict` | core, io, chem | 2D coordinates, wedge assignment, SVG (PNG/JPEG behind `raster`) |
 | `omgkit-conf` | core, io, chem | 3D structure generation |
+| `omgkit-depict` | core, io, chem, conf | 2D coordinates, wedge assignment, 3D figures, SVG (PNG/JPEG behind `raster`) |
 | `omgkit-py` | all of the above | the Python extension module (not a library) |
 
 ## Requirements

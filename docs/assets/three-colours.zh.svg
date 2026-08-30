@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1195" height="420" viewBox="0 0 1195.20 419.60">
+<rect width="1195.20" height="419.60" fill="#fff"/>
+<defs>
+<radialGradient id="s1ff01f" cx="0.5" cy="0.5" r="0.55" fx="0.32" fy="0.30"><stop offset="0" stop-color="#9af89a"/><stop offset="0.55" stop-color="#1ff01f"/><stop offset="1" stop-color="#118411"/></radialGradient>
+<radialGradient id="s3050f8" cx="0.5" cy="0.5" r="0.55" fx="0.32" fy="0.30"><stop offset="0" stop-color="#a2b0fc"/><stop offset="0.55" stop-color="#3050f8"/><stop offset="1" stop-color="#1a2c88"/></radialGradient>
+<radialGradient id="s909090" cx="0.5" cy="0.5" r="0.55" fx="0.32" fy="0.30"><stop offset="0" stop-color="#cdcdcd"/><stop offset="0.55" stop-color="#909090"/><stop offset="1" stop-color="#4f4f4f"/></radialGradient>
+<radialGradient id="s90e050" cx="0.5" cy="0.5" r="0.55" fx="0.32" fy="0.30"><stop offset="0" stop-color="#cdf1b0"/><stop offset="0.55" stop-color="#90e050"/><stop offset="1" stop-color="#4f7b2c"/></radialGradient>
+<radialGradient id="s940094" cx="0.5" cy="0.5" r="0.55" fx="0.32" fy="0.30"><stop offset="0" stop-color="#cf8ccf"/><stop offset="0.55" stop-color="#940094"/><stop offset="1" stop-color="#510051"/></radialGradient>
+<radialGradient id="sa62929" cx="0.5" cy="0.5" r="0.55" fx="0.32" fy="0.30"><stop offset="0" stop-color="#d79f9f"/><stop offset="0.55" stop-color="#a62929"/><stop offset="1" stop-color="#5b1717"/></radialGradient>
+<radialGradient id="se06633" cx="0.5" cy="0.5" r="0.55" fx="0.32" fy="0.30"><stop offset="0" stop-color="#f1baa3"/><stop offset="0.55" stop-color="#e06633"/><stop offset="1" stop-color="#7b381c"/></radialGradient>
+<radialGradient id="sff0d0d" cx="0.5" cy="0.5" r="0.55" fx="0.32" fy="0.30"><stop offset="0" stop-color="#ff9292"/><stop offset="0.55" stop-color="#ff0d0d"/><stop offset="1" stop-color="#8c0707"/></radialGradient>
+<radialGradient id="sff1493" cx="0.5" cy="0.5" r="0.55" fx="0.32" fy="0.30"><stop offset="0" stop-color="#ff95ce"/><stop offset="0.55" stop-color="#ff1493"/><stop offset="1" stop-color="#8c0b51"/></radialGradient>
+<radialGradient id="sff8000" cx="0.5" cy="0.5" r="0.55" fx="0.32" fy="0.30"><stop offset="0" stop-color="#ffc68c"/><stop offset="0.55" stop-color="#ff8000"/><stop offset="1" stop-color="#8c4600"/></radialGradient>
+<radialGradient id="sffff30" cx="0.5" cy="0.5" r="0.55" fx="0.32" fy="0.30"><stop offset="0" stop-color="#ffffa2"/><stop offset="0.55" stop-color="#ffff30"/><stop offset="1" stop-color="#8c8c1a"/></radialGradient>
+<radialGradient id="sffffff" cx="0.5" cy="0.5" r="0.55" fx="0.32" fy="0.30"><stop offset="0" stop-color="#ffffff"/><stop offset="0.55" stop-color="#ffffff"/><stop offset="1" stop-color="#8c8c8c"/></radialGradient>
+</defs>
+<g transform="translate(48.40,43.00)">
+<circle cx="51.20" cy="51.20" r="43.20" fill="url(#sffffff)" stroke="#8c8c8c" stroke-width="1.73"/>
+</g>
+<text x="99.60" y="199.40" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">H</text>
+<g transform="translate(229.60,25.00)">
+<circle cx="69.20" cy="69.20" r="61.20" fill="url(#s909090)" stroke="#4f4f4f" stroke-width="2.45"/>
+</g>
+<text x="298.80" y="199.40" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">C</text>
+<g transform="translate(432.40,28.60)">
+<circle cx="65.60" cy="65.60" r="57.60" fill="url(#s3050f8)" stroke="#1a2c88" stroke-width="2.30"/>
+</g>
+<text x="498.00" y="199.40" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">N</text>
+<g transform="translate(633.40,30.40)">
+<circle cx="63.80" cy="63.80" r="55.80" fill="url(#sff0d0d)" stroke="#8c0707" stroke-width="2.23"/>
+</g>
+<text x="697.20" y="199.40" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">O</text>
+<g transform="translate(834.40,32.20)">
+<circle cx="62.00" cy="62.00" r="54.00" fill="url(#s90e050)" stroke="#4f7b2c" stroke-width="2.16"/>
+</g>
+<text x="896.40" y="199.40" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">F</text>
+<g transform="translate(1017.40,16.00)">
+<circle cx="78.20" cy="78.20" r="70.20" fill="url(#sff8000)" stroke="#8c4600" stroke-width="2.81"/>
+</g>
+<text x="1095.60" y="199.40" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">P</text>
+<g transform="translate(26.80,231.20)">
+<circle cx="72.80" cy="72.80" r="64.80" fill="url(#sffff30)" stroke="#8c8c1a" stroke-width="2.59"/>
+</g>
+<text x="99.60" y="414.60" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">S</text>
+<g transform="translate(226.00,231.20)">
+<circle cx="72.80" cy="72.80" r="64.80" fill="url(#s1ff01f)" stroke="#118411" stroke-width="2.59"/>
+</g>
+<text x="298.80" y="414.60" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">Cl</text>
+<g transform="translate(421.60,227.60)">
+<circle cx="76.40" cy="76.40" r="68.40" fill="url(#sa62929)" stroke="#5b1717" stroke-width="2.74"/>
+</g>
+<text x="498.00" y="414.60" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">Br</text>
+<g transform="translate(613.60,220.40)">
+<circle cx="83.60" cy="83.60" r="75.60" fill="url(#s940094)" stroke="#510051" stroke-width="3.02"/>
+</g>
+<text x="697.20" y="414.60" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">I</text>
+<g transform="translate(814.60,222.20)">
+<circle cx="81.80" cy="81.80" r="73.80" fill="url(#se06633)" stroke="#7b381c" stroke-width="2.95"/>
+</g>
+<text x="896.40" y="414.60" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">Fe</text>
+<g transform="translate(1026.40,234.80)">
+<circle cx="69.20" cy="69.20" r="61.20" fill="url(#sff1493)" stroke="#8c0b51" stroke-width="2.45"/>
+</g>
+<text x="1095.60" y="414.60" font-family="Helvetica,Arial,sans-serif" font-size="9.0" fill="#333" text-anchor="middle">* 表里没有</text>
+</svg>

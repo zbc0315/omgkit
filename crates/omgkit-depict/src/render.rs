@@ -59,6 +59,34 @@ pub enum Primitive {
         /// 线宽
         width: f64,
     },
+    /// **三维图的球。** `at` 是投影后的圆心,`r` 是投影后的半径,`color` 是
+    /// [CPK 配色](crate::palette)。
+    ///
+    /// 二维那条路一根也不发这个 —— 结构式里没有球。见 [`three`](crate::three)。
+    Ball {
+        /// 圆心
+        at: Point2,
+        /// 半径
+        r: f64,
+        /// RGB
+        color: [u8; 3],
+    },
+    /// **三维图的棍。** 一段圆柱在投影上就是一条圆头线段,`width` 是它的粗细
+    /// (= 圆柱直径),`color` 是这一段所属那一端原子的颜色。
+    ///
+    /// 与 [`Primitive::Line`] 的区别不只是颜色:那个是结构式的键,粗细来自
+    /// 绘图规范(磅);这个是一根有实体半径的圆柱,粗细来自三维样式(埃,
+    /// 再乘比例尺)。
+    Stick {
+        /// 起点
+        from: Point2,
+        /// 终点
+        to: Point2,
+        /// 粗细(= 圆柱直径)
+        width: f64,
+        /// RGB
+        color: [u8; 3],
+    },
     /// 标签的**一行**,`at` 是这一行的中心。竖排的标签发两条 —— 符号一条、氢一条
     Text {
         /// 中心
@@ -82,7 +110,10 @@ pub struct Scene {
 }
 
 /// 画布四周留白,单位是磅。让线条不贴着边缘。
-const PAD_PT: f64 = 8.0;
+///
+/// [`three`](crate::three) 也用它 —— 两条路各定一个数的话,同一个分子的二维图
+/// 与三维图边距不一样,而那是没有理由的。
+pub(crate) const PAD_PT: f64 = 8.0;
 
 /// 把一张 [`Depiction`] 变成图元。
 ///
@@ -2911,6 +2942,9 @@ mod tests {
                     Primitive::Wedge { from, to, .. } => format!("W {} {}", q(*from), q(*to)),
                     Primitive::Hash { from, to, .. } => format!("H {} {}", q(*from), q(*to)),
                     Primitive::Text { at, runs, .. } => format!("T {} {runs:?}", q(*at)),
+                    Primitive::Ball { .. } | Primitive::Stick { .. } => {
+                        unreachable!("二维那条路的场景里没有球棍 —— 收到就说明拿错了场景")
+                    }
                 })
                 .collect();
             v.sort();
@@ -3544,6 +3578,9 @@ mod tests {
                             vec![(*from, *wide / 2.0), (*to, *wide / 2.0)]
                         }
                         Primitive::Text { .. } => continue,
+                        Primitive::Ball { .. } | Primitive::Stick { .. } => {
+                            unreachable!("二维那条路的场景里没有球棍 —— 收到就说明拿错了场景")
+                        }
                     };
                     for (p, r) in pts {
                         assert!(

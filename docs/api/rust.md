@@ -27,8 +27,8 @@ cargo doc --workspace --no-deps --open
 | `omgkit-io` | core | `smiles` — parsing and writing; `smarts` — query and reaction parsing and writing; `molblock` — V2000 and SDF, read and written; `canon` — canonical ranks; `stereo` — reading stereochemistry off coordinates |
 | `omgkit-chem` | core | `sanitize` and the individual stages: valence, implicit hydrogens, rings, kekulization, aromaticity, conjugation, hybridization. Also two **consumers** of that output rather than stages of it: `gasteiger` — partial charges (PEOE); `descriptors` — the per-atom and per-bond values a graph model reads |
 | `omgkit-match` | core, io, chem | substructure matching (VF2++-style ordering), `MolProps`, reaction application (`run_reactants`, `run_on_substrate`), byproduct reconstruction |
-| `omgkit-depict` | core, io, chem | 2D coordinate generation and structure drawing; SVG with no dependencies, PNG/JPEG behind the `raster` feature — see [Drawing structures](../guide/depict.md) |
 | `omgkit-conf` | core, io, chem | deterministic 3D structure generation: bounds matrix, triangle smoothing, metric-matrix embedding, L-BFGS refinement — see [3D structures](../guide/conformers.md) |
+| `omgkit-depict` | core, io, chem, conf | 2D coordinate generation and structure drawing, plus [3D figures](../guide/depict3d.md); SVG with no dependencies, PNG/JPEG behind the `raster` feature — see [Drawing structures](../guide/depict.md) |
 | `omgkit-py` | all | the Python extension module — a `cdylib`, **not published to crates.io**; its distribution channel is the wheel |
 
 ## Documentation gates

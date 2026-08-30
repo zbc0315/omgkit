@@ -13,12 +13,21 @@ homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
-omgkit-core = { path = "../omgkit-core", version = "0.0.6" }
+omgkit-core = { path = "../omgkit-core", version = "0.0.7" }
 # 规范秩:布局的每一处平局都按它打破,这是"同一分子的任何写法给出同一张图"
 # 的来源。没有它,坐标就会依赖输入的原子顺序。
-omgkit-io = { path = "../omgkit-io", version = "0.0.6" }
+omgkit-io = { path = "../omgkit-io", version = "0.0.7" }
 # 环感知:稠环系统的划分是环系统布局的前提
-omgkit-chem = { path = "../omgkit-chem", version = "0.0.6" }
+omgkit-chem = { path = "../omgkit-chem", version = "0.0.7" }
+# **三维图的规范视角要主轴,主轴要对称矩阵的特征分解。**
+#
+# 本仓已经有一处特征分解(`omgkit_conf::linalg`,循环 Jacobi,判官是 LAPACK)。
+# 再为 3×3 写一个专用版就是同一个概念的第二处实现 —— 那正是本仓一直在防的
+# 东西:两处迟早在某个病态输入上分岔,而"视角差一点"没有任何一条判据看得见。
+#
+# 代价是这条箭头方向别扭(绘图依赖构象生成)。它不成环:omgkit-conf 只依赖
+# core / chem / io,不认识 depict。发布到 crates.io 时 conf 要排在 depict 之前。
+omgkit-conf = { path = "../omgkit-conf", version = "0.0.7" }
 
 # 位图输出是**可选的**。默认构建零外部依赖,只出 SVG。
 #
@@ -47,10 +56,23 @@ raster = ["dep:resvg", "dep:jpeg-encoder"]
 workspace = true
 
 [dev-dependencies]
-omgkit-io = { path = "../omgkit-io", version = "0.0.6" }
+omgkit-io = { path = "../omgkit-io", version = "0.0.7" }
+# 判官读三维图导出的 jsonl
+serde_json = "1"
+
+# 判官用的导出。写 jsonl 要 serde_json,那是 dev-dependency,所以声明成
+# example 而不是让 `cargo build` 去碰它。
+[[example]]
+name = "dump_depict3d"
+required-features = []
 
 # 这个例子要出 PNG/JPEG,没有 raster feature 就编不过。声明出来,
 # 免得默认的 `cargo clippy --all-targets` 因为它而红。
 [[example]]
 name = "draw"
+required-features = ["raster"]
+
+# 三维图的例子同样要出 PNG。
+[[example]]
+name = "draw3d"
 required-features = ["raster"]

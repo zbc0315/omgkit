@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 # 漏一处就是个不会报错的假数。CI 的头注释里记过同一个坑(那里原先写着
 # "四道闸门",而步骤早已加到八步)。这里由 `step` 计数,末尾自查:
 # 改了步骤忘了改 `TOTAL`,脚本最后一行会红。
-TOTAL=46
+TOTAL=49
 N=0
 step() {
     N=$((N + 1))
@@ -104,6 +104,14 @@ cargo clippy -q -p omgkit-depict --all-targets --features raster -- -D warnings
 cargo test -q -p omgkit-depict --features raster
 step "文档"
 cargo doc -q --workspace --no-deps --document-private-items
+
+# **CPK 配色表与生成它的脚本没脱钩。** `palette_data.rs` 是从
+# `harness/params/jmol_colors.tsv` 生成的;手改一个字节不会有任何报错,
+# 只会让某种元素在三维图里穿别人的衣服 —— 而"图上颜色不对"没人会去查表。
+# 这里重生成一遍再逐字节比,与 `check_baseline_schema.py` 守基准是同一招。
+step "判官:CPK 配色表与生成它的脚本没脱钩"
+"$PY" harness/gen_palette.py --out "$WORK/palette_data.rs"
+diff -u crates/omgkit-depict/src/palette_data.rs "$WORK/palette_data.rs"
 
 # ---- 拿预先烘好的基准比的判官 ----
 #
@@ -487,6 +495,22 @@ cargo run -q -p omgkit-io --release --example dump_bond_stereo -- harness/corpus
 # 目录 → 分母下限红,退出码 1。
 step "判官:文档里的 Python 示例跑得出文档写的结果"
 "$PY" harness/check_docs_examples.py
+
+# **三维分子图。** 导出的是产品真正吐出来的那段 SVG,判官从里面把圆和线读回来,
+# 再拿坐标、旋转矩阵、RDKit 的范德华半径、Jmol 的配色表独立算一遍该是什么样。
+#
+# 400 个分子 × 4 套样式。跑全语料(8831)要十几分钟而且导出文件上 G ——
+# 这一条判的是**几何与转录**,不是统计量,400 个分子上该抓的都抓得住:
+# 实测 40525 对重叠球、73552 段圆柱、476 根并排的多重键、12 种元素。
+#
+# 变异实测(全在 400 个分子上打红):碳改成 Rasmol 的灰、球半径 23%→25%、
+# 画家算法反着排、视角行列式取 −1、键两半同色、并排方向不投到屏幕平面、
+# 二阶矩的累加次序退回按秩(那一条只有全语料抓得住,十个分子的单元判据够不着)。
+step "判官:三维分子图(圆与线从 SVG 反读,外部真值是 RDKit + numpy + Jmol 表)"
+cargo run -q -p omgkit-depict --release --example dump_depict3d -- harness/corpus/large.smi 400 >"$WORK/three.jsonl"
+"$PY" harness/check_depict3d.py "$WORK/three.jsonl"
+step "判官:三维图的 Python 绑定(与 Rust 逐字节比)"
+"$PY" harness/check_python_depict3d.py "$WORK/three.jsonl"
 
 step "判官:边界形状语料 —— 写出时 E/Z 守不守恒"
 cargo run -q -p omgkit-io --release --example dump_written -- harness/corpus/edge_shapes.smi >"$WORK/edw.tsv"

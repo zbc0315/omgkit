@@ -411,6 +411,25 @@ impl PyMol {
     }
 }
 
+/// 按名字取一套三维样式。**名字是公开契约的一部分**,不认识就报错并把
+/// 认识的都列出来 —— 静默退回默认样式的话,拼错一个字母就会得到一张
+/// "看着对但不是你要的那个样式"的图。
+fn style_3d(name: &str) -> PyResult<&'static omgkit_depict::three::Style3D> {
+    omgkit_depict::three::Style3D::ALL
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| {
+            let all: Vec<&str> = omgkit_depict::three::Style3D::ALL
+                .iter()
+                .map(|s| s.name)
+                .collect();
+            PyValueError::new_err(format!(
+                "不认识的三维样式 {name:?};认识的是:{}",
+                all.join("、")
+            ))
+        })
+}
+
 /// 一个三维构型。
 ///
 /// 由 `Mol.conformer()` 产出。里面既有坐标,也有**坐标对应的
@@ -474,6 +493,79 @@ impl PyConformer {
     #[getter]
     fn chiral_ok(&self) -> usize {
         self.conf.chiral_ok
+    }
+
+    /// 画成**三维分子图**,返回一段 SVG。
+    ///
+    /// `style` 取四套之一 —— 名字与半径都取自 Jmol 自己文档里的
+    /// standard rendering styles:
+    ///
+    /// | `style` | 球半径 | 键(圆柱)半径 | 看什么 |
+    /// |---|---|---|---|
+    /// | `"space-filling"` | 100% 范德华半径 | 不画 | 分子占多大地方 |
+    /// | `"ball-and-stick"`(默认) | 23% vdW | 0.15 Å | 键长键角、构型 |
+    /// | `"stick"` | 与键同粗 | 0.30 Å | 骨架走向 |
+    /// | `"wireframe"` | 不画 | 0.01 Å | 大体系、快速预览 |
+    ///
+    /// 按元素上 CPK(Jmol)色,**键的两半各随自己那一端的颜色**。
+    ///
+    /// ```python
+    /// conf = omgkit.parse_smiles("CC(=O)Oc1ccccc1C(=O)O").conformer()
+    /// open("aspirin.svg", "w").write(conf.to_svg())
+    /// ```
+    ///
+    /// 画的是 [`mol`](Self::mol) 那一份(补过显式氢的)—— 三维图里氢是看得见的
+    /// 实体,不画的话读图的人看到的是另一个分子。
+    ///
+    /// `style` 不认识时抛 `ValueError`,并把认识的四个列出来。
+    #[pyo3(signature = (style = "ball-and-stick"))]
+    fn to_svg(&self, style: &str) -> PyResult<String> {
+        let st = style_3d(style)?;
+        let d = omgkit_depict::three::depict(&self.mol.inner, &self.conf.coords, st)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(omgkit_depict::svg::to_svg(
+            &d.scene,
+            &omgkit_depict::style::Style::ACS_1996,
+        ))
+    }
+
+    /// 三维图的诊断:视角定不定得下来,以及每个原子落在画布哪里。
+    ///
+    /// 返回的字典:
+    ///
+    /// | 键 | 内容 |
+    /// |---|---|
+    /// | `style` | 用的哪套样式 |
+    /// | `width`、`height` | 画布尺寸(磅) |
+    /// | `degenerate` | **主轴不唯一**。对称性强制两个主惯量相等时为真(甲烷、四氯化碳、氨、乙炔)。图不是错的,但它的取向没有承载任何信息 —— 别照着它比两个分子的姿态 |
+    /// | `atoms` | 每个原子一项:`x`、`y`(画布坐标,磅)、`radius`(球半径,磅,不画球的样式是 0)、`depth`(深度,Å,越大越靠前) |
+    ///
+    /// 想在图上加标注就用 `atoms` —— SVG 里的圆没有原子号,从图形反推是猜。
+    #[pyo3(signature = (style = "ball-and-stick"))]
+    fn depiction_3d_report<'py>(
+        &self,
+        py: Python<'py>,
+        style: &str,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let st = style_3d(style)?;
+        let d = omgkit_depict::three::depict(&self.mol.inner, &self.conf.coords, st)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let out = PyDict::new(py);
+        out.set_item("style", d.style_name)?;
+        out.set_item("width", d.scene.width)?;
+        out.set_item("height", d.scene.height)?;
+        out.set_item("degenerate", d.view.degenerate)?;
+        let atoms = pyo3::types::PyList::empty(py);
+        for p in &d.placed {
+            let one = PyDict::new(py);
+            one.set_item("x", p.at.x)?;
+            one.set_item("y", p.at.y)?;
+            one.set_item("radius", p.radius)?;
+            one.set_item("depth", p.depth)?;
+            atoms.append(one)?;
+        }
+        out.set_item("atoms", atoms)?;
+        Ok(out)
     }
 
     /// 写成 V2000 molblock(`.mol` 文件的内容),末尾带 `M  END`。

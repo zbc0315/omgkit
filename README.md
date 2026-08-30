@@ -24,6 +24,7 @@ chemistry library is involved. The code that produced them is
 | **Byproducts** | The water an esterification drops, rebuilt as a real molecule — or an explicit *cannot tell* when the record itself does not balance |
 | **`.mol` / `.sdf`** | V2000 molblock and multi-record SDF, read and written, in 2D and 3D, with stereochemistry both ways |
 | **2D depiction** | Coordinates and SVG/PNG/JPEG output in two drawing styles — with an explicit report of anything it could not draw well |
+| **3D figures** | Space-filling, ball-and-stick, stick and wireframe, in CPK colours, from any set of 3D coordinates |
 | **3D structures** | One deterministic conformer per molecule, no random seed and no retries, as a starting point for force-field refinement |
 | **Graph descriptors** | Twelve per-atom and seven per-bond values a graph neural network reads — including Gasteiger partial charges and Pauling electronegativity |
 | **Batches** | A columnar `MolBatch` with zero-copy per-molecule views |
@@ -47,12 +48,12 @@ For Rust, take only the layers you need; each depends only on the ones below it.
 
 ```toml
 [dependencies]
-omgkit-core   = "0.0.6"   # data structures
-omgkit-io     = "0.0.6"   # SMILES, SMARTS, .mol/.sdf
-omgkit-chem   = "0.0.6"   # sanitization
-omgkit-match  = "0.0.6"   # matching, reactions, byproducts
-omgkit-depict = "0.0.6"   # 2D coordinates and drawing
-omgkit-conf   = "0.0.6"   # 3D structure generation
+omgkit-core   = "0.0.7"   # data structures
+omgkit-io     = "0.0.7"   # SMILES, SMARTS, .mol/.sdf
+omgkit-chem   = "0.0.7"   # sanitization
+omgkit-match  = "0.0.7"   # matching, reactions, byproducts
+omgkit-conf   = "0.0.7"   # 3D structure generation
+omgkit-depict = "0.0.7"   # 2D coordinates, 2D and 3D drawing
 ```
 
 ## Getting started
@@ -209,10 +210,31 @@ whose configuration cannot be read.
 
 ![Bridged systems report degraded](docs/assets/degraded.svg)
 
+### 3D figures
+
+Hand it a conformer and it draws the picture chemists expect. The four styles
+and their radii are Jmol's own *standard rendering styles*, transcribed;
+colours are Jmol's CPK table, with each half of a bond taking the colour of the
+atom it touches.
+
+![Aspirin in four 3D styles](docs/assets/three-styles.svg)
+
+![The CPK colours at true relative van der Waals radii](docs/assets/three-colours.svg)
+
+*One atom per sphere, in the space-filling style, so the sizes are the van der
+Waals radii at true relative scale. The last one is the SMILES wildcard `*` —
+deep pink means "not in the table".*
+
+The viewpoint is the molecule's principal axes, and the rotation is **never a
+mirror** — in a 3D figure the configuration is the coordinates themselves, so a
+mirrored view inverts every stereocentre with nothing on the page to show it.
+When symmetry makes the viewpoint arbitrary (methane, a linear molecule), it
+says so. See [3D molecule figures](docs/guide/depict3d.md).
+
 ## Correctness
 
 Every claim above has a judge behind it, and each judge had to be shown to go
-red when the behaviour is broken. The full suite (`TOTAL` in `harness/gates.sh`, **41** as of this writing) runs
+red when the behaviour is broken. The full suite (`TOTAL` in `harness/gates.sh`, **49** as of this writing) runs
 on every push; the gates compare
 omgkit against an external implementation record by record on a
 8831-molecule corpus, and each one carries a floor as well as a cap so that it

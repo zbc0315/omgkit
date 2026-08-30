@@ -60,6 +60,55 @@ MOLECULES = {
 }
 
 
+# ── 三维图用的分子 ───────────────────────────────────────────────────
+# 挑的标准:一眼认得出、原子数不多(空间填充图里原子一多就糊成一团)、
+# 四套样式各有各的看点。
+MOLECULES_3D = {
+    "aspirin3d": "CC(=O)Oc1ccccc1C(=O)O",
+    "caffeine3d": "CN1C=NC2=C1C(=O)N(C)C(=O)N2C",
+    "glucose3d": "OC[C@H]1O[C@@H](O)[C@H](O)[C@@H](O)[C@@H]1O",
+    "cyclohexane3d": "C1CCCCC1",
+    # 半键配色:一个分子里同时有 S、N、O、C、H,每根键的两半颜色都不同
+    "cysteine3d": "SC[C@H](N)C(=O)O",
+}
+
+# 配色表那张图:一个元素一个原子。**球的大小是真的**(空间填充 = 满范德华
+# 半径,四套样式里只有它一比一),所以这张图同时是一张尺寸表。
+# 末尾放通配原子 `*`,让"表里没有"那个刺眼的粉色露一次面。
+ATOMS_3D = {
+    "atomH": "[H]", "atomC": "[C]", "atomN": "[N]", "atomO": "[O]",
+    "atomF": "[F]", "atomP": "[P]", "atomS": "[S]", "atomCl": "[Cl]",
+    "atomBr": "[Br]", "atomI": "[I]", "atomFe": "[Fe]", "atomStar": "*",
+}
+
+# 四套样式的名字,与 `Style3D::ALL` 一致(文件名后缀就是它)。
+STYLES_3D = ["space-filling", "ball-and-stick", "stick", "wireframe"]
+
+
+def draw3d_all(tmp: Path, mols=None, scale=None) -> None:
+    """把三维清单交给 omgkit 画一遍,四套样式各一份。
+
+    `scale` 给**并排比较**的图用:四套样式各带各的默认比例尺(空间填充 24、
+    其余 36),单独出图时那是对的,并排摆就会让空间填充那格看着小一圈 ——
+    而分子并没有变。要并排就显式压到同一个数。
+    """
+    args = [f"{name}={smi}" for name, smi in (mols or MOLECULES_3D).items()]
+    if scale is not None:
+        args.append(f"--scale={scale}")
+    cmd = [
+        "cargo", "run", "-q", "--release", "-p", "omgkit-depict",
+        "--features", "raster", "--example", "draw3d", "--", str(tmp), *args,
+    ]
+    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(f"omgkit 出三维图失败:\n{r.stderr}")
+    # **视角定不下来的要说出来。** 主轴简并时图的取向是任取的 —— 文档里的
+    # 配图不该是那种,换个分子就好。
+    for ln in r.stdout.splitlines():
+        if not ln.rstrip().endswith("视角退化0"):
+            print(f"  ⚠ 视角不唯一:{ln}")
+
+
 def draw_all(tmp: Path) -> None:
     """把清单里每条 SMILES 交给 omgkit 画一遍。"""
     args = [f"{name}={smi}" for name, smi in MOLECULES.items()]
@@ -85,17 +134,33 @@ def draw_all(tmp: Path) -> None:
         print(f"  ⚠ 画得不干净:{ln}")
 
 
-def load(tmp: Path, name: str):
+# 三维图的 `<defs>` 里那些渐变,拼图时要提到大图最外层去一次。
+# 留在各自的小图里也画得出来,但同一种颜色会被定义很多遍 —— 同名的 id 出现
+# 两次在 SVG 里是不合式的,而且文件会白胖一圈。id 由颜色/几何算出来,同名的
+# 定义逐字节相同,所以合并是安全的。
+DEFS: dict[str, str] = {}
+
+
+def load(tmp: Path, name: str, style: str = STYLE):
     """读一张 omgkit 画的 SVG,拆成 `(宽, 高, 内容)`。
 
     外层 `<svg>` 与白底那一行都去掉 —— 拼进大图之后,底色由大图统一铺,
     每张小图各铺一块白的话,图与图之间会看到接缝。
+
+    `<defs>` 里的渐变收进 `DEFS`,由 `wrap` 统一写在大图最前面。
     """
-    text = (tmp / f"{name}.{STYLE}.svg").read_text(encoding="utf-8")
+    text = (tmp / f"{name}.{style}.svg").read_text(encoding="utf-8")
     m = re.search(r'width="([\d.]+)" height="([\d.]+)"', text)
     w, h = float(m.group(1)), float(m.group(2))
     body = re.sub(r"^<svg[^>]*>\n", "", text)
     body = re.sub(r"^<rect[^>]*fill=\"#fff\"/>\n", "", body)
+    defs = re.search(r"<defs>\n(.*?)</defs>\n", body, re.DOTALL)
+    if defs:
+        for line in defs.group(1).splitlines():
+            gid = re.search(r'id="([^"]+)"', line)
+            if gid:
+                DEFS[gid.group(1)] = line
+        body = body.replace(defs.group(0), "")
     body = body.replace("</svg>", "").strip()
     return w, h, body
 
@@ -105,11 +170,15 @@ def place(body: str, dx: float, dy: float) -> str:
 
 
 def wrap(items: str, w: float, h: float) -> str:
+    defs = ""
+    if DEFS:
+        defs = "<defs>\n" + "\n".join(DEFS[k] for k in sorted(DEFS)) + "\n</defs>\n"
+        DEFS.clear()
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{w:.0f}" height="{h:.0f}" '
         f'viewBox="0 0 {w:.2f} {h:.2f}">\n'
         f'<rect width="{w:.2f}" height="{h:.2f}" fill="#fff"/>\n'
-        f"{items}</svg>\n"
+        f"{defs}{items}</svg>\n"
     )
 
 
@@ -130,9 +199,13 @@ def caption(text: str, cx: float, y: float, size: float = 9.0) -> str:
     )
 
 
-def grid(tmp: Path, cells, cols: int, lang: int, pad: float = 16.0, cap_h: float = 16.0) -> str:
-    """把若干 `(分子名, (英文图注, 中文图注))` 摆成网格,每格居中。"""
-    loaded = [(load(tmp, name), cap[lang]) for name, cap in cells]
+def grid(tmp: Path, cells, cols: int, lang: int, pad: float = 16.0, cap_h: float = 16.0,
+         style: str = STYLE) -> str:
+    """把若干 `(分子名, (英文图注, 中文图注))` 摆成网格,每格居中。
+
+    `style` 给三维图用 —— 那四套样式的文件名后缀是样式名本身。
+    """
+    loaded = [(load(tmp, name, style), cap[lang]) for name, cap in cells]
     rows = [loaded[i:i + cols] for i in range(0, len(loaded), cols)]
     col_w = max(max(w, cap_width(cap)) for (w, _, _), cap in loaded) + pad * 2
     row_hs = [max(h for (_, h, _), _ in r) + pad * 2 + cap_h for r in rows]
@@ -187,12 +260,55 @@ def reaction(tmp: Path, left, right, lang: int, pad: float = 18.0, cap_h: float 
     return wrap(items, x + pad - GAP + overhang, height)
 
 
+def three_row(tmp: Path, name: str, lang: int) -> str:
+    """同一个分子的四套三维样式并排一行。
+
+    **四格用的是同一组坐标、同一个视角** —— 差别只在怎么画。并排摆正是为了
+    让这一点看得见:空间填充看占位、球棍看键长键角、棍状看骨架、线框看全局。
+    """
+    caps = [
+        ("Space-filling", "空间填充"),
+        ("Ball-and-stick", "球棍"),
+        ("Stick", "棍状"),
+        ("Wireframe", "线框"),
+    ]  # 四格由 draw3d 的 --scale 压到同一个比例尺,见 draw3d_all
+    loaded = [(load(tmp, name, st), c[lang]) for st, c in zip(STYLES_3D, caps)]
+    pad, cap_h = 14.0, 16.0
+    col_w = max(max(w, cap_width(cap)) for (w, _, _), cap in loaded) + pad * 2
+    height = max(h for (_, h, _), _ in loaded) + pad * 2 + cap_h
+    items = ""
+    for i, ((w, h, body), cap) in enumerate(loaded):
+        cx = i * col_w + col_w / 2
+        items += place(body, cx - w / 2, (height - cap_h - h) / 2)
+        items += caption(cap, cx, height - 5)
+    return wrap(items, col_w * len(loaded), height)
+
+
+def mixed(tmp: Path, cells, lang: int, pad: float = 18.0, cap_h: float = 16.0) -> str:
+    """每格自带样式的一行图:`(分子名, 样式, (英文图注, 中文图注))`。
+
+    `grid` 一整张图只吃一套样式,而"二维结构式对三维球棍"这种对照恰恰要两套。
+    """
+    loaded = [(load(tmp, name, st), cap[lang]) for name, st, cap in cells]
+    col_w = max(max(w, cap_width(cap)) for (w, _, _), cap in loaded) + pad * 2
+    height = max(h for (_, h, _), _ in loaded) + pad * 2 + cap_h
+    items = ""
+    for i, ((w, h, body), cap) in enumerate(loaded):
+        cx = i * col_w + col_w / 2
+        items += place(body, cx - w / 2, (height - cap_h - h) / 2)
+        items += caption(cap, cx, height - 5)
+    return wrap(items, col_w * len(loaded), height)
+
+
 def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         print("omgkit 画图中…")
         draw_all(tmp)
+        # 并排比较的那几张图压到同一个比例尺,理由见 draw3d_all
+        draw3d_all(tmp, scale=36.0)
+        draw3d_all(tmp, ATOMS_3D, scale=36.0)
 
         # 一张图两套图注:英文页与中文页各用各的,分子本身是同一批 SVG。
         # 中文名对中国的化学家更直接,英文名是文档站的主语言 —— 两边都不将就。
@@ -227,6 +343,32 @@ def main() -> int:
                      ("ethanol", ("Ethanol", "乙醇"))],
                     [("ethyl-benzoate", ("Ethyl benzoate", "苯甲酸乙酯")),
                      ("water", ("Water · reconstructed", "水 · 收口得到"))], lang=lang),
+                # 三维:同一个分子四套样式并排,看它们各自说什么
+                f"three-styles{suffix}.svg": three_row(tmp, "aspirin3d", lang),
+                # CPK 配色表:一个元素一个球,球的大小就是范德华半径的真实比例
+                f"three-colours{suffix}.svg": grid(tmp, [
+                    ("atomH", ("H", "H")), ("atomC", ("C", "C")),
+                    ("atomN", ("N", "N")), ("atomO", ("O", "O")),
+                    ("atomF", ("F", "F")), ("atomP", ("P", "P")),
+                    ("atomS", ("S", "S")), ("atomCl", ("Cl", "Cl")),
+                    ("atomBr", ("Br", "Br")), ("atomI", ("I", "I")),
+                    ("atomFe", ("Fe", "Fe")),
+                    ("atomStar", ("* not in the table", "* 表里没有")),
+                ], cols=6, lang=lang, style="space-filling"),
+                # 半键配色:半胱氨酸,S/N/O/C/H 五种颜色,每根键都是两色
+                f"three-halfbond{suffix}.svg": grid(tmp, [
+                    ("cysteine3d", ("", ""))], cols=1, lang=lang, style="stick"),
+                # 二维对三维:同一个葡萄糖,结构式画成平面六边形,三维是椅式
+                f"three-vs-2d{suffix}.svg": mixed(tmp, [
+                    ("glucose", STYLE, ("2D structure diagram", "二维结构式")),
+                    ("glucose3d", "ball-and-stick", ("3D, same molecule", "三维,同一个分子")),
+                ], lang=lang),
+                # 三维画廊:球棍图,四个分子
+                f"three-gallery{suffix}.svg": grid(tmp, [
+                    ("caffeine3d", ("Caffeine", "咖啡因")),
+                    ("glucose3d", ("Glucose", "葡萄糖")),
+                    ("cyclohexane3d", ("Cyclohexane", "环己烷")),
+                ], cols=3, lang=lang, style="ball-and-stick"),
                 # 副产物收口:模板只写主产物,丢掉的原子由原子账收口成分子
                 f"byproduct{suffix}.svg": reaction(tmp,
                     [("boc-amine", ("Boc-protected benzylamine", "Boc 保护的苄胺"))],

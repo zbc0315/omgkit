@@ -92,6 +92,7 @@ So the coverage table matters more than any single judge:
 | SMARTS **chirality** reference frame | `check_smarts_chirality.py` (with a discriminating-power check) |
 | Product-side **chirality**, four instruction kinds | `check_product_chirality.py` (with a discriminating-power check) |
 | Drawing (L9) | `omgkit-depict --example audit` over the whole corpus — see below |
+| 3D figures | `check_depict3d.py` — the circles and lines are read back out of the emitted SVG and recomputed from the coordinates, RDKit's van der Waals radii and Jmol's colour table |
 | Graph descriptors for ML | `check_descriptors.py` — sixteen of the nineteen values, atom by atom and bond by bond, over five corpora |
 
 **When adding a path, ask this table first.** Which cell does it fall in? No
