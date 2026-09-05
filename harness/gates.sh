@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 # 漏一处就是个不会报错的假数。CI 的头注释里记过同一个坑(那里原先写着
 # "四道闸门",而步骤早已加到八步)。这里由 `step` 计数,末尾自查:
 # 改了步骤忘了改 `TOTAL`,脚本最后一行会红。
-TOTAL=49
+TOTAL=51
 N=0
 step() {
     N=$((N + 1))
@@ -511,6 +511,23 @@ cargo run -q -p omgkit-depict --release --example dump_depict3d -- harness/corpu
 "$PY" harness/check_depict3d.py "$WORK/three.jsonl"
 step "判官:三维图的 Python 绑定(与 Rust 逐字节比)"
 "$PY" harness/check_python_depict3d.py "$WORK/three.jsonl"
+
+# **二维结构式的芳香环底色。** 同样从产品吐出来的那段 SVG 里把多边形和渐变
+# 读回来;芳香环有几个、各多大由 RDKit 独立数一遍。
+#
+# 这一条跑**全语料**(8831),不像三维那条截到 400。理由是量出来的:
+# "大于八元的环跳过不铺"这个变异在前 800 个分子上**两边全绿**,只有全语料
+# 才抓得住 —— 那唯一的一处是个卟啉类分子,16 元芳香大环。截断挡住的正是
+# 活的分歧。代价很小:导出 6 秒、判官 1.4 秒。
+#
+# 变异实测(全在全语料上打红):高光退回环心、光源翻到右下、底色一块也不发、
+# 序列化把底色写到最后(盖住线条)、芳香判定放宽成"任一根键芳香"、
+# 半径取外接圆的一半、渐变两档写反、大于八元的环跳过不铺。
+step "判官:芳香环底色(多边形与渐变从 SVG 反读,外部真值是 RDKit 的芳香环)"
+cargo run -q -p omgkit-depict --release --example dump_depict2d -- harness/corpus/large.smi >"$WORK/two.jsonl"
+"$PY" harness/check_depict2d.py "$WORK/two.jsonl" --corpus harness/corpus/large.smi
+step "判官:二维图的 Python 绑定(与 Rust 逐字节比)"
+"$PY" harness/check_python_depict2d.py "$WORK/two.jsonl"
 
 step "判官:边界形状语料 —— 写出时 E/Z 守不守恒"
 cargo run -q -p omgkit-io --release --example dump_written -- harness/corpus/edge_shapes.smi >"$WORK/edw.tsv"

@@ -4,8 +4,39 @@
 //! cargo run -p omgkit-depict --features raster --example draw -- <输出目录>
 //! ```
 //!
+//! 芳香环铺底色:加 `--fill`(默认白 → 浅蓝),或者 `--fill=中心色,外缘色`
+//! 自己给两个 `#rrggbb`:
+//!
+//! ```shell
+//! cargo run -p omgkit-depict --features raster --example draw -- out --fill='#fffbe6,#f5c26b'
+//! ```
+//!
 //! 判据能守住"非白像素够多""格式头对",守不住"这张图画得对不对" —— 那要人眼看。
-use omgkit_depict::{generate, raster, render::scene, style::Style, svg::to_svg};
+use omgkit_depict::{
+    generate,
+    palette::parse_hex,
+    raster,
+    render::scene,
+    style::{AromaticFill, Style},
+    svg::to_svg,
+};
+
+/// 读 `--fill` / `--fill=中心色,外缘色`。
+///
+/// 颜色写错**不能默默用默认色** —— 那样命令跑得好好的,画出来却不是你要的
+/// 配色,而两次跑的差别只有你自己记得。
+fn parse_fill(arg: &str) -> AromaticFill {
+    let Some(spec) = arg.strip_prefix("--fill=") else {
+        return AromaticFill::DEFAULT;
+    };
+    let (a, b) = spec
+        .split_once(',')
+        .unwrap_or_else(|| panic!("--fill= 要写成 `中心色,外缘色`,收到的是 {spec:?}"));
+    AromaticFill {
+        centre: parse_hex(a).unwrap_or_else(|| panic!("中心色不是 #rrggbb:{a:?}")),
+        edge: parse_hex(b).unwrap_or_else(|| panic!("外缘色不是 #rrggbb:{b:?}")),
+    }
+}
 
 /// 文件名里用的短名。**加了新规范就要在这里加一支** —— 否则它会跟别人
 /// 撞同一个短名,把前一套的图悄悄覆盖掉。
@@ -20,8 +51,17 @@ fn tag_of(st: &Style) -> &'static str {
 fn main() {
     let mut args = std::env::args().skip(1);
     let dir = args.next().unwrap_or_else(|| ".".into());
+    let rest: Vec<String> = args.collect();
+    // 芳香环底色:开关加可选的两个颜色。放在别的参数之前挑出来,免得
+    // `--fill=...` 被当成 `名字=SMILES`(那个 `名字` 会是 `--fill`)。
+    let fill = rest
+        .iter()
+        .find(|a| a.as_str() == "--fill" || a.starts_with("--fill="))
+        .map(|a| parse_fill(a));
     // 命令行上可以直接给 `名字=SMILES`,不给就用下面这组内置的
-    let extra: Vec<(String, String)> = args
+    let extra: Vec<(String, String)> = rest
+        .iter()
+        .filter(|a| a.as_str() != "--fill" && !a.starts_with("--fill="))
         .map(|a| match a.split_once('=') {
             // 不合式的参数**不能默默丢掉**:丢掉之后 `extra` 可能空掉,于是
             // 转去画内置的那一批 —— 跑得好好的,画的却不是你要的分子
@@ -107,6 +147,10 @@ fn main() {
         omgkit_io::stereo::perceive_bond_stereo(&mut m);
         for st in &Style::ALL {
             let tag = tag_of(st);
+            let st = &Style {
+                aromatic_fill: fill,
+                ..st.clone()
+            };
             let d = generate(&m, st);
             let sc = scene(&m, &d, st);
             std::fs::write(format!("{dir}/{name}.{tag}.svg"), to_svg(&sc, st)).unwrap();

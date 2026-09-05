@@ -33,6 +33,32 @@
 //! New Document 是 ChemDraw 打开即用的默认值。其余 9 套(Wiley、Synthesis、
 //! Adv. Synth. Catal. 等)键长都在 17–20 pt,夹在这两者之间。
 
+/// 芳香环的底色填充 —— 两个颜色,中心一个、外缘一个。
+///
+/// 只影响渲染,不影响布局:填充画在最底层,不挪动任何原子,也不改变碰撞判定。
+/// [`Style::layout_fingerprint`] 因此不计入它。
+///
+/// # 默认色的出处
+///
+/// 中心是纯白 `#ffffff`,外缘是 **CSS Color Module Level 4 的具名色
+/// `lightblue` = `#add8e6`** —— 取一个有出处的"浅蓝",而不是随手调一个。
+/// 两个都可以换成别的颜色。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AromaticFill {
+    /// 渐变焦点(高光)那一点的颜色
+    pub centre: [u8; 3],
+    /// 渐变外缘(环的外接圆上)的颜色
+    pub edge: [u8; 3],
+}
+
+impl AromaticFill {
+    /// 白 → 浅蓝。`edge` 是 CSS 的具名色 `lightblue`。
+    pub const DEFAULT: AromaticFill = AromaticFill {
+        centre: [0xff, 0xff, 0xff],
+        edge: [0xad, 0xd8, 0xe6],
+    };
+}
+
 /// 一套绘图规范。
 ///
 /// 长度一律以**磅(pt)** 为单位,与 ChemDraw 的文档设置对齐,便于逐项核对。
@@ -70,6 +96,13 @@ pub struct Style {
     /// 手册里这一项是以图片呈现的,文本抽不出来,所以这里**不假称是从手册读到
     /// 的**:取无衬线族,与两套规范的实际观感一致。要精确复刻请自行覆盖。
     pub font_family: &'static str,
+    /// 芳香环要不要铺一层底色渐变。`None` 是不铺。
+    ///
+    /// **手册里没有这一项** —— 两套规范都不含它,`None` 是本库自己的默认,
+    /// 与 ChemDraw 的出图一致(它不铺底色)。开着的时候每个芳香环底下会多
+    /// 一块径向渐变,见 [`AromaticFill`] 与
+    /// [`Primitive::AromaticFill`](crate::render::Primitive::AromaticFill)。
+    pub aromatic_fill: Option<AromaticFill>,
 }
 
 impl Style {
@@ -88,6 +121,7 @@ impl Style {
         atom_label_pt: 10.0,
         caption_pt: 10.0,
         font_family: "Arial, Helvetica, sans-serif",
+        aromatic_fill: None,
     };
 
     /// **New Document** —— ChemDraw 新建文档的默认值。
@@ -106,6 +140,7 @@ impl Style {
         atom_label_pt: 10.0,
         caption_pt: 12.0,
         font_family: "Arial, Helvetica, sans-serif",
+        aromatic_fill: None,
     };
 
     /// 本库内置的全部规范。
@@ -147,6 +182,7 @@ impl Style {
     /// | `label_size()` | ×1.4(字号 ×1.4,或等价地键长 ÷1.4) | **1409** |
     /// | 同上 | ÷1.4 | 727 |
     /// | 其余**八个**字段 | ×1.4 | **全 0** |
+    /// | `aromatic_fill` | `None` → 铺底色 | **0** |
     ///
     /// `atom_label_pt` 与 `bond_length_pt` **不是两个字段,是同一个旋钮的两头**:
     /// 布局只经 [`Style::label_size`] 读它们,而那正是二者之商。实测对称性
@@ -157,9 +193,12 @@ impl Style {
     /// 1.37 → 1351,1.38 → 1358 —— 幅度差 1%,数字挪三成。它们说明的是"这个
     /// 旋钮**动不动**得了布局",不是"它有多敏感"。
     ///
-    /// **验死了**:保持 `label_size()` 与 `chain_angle_deg` 不变、把**其余十个
+    /// `aromatic_fill` 是后加的,那一行单独量过(开与关,8831 个分子,0 个坐标
+    /// 动了);它不进上面那张 ×1.4 的表 —— 那是个开关,没有"×1.4"可言。
+    ///
+    /// **验死了**:保持 `label_size()` 与 `chain_angle_deg` 不变、把**其余十一个
     /// 字段全改掉**(键长与字号双双翻倍,线宽、粗宽、留白、虚线间距、双键间距、
-    /// 图注字号、字体、名字全换),8831 个分子的坐标**逐点相同**;
+    /// 图注字号、字体、名字全换,底色打开),8831 个分子的坐标**逐点相同**;
     /// `margin_width_pt` 从 ×0.01 扫到 ×50,一张图都不动。
     ///
     /// 所以计入的正好是 `(label_size(), chain_angle_deg)` 两项 —— 不多不少。
@@ -308,7 +347,7 @@ mod tests {
 
         // `bond_length_pt` 与 `atom_label_pt` 只经它们的**比值**进布局,所以这里
         // 让两者给出同一个比值变化 —— 它们理应同变同不变。
-        let cases: [Tweak; 11] = [
+        let cases: [Tweak; 12] = [
             ("bond_length_pt", |s| s.bond_length_pt /= 1.4),
             ("atom_label_pt", |s| s.atom_label_pt *= 1.4),
             ("chain_angle_deg", |s| s.chain_angle_deg = 108.0),
@@ -320,6 +359,9 @@ mod tests {
             ("caption_pt", |s| s.caption_pt *= 1.4),
             ("font_family", |s| s.font_family = "serif"),
             ("name", |s| s.name = "另一套规范"),
+            ("aromatic_fill", |s| {
+                s.aromatic_fill = Some(AromaticFill::DEFAULT);
+            }),
         ];
         // **`Style` 多一个字段,这里就编不过**(`error[E0027]` 会直接点名那个
         // 字段)—— 逼新字段必须在上面那张表里露面。少了这道闸门,一个真影响
@@ -337,6 +379,7 @@ mod tests {
             atom_label_pt: _,
             caption_pt: _,
             font_family: _,
+            aromatic_fill: _,
         } = &base;
 
         let (mut moved_any, mut still_any) = (false, false);

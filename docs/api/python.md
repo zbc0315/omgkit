@@ -317,7 +317,7 @@ today and are not yet wrapped:
 | `omgkit_core::MolBatch` | the columnar batch and its zero-copy per-molecule views |
 | `omgkit_io::smarts` writing | SMARTS output for molecules and reactions |
 | `omgkit_chem` individual stages | running one sanitization stage at a time |
-| `omgkit_depict` rendering | SVG/PNG depiction — only the 2D molblock output is wrapped |
+| `omgkit_depict` raster output | PNG/JPEG. SVG is wrapped both ways ([`Mol.to_svg`](#omgkit.Mol) for 2D, [`Conformer.to_svg`](#omgkit.Conformer) for 3D); rasterizing would pull a chain of external dependencies into the wheel |
 | `omgkit_io::molblock::write_sdf_record` | multi-record SDF output with data fields |
 
 See the [Rust API](rust.md) if you need them.

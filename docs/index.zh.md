@@ -82,12 +82,12 @@ RDKit ETKDGv3 2025.09.2 失败 36 个(0.41%),omgkit 失败 1 个(0.01%)。
 
     ```toml
     [dependencies]
-    omgkit-core   = "0.0.7"
-    omgkit-io     = "0.0.7"
-    omgkit-chem   = "0.0.7"
-    omgkit-match  = "0.0.7"
-    omgkit-conf   = "0.0.7"
-    omgkit-depict = "0.0.7"
+    omgkit-core   = "0.0.8"
+    omgkit-io     = "0.0.8"
+    omgkit-chem   = "0.0.8"
+    omgkit-match  = "0.0.8"
+    omgkit-conf   = "0.0.8"
+    omgkit-depict = "0.0.8"
     ```
 
 按需取用,每一层只依赖它下面的层。完整说明见[安装](getting-started/install.md)。

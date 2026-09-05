@@ -681,6 +681,11 @@ mod tests {
                 // 楔形分方向:窄端宽端不是一回事
                 render::Primitive::Wedge { from, to, .. } => format!("W {} {}", q(*from), q(*to)),
                 render::Primitive::Hash { from, to, .. } => format!("H {} {}", q(*from), q(*to)),
+                render::Primitive::AromaticFill { poly, focus, .. } => {
+                    let mut vs: Vec<String> = poly.iter().map(|p| q(*p)).collect();
+                    vs.sort();
+                    format!("F [{}] @{}", vs.join(" "), q(*focus))
+                }
                 render::Primitive::Ball { .. } | render::Primitive::Stick { .. } => {
                     unreachable!("二维那条路的场景里没有球棍 —— 收到就说明拿错了场景")
                 }

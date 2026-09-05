@@ -48,12 +48,12 @@ For Rust, take only the layers you need; each depends only on the ones below it.
 
 ```toml
 [dependencies]
-omgkit-core   = "0.0.7"   # data structures
-omgkit-io     = "0.0.7"   # SMILES, SMARTS, .mol/.sdf
-omgkit-chem   = "0.0.7"   # sanitization
-omgkit-match  = "0.0.7"   # matching, reactions, byproducts
-omgkit-conf   = "0.0.7"   # 3D structure generation
-omgkit-depict = "0.0.7"   # 2D coordinates, 2D and 3D drawing
+omgkit-core   = "0.0.8"   # data structures
+omgkit-io     = "0.0.8"   # SMILES, SMARTS, .mol/.sdf
+omgkit-chem   = "0.0.8"   # sanitization
+omgkit-match  = "0.0.8"   # matching, reactions, byproducts
+omgkit-conf   = "0.0.8"   # 3D structure generation
+omgkit-depict = "0.0.8"   # 2D coordinates, 2D and 3D drawing
 ```
 
 ## Getting started

@@ -13,11 +13,11 @@ homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
-omgkit-core = { path = "../omgkit-core", version = "0.0.7" }
+omgkit-core = { path = "../omgkit-core", version = "0.0.8" }
 
 [dev-dependencies]
 # 单元测试用 SMILES 构造分子;差分测试读基准 JSONL
-omgkit-io = { path = "../omgkit-io", version = "0.0.7" }
+omgkit-io = { path = "../omgkit-io", version = "0.0.8" }
 serde_json = "1"
 
 [lints]

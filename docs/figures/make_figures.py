@@ -41,6 +41,9 @@ MOLECULES = {
     "glucose": "OC[C@H]1O[C@@H](O)[C@H](O)[C@@H](O)[C@@H]1O",
     "morphine": "CN1CC[C@]23c4c5ccc(O)c4O[C@H]2[C@@H](O)C=C[C@H]3[C@H]1C5",  # 桥环,故意的
     "nicotine": "CN1CCC[C@H]1c1cccnc1",
+    # 芳香环底色那张图用:一个稠环、一个含氮五元环,底色一眼看得出画了几块
+    "naphthalene": "c1ccc2ccccc2c1",
+    "indole": "c1ccc2[nH]ccc2c1",
     "camphor": "CC1(C)[C@@H]2CC[C@@]1(C)C(=O)C2",  # 桥环,故意的
     "ascorbic": "OC[C@H](O)[C@H]1OC(=O)C(O)=C1O",
     # 立体:两组对照
@@ -109,9 +112,17 @@ def draw3d_all(tmp: Path, mols=None, scale=None) -> None:
             print(f"  ⚠ 视角不唯一:{ln}")
 
 
-def draw_all(tmp: Path) -> None:
-    """把清单里每条 SMILES 交给 omgkit 画一遍。"""
+def draw_all(tmp: Path, fill=None) -> None:
+    """把清单里每条 SMILES 交给 omgkit 画一遍。
+
+    `fill` 给芳香环底色那张图用:`""` 是默认的白 → 浅蓝,`"中心色,外缘色"`
+    是自定义配色。**同名文件写在不同目录里** —— `draw` 的文件名只带规范的
+    短名,不带底色开关,写进同一个目录会互相覆盖。
+    """
+    tmp.mkdir(parents=True, exist_ok=True)
     args = [f"{name}={smi}" for name, smi in MOLECULES.items()]
+    if fill is not None:
+        args.append("--fill" if fill == "" else f"--fill={fill}")
     cmd = [
         "cargo", "run", "-q", "--release", "-p", "omgkit-depict",
         "--features", "raster", "--example", "draw", "--", str(tmp), *args,
@@ -200,12 +211,16 @@ def caption(text: str, cx: float, y: float, size: float = 9.0) -> str:
 
 
 def grid(tmp: Path, cells, cols: int, lang: int, pad: float = 16.0, cap_h: float = 16.0,
-         style: str = STYLE) -> str:
+         style: str = STYLE, dirs=None) -> str:
     """把若干 `(分子名, (英文图注, 中文图注))` 摆成网格,每格居中。
 
     `style` 给三维图用 —— 那四套样式的文件名后缀是样式名本身。
+
+    `dirs` 给"同一个分子画两遍、只差一个开关"的对照图用:逐格指定从哪个
+    目录读。不给就全从 `tmp` 读。
     """
-    loaded = [(load(tmp, name, style), cap[lang]) for name, cap in cells]
+    dirs = dirs or [tmp] * len(cells)
+    loaded = [(load(d, name, style), cap[lang]) for d, (name, cap) in zip(dirs, cells)]
     rows = [loaded[i:i + cols] for i in range(0, len(loaded), cols)]
     col_w = max(max(w, cap_width(cap)) for (w, _, _), cap in loaded) + pad * 2
     row_hs = [max(h for (_, h, _), _ in r) + pad * 2 + cap_h for r in rows]
@@ -306,6 +321,10 @@ def main() -> int:
         tmp = Path(td)
         print("omgkit 画图中…")
         draw_all(tmp)
+        # 芳香环底色:默认配色一份、自定义配色一份,各写各的目录
+        fill_dir, custom_dir = tmp / "fill", tmp / "custom"
+        draw_all(fill_dir, fill="")
+        draw_all(custom_dir, fill="#fffbe6,#f5c26b")
         # 并排比较的那几张图压到同一个比例尺,理由见 draw3d_all
         draw3d_all(tmp, scale=36.0)
         draw3d_all(tmp, ATOMS_3D, scale=36.0)
@@ -337,6 +356,13 @@ def main() -> int:
                     ("trans-butene", ("trans-2-butene", "反-2-丁烯")),
                     ("cis-butene", ("cis-2-butene", "顺-2-丁烯")),
                 ], cols=4, lang=lang),
+                # 芳香环底色:同一个分子画三遍,只差一个开关与两个颜色
+                f"aromatic-fill{suffix}.svg": grid(tmp, [
+                    ("naphthalene", ("Default: no shading", "默认:不铺底色")),
+                    ("naphthalene", ("aromatic_fill on", "开着 aromatic_fill")),
+                    ("indole", ("Two rings, two gradients", "两个环,两块渐变")),
+                    ("caffeine", ("Own two colours", "换成自己的两个颜色")),
+                ], cols=2, lang=lang, dirs=[tmp, fill_dir, fill_dir, custom_dir]),
                 # 反应模板:模板只描述反应中心,分子其余部分自动跟着走
                 f"esterification{suffix}.svg": reaction(tmp,
                     [("benzoic-acid", ("Benzoic acid", "苯甲酸")),

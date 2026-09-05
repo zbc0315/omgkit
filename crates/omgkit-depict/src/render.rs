@@ -87,6 +87,29 @@ pub enum Primitive {
         /// RGB
         color: [u8; 3],
     },
+    /// **芳香环的底色。** 一块沿环的顶点围出来的多边形,填一层径向渐变。
+    ///
+    /// 由 [`Style::aromatic_fill`](crate::style::Style::aromatic_fill) 打开,
+    /// 默认关着。[`scene`] 把它们**全部排在最前面**,于是它在最底层,盖不住
+    /// 任何线条与文字 —— 这一点由判据
+    /// `底色永远在最底层` 钉住。
+    ///
+    /// 三维那条路一块也不发这个 —— 球棍图里没有"环的底色"。
+    AromaticFill {
+        /// 环的顶点,按成环次序,画布坐标
+        poly: Vec<Point2>,
+        /// 渐变外接圆的圆心(= 环顶点的质心)
+        centre: Point2,
+        /// 渐变的焦点,也就是高光落在哪 —— 质心与**最靠光源那个顶点**的中点,
+        /// 见 [`fill_focus`]
+        focus: Point2,
+        /// 外接圆半径(质心到最远顶点)
+        radius: f64,
+        /// 焦点处的颜色
+        inner: [u8; 3],
+        /// 外接圆上的颜色
+        outer: [u8; 3],
+    },
     /// 标签的**一行**,`at` 是这一行的中心。竖排的标签发两条 —— 符号一条、氢一条
     Text {
         /// 中心
@@ -114,6 +137,89 @@ pub struct Scene {
 /// [`three`](crate::three) 也用它 —— 两条路各定一个数的话,同一个分子的二维图
 /// 与三维图边距不一样,而那是没有理由的。
 pub(crate) const PAD_PT: f64 = 8.0;
+
+/// 光源方向,**画布坐标**(y 朝下),指向左上。
+///
+/// 三处共用它:球的高光偏在左上、棍的横向渐变亮边朝左上、芳香环底色的高光取
+/// 最靠这个方向的那个顶点。**各写各的话,整张图看着说不出哪里不对** ——
+/// 球被左上的灯照着、环的高光却在右下。
+///
+/// 左上是各家分子软件的默认光位。
+///
+/// 公开出来是因为 [`fill_focus`] 的文档要引它 —— 而那条规则("高光贴着最靠
+/// 光源的那个角")离开这个方向就说不清楚。下游自己往图上加装饰时,照着它
+/// 打光才与库画出来的部分是同一盏灯。
+pub const LIGHT: [f64; 2] = [
+    -std::f64::consts::FRAC_1_SQRT_2,
+    -std::f64::consts::FRAC_1_SQRT_2,
+];
+
+/// 芳香环底色的渐变焦点:**质心与最靠光源那个顶点的中点**。
+///
+/// "最靠光源"= 从质心指向该顶点的向量与 [`LIGHT`] 的点积最大。正好打平时
+/// (环画得左右对称、两个顶点一样靠上)按画布坐标 `(x, y)` 取小的那个 ——
+/// 必须有个确定的说法,否则同一个分子两次跑出来的 `<defs>` 可能不一样。
+///
+/// 挑顶点而不是"沿光源方向偏移半个半径",是因为要的就是"角落与中心连线的
+/// 中间":高光贴着一个角,环看起来是被斜上方的光打亮的。
+///
+/// `poly` 为空时返回质心本身 —— 环至少有三个顶点,这一支到不了,写它只是
+/// 不让空切片走到 `unwrap` 上。
+#[must_use]
+pub fn fill_focus(poly: &[Point2], centre: Point2) -> Point2 {
+    let mut best: Option<(f64, Point2)> = None;
+    for v in poly {
+        let d = *v - centre;
+        let lit = d.x * LIGHT[0] + d.y * LIGHT[1];
+        let better = match best {
+            None => true,
+            Some((bl, bp)) => lit > bl || (lit == bl && (v.x, v.y) < (bp.x, bp.y)),
+        };
+        if better {
+            best = Some((lit, *v));
+        }
+    }
+    match best {
+        Some((_, v)) => Point2::new((v.x + centre.x) / 2.0, (v.y + centre.y) / 2.0),
+        None => centre,
+    }
+}
+
+/// 一个环上的键**全是芳香键**时,给它一块底色图元。
+///
+/// 判定按键而不按原子:环上每个原子都芳香、而环本身不是芳香环的情形是有的
+/// (两个芳环用一根单键相连时,SSSR 里不会出现那样的环,但稠环体系的大环会 ——
+/// 比如联苯不成环、而蒽的"外圈"不在 SSSR 里)。按键判最直接:画出来的这一圈
+/// 线本身是不是芳香键。
+fn aromatic_fill(
+    mol: &MolBuilder,
+    ring: &Ring,
+    pts: &[Point2],
+    fill: crate::style::AromaticFill,
+) -> Option<Primitive> {
+    if !ring
+        .bonds
+        .iter()
+        .all(|b| mol.bonds()[*b as usize].order == BondOrder::Aromatic)
+    {
+        return None;
+    }
+    let poly: Vec<Point2> = ring.atoms.iter().map(|a| pts[*a as usize]).collect();
+    let n = poly.len() as f64;
+    let centre = Point2::new(
+        poly.iter().map(|p| p.x).sum::<f64>() / n,
+        poly.iter().map(|p| p.y).sum::<f64>() / n,
+    );
+    let radius = poly.iter().map(|p| p.dist(centre)).fold(0.0_f64, f64::max);
+    Some(Primitive::AromaticFill {
+        focus: fill_focus(&poly, centre),
+        poly,
+        centre,
+        radius,
+        inner: fill.centre,
+        outer: fill.edge,
+    })
+}
 
 /// 把一张 [`Depiction`] 变成图元。
 ///
@@ -196,6 +302,16 @@ pub fn scene(mol: &MolBuilder, depiction: &Depiction, style: &Style) -> Scene {
     let margin_pt = style.margin() * scale;
 
     let mut items = Vec::new();
+
+    // **底色先发,于是它在最底层。** 图元是按顺序画的,后画的盖住先画的 ——
+    // 放在最前面是"不遮住任何线条与原子"的全部实现,不需要别的机制。
+    if let Some(fill) = style.aromatic_fill {
+        for r in &rings {
+            if let Some(p) = aromatic_fill(mol, r, &pts, fill) {
+                items.push(p);
+            }
+        }
+    }
 
     for (bi, b) in mol.bonds().iter().enumerate() {
         // **楔形的窄端必须在它描述的那个立体中心。** 键的 begin/end 与谁是中心
@@ -2941,6 +3057,13 @@ mod tests {
                     }
                     Primitive::Wedge { from, to, .. } => format!("W {} {}", q(*from), q(*to)),
                     Primitive::Hash { from, to, .. } => format!("H {} {}", q(*from), q(*to)),
+                    // 底色的多边形也要比:顶点次序随环从哪个原子起算而变,
+                    // 所以排序之后再比 —— 比的是"这一圈顶点",不是从哪个角起笔。
+                    Primitive::AromaticFill { poly, focus, .. } => {
+                        let mut vs: Vec<String> = poly.iter().map(|p| q(*p)).collect();
+                        vs.sort();
+                        format!("F [{}] @{}", vs.join(" "), q(*focus))
+                    }
                     Primitive::Text { at, runs, .. } => format!("T {} {runs:?}", q(*at)),
                     Primitive::Ball { .. } | Primitive::Stick { .. } => {
                         unreachable!("二维那条路的场景里没有球棍 —— 收到就说明拿错了场景")
@@ -3578,6 +3701,11 @@ mod tests {
                             vec![(*from, *wide / 2.0), (*to, *wide / 2.0)]
                         }
                         Primitive::Text { .. } => continue,
+                        // 底色的顶点就是原子中心,半径按 0 算 —— 多边形不描边,
+                        // 铺出去的墨迹不超出顶点围出来的那一圈
+                        Primitive::AromaticFill { poly, .. } => {
+                            poly.iter().map(|p| (*p, 0.0)).collect()
+                        }
                         Primitive::Ball { .. } | Primitive::Stick { .. } => {
                             unreachable!("二维那条路的场景里没有球棍 —— 收到就说明拿错了场景")
                         }
@@ -3639,5 +3767,275 @@ mod tests {
         let d = generate(&a, &Style::ACS_1996);
         let r = std::panic::catch_unwind(|| scene(&b, &d, &Style::ACS_1996));
         assert!(r.is_err(), "原子数不符却照画不误");
+    }
+}
+
+#[cfg(test)]
+mod aromatic_fill_tests {
+    use super::*;
+    use crate::generate;
+    use crate::style::AromaticFill;
+
+    fn prep(smi: &str) -> MolBuilder {
+        let mut m = omgkit_io::smiles::parse(smi).unwrap();
+        omgkit_chem::pipeline::sanitize(&mut m).unwrap();
+        omgkit_io::stereo::perceive_bond_stereo(&mut m);
+        m
+    }
+
+    /// 一套开着底色的规范。
+    fn filled() -> Style {
+        Style {
+            aromatic_fill: Some(AromaticFill::DEFAULT),
+            ..Style::ACS_1996
+        }
+    }
+
+    fn fills(smi: &str, style: &Style) -> Vec<Primitive> {
+        let m = prep(smi);
+        scene(&m, &generate(&m, style), style)
+            .items
+            .into_iter()
+            .filter(|it| matches!(it, Primitive::AromaticFill { .. }))
+            .collect()
+    }
+
+    /// **铺底色的正好是芳香环** —— 一个不多、一个不少。
+    ///
+    /// 反着的那一半是重点:只查"苯有一块"的话,给每个环都铺一块也照样绿。
+    /// 环己烷、四氢萘的饱和环、糖环都必须一块都没有。
+    #[test]
+    fn 铺底色的正好是芳香环() {
+        // (SMILES, 芳香环数, 环总数)。两列都要,才分得出"漏了"与"多铺了"。
+        let cases = [
+            ("c1ccccc1", 1, 1),             // 苯
+            ("C1CCCCC1", 0, 1),             // 环己烷:一个环,零块底色
+            ("c1ccc2ccccc2c1", 2, 2),       // 萘
+            ("c1ccc2cc3ccccc3cc2c1", 3, 3), // 蒽
+            ("c1ccc2[nH]ccc2c1", 2, 2),     // 吲哚:五元 + 六元,都芳香
+            // 咖啡因**两个环都芳香** —— 那个嘧啶二酮环也是,酮的 C=O 向环内
+            // 出 0 个电子。这一行先按"只有咪唑环"写,被判据当场打红;
+            // RDKit 2025.09.2 数出来同样是 2 个芳香环。
+            ("CN1C=NC2=C1C(=O)N(C)C(=O)N2C", 2, 2),
+            ("c1ccc(-c2ccccc2)cc1", 2, 2), // 联苯:两个环各一块,中间那根单键上没有
+            ("C1CCc2ccccc2C1", 1, 2),      // 四氢萘:只有苯那半
+            ("OC[C@H]1O[C@@H](O)[C@H](O)[C@@H](O)[C@@H]1O", 0, 1), // 葡萄糖
+            ("CC(=O)Oc1ccccc1C(=O)O", 1, 1), // 阿司匹林
+        ];
+        let st = filled();
+        let (mut any_filled, mut any_bare) = (false, false);
+        for (smi, want_fills, want_rings) in cases {
+            let m = prep(smi);
+            let d = generate(&m, &st);
+            let grown = d.drawn(&m);
+            let rings = omgkit_chem::sssr::ring_set(&grown).len();
+            assert_eq!(rings, want_rings, "{smi}:环数与预期不符,这一档考的不是它");
+            assert_eq!(fills(smi, &st).len(), want_fills, "{smi}:底色块数不对");
+            any_filled |= want_fills > 0;
+            any_bare |= want_fills == 0;
+        }
+        assert!(any_filled && any_bare, "两个方向都要出现过,否则这条在空过");
+    }
+
+    /// **不开就一块都没有。** 默认关着 —— 内置的两套规范都不铺底色。
+    #[test]
+    fn 默认不铺底色() {
+        for st in &Style::ALL {
+            assert_eq!(st.aromatic_fill, None, "{} 默认开着底色", st.name);
+            assert!(
+                fills("c1ccc2ccccc2c1", st).is_empty(),
+                "{} 铺了底色",
+                st.name
+            );
+        }
+    }
+
+    /// **底色必须排在所有别的图元之前**,否则它会盖住线条和字。
+    ///
+    /// 这一条钉的是"图层"这件事的全部实现 —— 图元按顺序画,没有别的机制。
+    #[test]
+    fn 底色永远在最底层() {
+        let st = filled();
+        let mut counted = 0usize;
+        for smi in [
+            "c1ccc2ccccc2c1",
+            "CN1C=NC2=C1C(=O)N(C)C(=O)N2C",
+            "CC(=O)Oc1ccccc1C(=O)O",
+            "c1ccc2[nH]ccc2c1",
+        ] {
+            let m = prep(smi);
+            let items = scene(&m, &generate(&m, &st), &st).items;
+            let last_fill = items
+                .iter()
+                .rposition(|it| matches!(it, Primitive::AromaticFill { .. }))
+                .expect("这些分子都该有底色");
+            let first_other = items
+                .iter()
+                .position(|it| !matches!(it, Primitive::AromaticFill { .. }))
+                .expect("这些分子都该有线条");
+            assert!(
+                last_fill < first_other,
+                "{smi}:底色排在第 {last_fill} 位,而第 {first_other} 位已经是别的图元"
+            );
+            counted += 1;
+        }
+        assert!(counted > 0, "一个分子都没查,这条在空过");
+    }
+
+    /// **高光落在环心与最靠左上那个顶点的中点上。**
+    ///
+    /// 期望值在这里**独立重算**,不调 [`fill_focus`] —— 调它的话把那个函数
+    /// 整个换掉判据也不会红(变异验过:把焦点改成环心本身、改成顶点本身、
+    /// 把光源翻到右下,三档全红)。
+    #[test]
+    fn 高光贴着最靠左上的那个角() {
+        let st = filled();
+        let mut checked = 0usize;
+        for smi in [
+            "c1ccccc1",
+            "c1ccc2ccccc2c1",
+            "c1ccc2[nH]ccc2c1",
+            "Cc1ccncc1",
+        ] {
+            for f in fills(smi, &st) {
+                let Primitive::AromaticFill {
+                    poly,
+                    centre,
+                    focus,
+                    radius,
+                    ..
+                } = f
+                else {
+                    unreachable!()
+                };
+                // 环心:顶点的质心
+                let n = poly.len() as f64;
+                let cx = poly.iter().map(|p| p.x).sum::<f64>() / n;
+                let cy = poly.iter().map(|p| p.y).sum::<f64>() / n;
+                assert!(
+                    (centre.x - cx).abs() < 1e-9 && (centre.y - cy).abs() < 1e-9,
+                    "{smi}:环心不是顶点的质心"
+                );
+                // 左上 = x 与 y 都往小走(画布 y 向下)。这里刻意**不写成
+                // LIGHT[0]/LIGHT[1]**:引用被测常量的话,把光源翻个方向两边
+                // 一起动,判据永远打不红。
+                let lit = |p: &Point2| -(p.x - cx) - (p.y - cy);
+                let mut best = &poly[0];
+                for v in &poly {
+                    if lit(v) > lit(best) || (lit(v) == lit(best) && (v.x, v.y) < (best.x, best.y))
+                    {
+                        best = v;
+                    }
+                }
+                assert!(
+                    (focus.x - (best.x + cx) / 2.0).abs() < 1e-9
+                        && (focus.y - (best.y + cy) / 2.0).abs() < 1e-9,
+                    "{smi}:高光在 ({:.3},{:.3}),最靠左上的顶点是 ({:.3},{:.3}),中点该是 ({:.3},{:.3})",
+                    focus.x, focus.y, best.x, best.y,
+                    (best.x + cx) / 2.0, (best.y + cy) / 2.0
+                );
+                // 半径就是外接圆半径:顶点上正好是纯外缘色
+                let far = poly.iter().map(|p| p.dist(centre)).fold(0.0_f64, f64::max);
+                assert!(
+                    (radius - far).abs() < 1e-9,
+                    "{smi}:半径 {radius:.4} 不是外接圆半径 {far:.4}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 6, "只查了 {checked} 块底色,太少");
+    }
+
+    /// **底色的顶点就是环上那些原子的位置。**
+    ///
+    /// 少了这一条,一块画在别处、大小凑巧的多边形也能过上面那几条。
+    #[test]
+    fn 底色的顶点就是环上的原子() {
+        let st = filled();
+        let mut checked = 0usize;
+        for smi in [
+            "c1ccc2ccccc2c1",
+            "CC(=O)Oc1ccccc1C(=O)O",
+            "c1ccc2[nH]ccc2c1",
+        ] {
+            let m = prep(smi);
+            let d = generate(&m, &st);
+            let grown = d.drawn(&m);
+            let bnd = bounds(&d.coords, &grown, &st);
+            // 环上原子的画布坐标 —— 与 `scene` 用的是同一个映射函数
+            let want: Vec<Vec<(i64, i64)>> = omgkit_chem::sssr::ring_set(&grown)
+                .iter()
+                .map(|r| {
+                    let mut v: Vec<(i64, i64)> = r
+                        .atoms
+                        .iter()
+                        .map(|a| {
+                            let p = to_canvas(d.coords[*a as usize], bnd, st.bond_length_pt);
+                            ((p.x * 1000.0).round() as i64, (p.y * 1000.0).round() as i64)
+                        })
+                        .collect();
+                    v.sort_unstable();
+                    v
+                })
+                .collect();
+            for f in scene(&m, &d, &st).items {
+                let Primitive::AromaticFill { poly, .. } = f else {
+                    continue;
+                };
+                let mut got: Vec<(i64, i64)> = poly
+                    .iter()
+                    .map(|p| ((p.x * 1000.0).round() as i64, (p.y * 1000.0).round() as i64))
+                    .collect();
+                got.sort_unstable();
+                assert!(
+                    want.contains(&got),
+                    "{smi}:有一块底色的顶点不是任何一个环上的原子"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 4, "只对上了 {checked} 块,太少");
+    }
+
+    /// **换一种写法,底色画在同一处。**
+    ///
+    /// 与本 crate 的头号契约同一条:一张图由分子自己决定。底色是按 SSSR 的
+    /// 环发的,而环集的次序里带着原子号 —— 顺序变了不要紧,画出来的那几块
+    /// 必须是同一批。
+    #[test]
+    fn 换一种写法底色画在同一处() {
+        let st = filled();
+        let key = |smi: &str| {
+            let mut v: Vec<String> = fills(smi, &st)
+                .iter()
+                .map(|f| {
+                    let Primitive::AromaticFill { poly, focus, .. } = f else {
+                        unreachable!()
+                    };
+                    let mut vs: Vec<String> = poly
+                        .iter()
+                        .map(|p| format!("{:.3},{:.3}", p.x, p.y))
+                        .collect();
+                    vs.sort();
+                    format!("[{}] @{:.3},{:.3}", vs.join(" "), focus.x, focus.y)
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        for ws in [
+            vec!["c1ccc2ccccc2c1", "c1ccc2c(c1)cccc2"],
+            vec![
+                "CC(=O)Oc1ccccc1C(=O)O",
+                "O=C(C)Oc1ccccc1C(O)=O",
+                "OC(=O)c1ccccc1OC(C)=O",
+            ],
+        ] {
+            let first = key(ws[0]);
+            assert!(!first.is_empty(), "{} 一块底色都没有,这一档在空过", ws[0]);
+            for w in ws.iter().skip(1) {
+                assert_eq!(key(w), first, "{w} 与 {} 的底色画在了不同的地方", ws[0]);
+            }
+        }
     }
 }

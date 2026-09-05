@@ -710,6 +710,11 @@ fn fingerprint(s: &Scene) -> Vec<String> {
             Primitive::Text { at, runs, .. } => format!("T {} {runs:?}", q(*at)),
             // 这份审计跑的是**二维**结构式那条路,`render::scene` 一根球棍也
             // 不发。真收到就说明审计拿错了场景,指纹会静默地把两种图混在一起比。
+            Primitive::AromaticFill { poly, focus, .. } => {
+                let mut vs: Vec<String> = poly.iter().map(|p| q(*p)).collect();
+                vs.sort();
+                format!("F [{}] @{}", vs.join(" "), q(*focus))
+            }
             Primitive::Ball { .. } | Primitive::Stick { .. } => {
                 unreachable!("二维审计收到了三维图元 —— 场景拿错了")
             }
@@ -1185,6 +1190,8 @@ fn inside_canvas(m: &MolBuilder, d: &omgkit_depict::Depiction, s: &Scene, style:
                 ]
             }
             Primitive::Text { .. } => continue, // 文字单独走下面那段
+            // 底色的顶点就是原子中心,不描边,所以半径按 0 算
+            Primitive::AromaticFill { poly, .. } => poly.iter().map(|p| (*p, 0.0, 0.0)).collect(),
             // 同上:二维审计不该见到三维图元。
             Primitive::Ball { .. } | Primitive::Stick { .. } => {
                 unreachable!("二维审计收到了三维图元 —— 场景拿错了")

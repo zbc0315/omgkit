@@ -13,11 +13,11 @@ homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
-omgkit-core = { path = "../omgkit-core", version = "0.0.7" }
-omgkit-chem = { path = "../omgkit-chem", version = "0.0.7" }
+omgkit-core = { path = "../omgkit-core", version = "0.0.8" }
+omgkit-chem = { path = "../omgkit-chem", version = "0.0.8" }
 # `pipeline::conformer_for` 要感知双键顺反、要规范秩(补显式氢的插入顺序按它定),
 # 两样都在 L1。omgkit-io 只依赖 omgkit-core,不成环。
-omgkit-io = { path = "../omgkit-io", version = "0.0.7" }
+omgkit-io = { path = "../omgkit-io", version = "0.0.8" }
 
 [dev-dependencies]
 # 判官读 RDKit 导出的界矩阵 JSONL

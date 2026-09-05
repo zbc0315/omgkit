@@ -40,7 +40,7 @@ std::fs::write("aspirin.svg", to_svg(&s, &Style::ACS_1996)).unwrap();
 For PNG and JPEG, enable the `raster` feature:
 
 ```toml
-omgkit-depict = { version = "0.0.7", features = ["raster"] }
+omgkit-depict = { version = "0.0.8", features = ["raster"] }
 ```
 
 ```rust
@@ -98,6 +98,62 @@ tuned by eye.
 | Atom label | 10 pt | 10 pt |
 
 `Style::ALL` iterates both.
+
+## Aromatic ring shading
+
+Off by default. Turn it on and every aromatic ring gets a radial gradient
+underneath it — white at the highlight, light blue at the rim.
+
+![Aromatic rings shaded with a radial gradient](../assets/aromatic-fill.svg)
+
+*The same naphthalene with the switch off and on; indole shows that fused rings
+each get their own gradient; caffeine is drawn with a different pair of colours.*
+
+```rust
+use omgkit_depict::style::{AromaticFill, Style};
+
+let style = Style {
+    aromatic_fill: Some(AromaticFill::DEFAULT),
+    ..Style::ACS_1996
+};
+```
+
+From Python it is a keyword argument on
+[`Mol.to_svg`](../api/python.md#omgkit.Mol):
+
+```pycon
+>>> import omgkit
+>>> svg = omgkit.parse_smiles("c1ccc2ccccc2c1").to_svg(aromatic_fill=True)
+>>> svg.count("<polygon")          # naphthalene: two aromatic rings
+2
+>>> omgkit.parse_smiles("C1CCCCC1").to_svg(aromatic_fill=True).count("<polygon")
+0
+```
+
+Both colours are yours to change — `AromaticFill { centre, edge }` in Rust,
+`fill_centre=` / `fill_edge=` as `#rrggbb` strings in Python. The default rim
+colour is the CSS named colour `lightblue` (`#add8e6`).
+
+### Where the highlight goes
+
+The gradient is centred on the ring, and its focus — the white point — sits
+**halfway between the ring centre and the corner nearest the top left**. That
+is the same light direction the 3D figures use for sphere highlights and
+cylinder shading, so a page mixing 2D and 3D does not look lit from two places.
+
+### What it does not touch
+
+The shading is emitted **before every other primitive**, so it is the bottom
+layer: it cannot cover a bond line or an atom label. It also changes nothing
+else about the picture. That is checked rather than claimed — the judge takes
+the shaded SVG, deletes the polygons and the `<defs>` block, and requires the
+result to be byte-identical to the unshaded one, across all 8831 molecules of
+the corpus.
+
+Which rings count as aromatic is decided by the molecule, not by the switch: a
+ring is shaded when **every bond around it** is aromatic. Rings whose atoms are
+all aromatic but which are not themselves aromatic rings — the four-membered
+ring of biphenylene is the textbook case — are left alone.
 
 ## What it promises
 
@@ -199,6 +255,11 @@ cargo run -p omgkit-depict --release --features raster --example draw -- out/
 # or your own
 cargo run -p omgkit-depict --release --features raster --example draw -- out/ \
     aspirin='CC(=O)Oc1ccccc1C(=O)O'
+
+# with aromatic rings shaded — `--fill` alone for the defaults,
+# or `--fill=centre,edge` for your own two colours
+cargo run -p omgkit-depict --release --features raster --example draw -- out/ \
+    --fill='#fffbe6,#f5c26b' naphthalene='c1ccc2ccccc2c1'
 ```
 
 Each line of output reports the canvas size and the four "could not draw"

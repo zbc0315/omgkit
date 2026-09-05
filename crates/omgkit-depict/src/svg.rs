@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 
 use crate::geom::Point2;
 use crate::label::Run;
-use crate::render::{Primitive, Scene};
+use crate::render::{Primitive, Scene, LIGHT};
 use crate::style::Style;
 
 /// 把一张 [`Scene`] 写成 SVG。
@@ -43,6 +43,7 @@ pub fn to_svg(scene: &Scene, style: &Style) -> String {
     // 哈希序做不到这一点。
     let mut balls: BTreeSet<[u8; 3]> = BTreeSet::new();
     let mut sticks: BTreeSet<Cyl> = BTreeSet::new();
+    let mut fills: BTreeSet<Disc> = BTreeSet::new();
     for it in &scene.items {
         match it {
             Primitive::Ball { color, .. } => {
@@ -56,16 +57,29 @@ pub fn to_svg(scene: &Scene, style: &Style) -> String {
             } => {
                 sticks.insert(cyl_of(*from, *to, *width, *color));
             }
+            Primitive::AromaticFill {
+                centre,
+                focus,
+                radius,
+                inner,
+                outer,
+                ..
+            } => {
+                fills.insert(disc_of(*centre, *focus, *radius, *inner, *outer));
+            }
             _ => {}
         }
     }
-    if !balls.is_empty() || !sticks.is_empty() {
+    if !balls.is_empty() || !sticks.is_empty() || !fills.is_empty() {
         s.push_str("<defs>\n");
         for c in &balls {
             s.push_str(&sphere_gradient(*c));
         }
         for c in &sticks {
             s.push_str(&cylinder_gradient(*c));
+        }
+        for d in &fills {
+            s.push_str(&disc_gradient(*d));
         }
         s.push_str("</defs>\n");
     }
@@ -159,6 +173,26 @@ pub fn to_svg(scene: &Scene, style: &Style) -> String {
                     to.y,
                     cyl_id(cyl_of(*from, *to, *width, *color)),
                     width
+                ));
+            }
+            Primitive::AromaticFill {
+                poly,
+                centre,
+                focus,
+                radius,
+                inner,
+                outer,
+            } => {
+                // 多边形按环的顶点画,**不描边**:描了边就会在键线旁边多出一圈
+                // 与它错开半个线宽的色边。
+                let pts: Vec<String> = poly
+                    .iter()
+                    .map(|p| format!("{:.2},{:.2}", p.x, p.y))
+                    .collect();
+                s.push_str(&format!(
+                    "<polygon points=\"{}\" fill=\"url(#{})\"/>\n",
+                    pts.join(" "),
+                    disc_id(disc_of(*centre, *focus, *radius, *inner, *outer))
                 ));
             }
             Primitive::Text { at, runs, size } => {
@@ -278,15 +312,6 @@ type Cyl = ([i64; 2], i64, i64, [u8; 3]);
 /// 渐变量化的精度(每磅多少格)。
 const GRAD_QUANT: f64 = 1000.0;
 
-/// 光源方向,SVG 坐标(y 朝下),**左上**。
-///
-/// 与球的高光位置(`fx`/`fy` 偏左上)是同一个方向。两处不一致的话,球被左上
-/// 的灯照着、棍被别处的灯照着,整张图看着说不出哪里不对。
-const LIGHT: [f64; 2] = [
-    -std::f64::consts::FRAC_1_SQRT_2,
-    -std::f64::consts::FRAC_1_SQRT_2,
-];
-
 fn qg(x: f64) -> i64 {
     let v = (x * GRAD_QUANT).round();
     if v > i64::MAX as f64 {
@@ -373,6 +398,59 @@ fn cylinder_gradient(c: Cyl) -> String {
 const CYL_RIM: f64 = 0.42;
 /// 圆柱迎光那一条带提亮多少。
 const CYL_HIGHLIGHT: f64 = 0.42;
+
+/// 一块芳香环底色的径向渐变,用**量化过的整数**表示,好让同样几何的环
+/// (一张图里的几个苯环)共用一个 `<defs>` 条目。
+///
+/// 五个字段:圆心、焦点、半径、中心色、外缘色。**位置进了 id** —— 与球那边
+/// 不同:球的渐变用的是 `objectBoundingBox`(每个球自己的包围盒),同色的球
+/// 无论画在哪都能共用一个;这里用的是 `userSpaceOnUse`(画布坐标),因为
+/// 多边形不是圆,包围盒的比例随环的朝向变,按包围盒定的焦点会跟着歪。
+type Disc = ([i64; 2], [i64; 2], i64, [u8; 3], [u8; 3]);
+
+fn disc_of(centre: Point2, focus: Point2, radius: f64, inner: [u8; 3], outer: [u8; 3]) -> Disc {
+    (
+        [qg(centre.x), qg(centre.y)],
+        [qg(focus.x), qg(focus.y)],
+        qg(radius),
+        inner,
+        outer,
+    )
+}
+
+fn disc_id(d: Disc) -> String {
+    let ([cx, cy], [fx, fy], r, i, o) = d;
+    format!(
+        "r{cx}_{cy}_{fx}_{fy}_{r}_{:02x}{:02x}{:02x}_{:02x}{:02x}{:02x}",
+        i[0], i[1], i[2], o[0], o[1], o[2]
+    )
+    .replace('-', "m")
+}
+
+/// 芳香环底色:焦点处是中心色,到外接圆上变成外缘色。
+///
+/// `r` 取环的外接圆半径,所以**顶点上正好是纯外缘色** —— 环的六个角颜色一致,
+/// 只有高光那一侧亮起来。半径给小了角上会出现一圈突兀的截断,给大了整块都是
+/// 中心色、看不出渐变。
+fn disc_gradient(d: Disc) -> String {
+    let ([cx, cy], [fx, fy], r, i, o) = d;
+    let g = |v: i64| v as f64 / GRAD_QUANT;
+    format!(
+        "<radialGradient id=\"{}\" gradientUnits=\"userSpaceOnUse\" \
+         cx=\"{:.3}\" cy=\"{:.3}\" r=\"{:.3}\" fx=\"{:.3}\" fy=\"{:.3}\">\
+         <stop offset=\"0\" stop-color=\"{}\"/>\
+         <stop offset=\"1\" stop-color=\"{}\"/>\
+         </radialGradient>\n",
+        disc_id(d),
+        g(cx),
+        g(cy),
+        g(r),
+        g(fx),
+        g(fy),
+        hex(i),
+        hex(o)
+    )
+}
 
 /// XML 转义。
 ///
@@ -639,6 +717,105 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 一套开着底色的规范。
+    fn filled(fill: crate::style::AromaticFill) -> Style {
+        Style {
+            aromatic_fill: Some(fill),
+            ..Style::ACS_1996
+        }
+    }
+
+    /// **底色在 SVG 里必须排在所有线条、楔形、文字之前。**
+    ///
+    /// `Scene` 那一侧已经有一条判据钉了图元次序,这一条钉的是序列化没把它
+    /// 打乱 —— 两侧各钉一下:图元排对了而写出来的次序反了,图上就是一块蓝色
+    /// 盖住整个环。
+    #[test]
+    fn 底色写在所有线条与文字之前() {
+        let st = filled(crate::style::AromaticFill::DEFAULT);
+        for smi in [
+            "c1ccc2ccccc2c1",
+            "CC(=O)Oc1ccccc1C(=O)O",
+            "c1ccc2[nH]ccc2c1",
+        ] {
+            let out = svg(smi, &st);
+            let last_fill = out.rfind("<polygon").expect("该有底色");
+            for tag in ["<line", "<path", "<text"] {
+                if let Some(first) = out.find(tag) {
+                    assert!(
+                        last_fill < first,
+                        "{smi}:最后一块底色在 {last_fill},而第一个 {tag} 在 {first}"
+                    );
+                }
+            }
+            assert!(out.contains("<line"), "{smi} 一根线都没有,这一档在空过");
+        }
+    }
+
+    /// **关着就一个字节都不多。** 默认规范写出来的 SVG 里既没有多边形,
+    /// 也没有多出来的渐变定义。
+    #[test]
+    fn 不开底色就什么都不多() {
+        for st in &Style::ALL {
+            let out = svg("c1ccc2ccccc2c1", st);
+            assert!(!out.contains("<polygon"), "{} 写出了多边形", st.name);
+            assert!(!out.contains("<defs"), "{} 写出了空的 defs", st.name);
+        }
+    }
+
+    /// **两个颜色真的换得动,而且换的是对的那一头。**
+    ///
+    /// 只查"自定义色出现在文件里"是不够的:两个 stop 写反了照样绿。这里
+    /// 按 `offset` 分别查 —— 焦点(offset 0)是中心色,外缘(offset 1)是外缘色。
+    #[test]
+    fn 底色的两个颜色各就各位() {
+        let mine = crate::style::AromaticFill {
+            centre: [0xff, 0xfb, 0xe6],
+            edge: [0xf5, 0xc2, 0x6b],
+        };
+        let out = svg("c1ccccc1", &filled(mine));
+        let g = out
+            .lines()
+            .find(|l| l.contains("<radialGradient"))
+            .expect("该有一个径向渐变");
+        let stop = |off: &str| {
+            g.split(&format!("<stop offset=\"{off}\" stop-color=\""))
+                .nth(1)
+                .and_then(|t| t.split('"').next())
+                .unwrap_or_else(|| panic!("渐变里没有 offset={off} 这一档:{g}"))
+                .to_string()
+        };
+        assert_eq!(stop("0"), "#fffbe6", "焦点那一档不是中心色");
+        assert_eq!(stop("1"), "#f5c26b", "外缘那一档不是外缘色");
+        // 默认色一个都不该出现 —— 参数没接上时最容易出现的表现就是"还是默认色"
+        let dflt = svg("c1ccccc1", &filled(crate::style::AromaticFill::DEFAULT));
+        assert!(dflt.contains("#add8e6"), "默认外缘色该是 CSS 的 lightblue");
+        assert!(!out.contains("#add8e6"), "自定义配色里还留着默认的浅蓝");
+    }
+
+    /// **一张图里几个一模一样的环共用一个渐变定义。**
+    ///
+    /// 逐块定义的话,联苯那种分子会在 `<defs>` 里塞进两条几乎相同的渐变;
+    /// 而"几乎相同"是因为位置不同 —— 位置进了 id,所以**位置不同就不该共用**,
+    /// 两个方向都要查。
+    #[test]
+    fn 同样的环共用一个渐变位置不同的不共用() {
+        let st = filled(crate::style::AromaticFill::DEFAULT);
+        let n = |smi: &str| svg(smi, &st).matches("<radialGradient").count();
+        assert_eq!(n("c1ccccc1"), 1, "一个环该只有一条渐变");
+        // 联苯的两个苯环形状相同、位置不同 —— 各一条
+        assert_eq!(
+            n("c1ccc(-c2ccccc2)cc1"),
+            2,
+            "两个位置不同的环该各有一条渐变"
+        );
+        assert_eq!(
+            svg("c1ccc(-c2ccccc2)cc1", &st).matches("<polygon").count(),
+            2,
+            "两个环该各有一块多边形"
+        );
     }
 
     #[test]

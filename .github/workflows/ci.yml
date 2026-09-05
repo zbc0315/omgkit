@@ -568,6 +568,26 @@ jobs:
       - name: 判官:三维图的 Python 绑定(与 Rust 逐字节比)
         run: python harness/check_python_depict3d.py "$RUNNER_TEMP/three.jsonl"
 
+      # **二维结构式的芳香环底色。** 同样从产品吐出来的那段 SVG 里把多边形与
+      # 渐变读回来;芳香环有几个、各多大由 RDKit 独立数一遍。
+      #
+      # 跑**全语料**(8831),不像三维那条截到 400 —— 这是量出来的:
+      # "大于八元的环跳过不铺"这个变异在前 800 个分子上两边全绿,只有全语料
+      # 抓得住(那一处是个卟啉类分子,16 元芳香大环)。导出 6 秒、判官 1.4 秒。
+      #
+      # 变异实测(全在全语料上打红):高光退回环心、光源翻到右下、底色一块也
+      # 不发、序列化把底色写到最后、芳香判定放宽成"任一根键芳香"、半径取外接圆
+      # 的一半、渐变两档写反、大于八元的环跳过不铺。
+      - name: 判官:芳香环底色(多边形与渐变从 SVG 反读)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -q -p omgkit-depict --release --example dump_depict2d -- harness/corpus/large.smi > "$RUNNER_TEMP/two.jsonl"
+          python harness/check_depict2d.py "$RUNNER_TEMP/two.jsonl" --corpus harness/corpus/large.smi
+
+      - name: 判官:二维图的 Python 绑定(与 Rust 逐字节比)
+        run: python harness/check_python_depict2d.py "$RUNNER_TEMP/two.jsonl"
+
       # **文档里的示例也要跑。** 这一整套闸先前一条都不读 `docs/`,而
       # `mkdocs build --strict`(在 docs.yml 里)只查链接不查内容。于是代码往前走、
       # 文档留在原地:一次文档审查找出四处"示例输出与实测不符",其中两处是凭空

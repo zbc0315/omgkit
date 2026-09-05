@@ -40,9 +40,25 @@ pub fn cpk(atomic_num: u8) -> [u8; 3] {
     CPK.get(atomic_num as usize).copied().unwrap_or(CPK[0])
 }
 
+/// 把 `#rrggbb` 或 `rrggbb` 读成三个字节。看不懂就给 `None`。
+///
+/// **只有这一份实现。** 命令行、Python 绑定、判据都走它 —— 各写各的话,
+/// "`#FFF` 算不算合法"这类问题会在两处给出不同答案,而写出来的图看着没毛病。
+/// 这里不收三位缩写:收了就得定义 `#abc` 展开成 `#aabbcc` 还是 `#0a0b0c`,
+/// 而调用方拿到的是精确的颜色值,没有猜的余地。
+#[must_use]
+pub fn parse_hex(s: &str) -> Option<[u8; 3]> {
+    let t = s.strip_prefix('#').unwrap_or(s);
+    if t.len() != 6 || !t.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let b = |i: usize| u8::from_str_radix(&t[i..i + 2], 16).ok();
+    Some([b(0)?, b(2)?, b(4)?])
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{cpk, CPK};
+    use super::{cpk, parse_hex, CPK};
 
     /// 表的长度与元素表一致 —— 否则按原子序数索引会在末尾静默落进 `unwrap_or`。
     #[test]
@@ -92,5 +108,17 @@ mod tests {
     fn 越界的原子序数给未知色() {
         assert_eq!(cpk(200), [0xff, 0x14, 0x93]);
         assert_eq!(cpk(u8::MAX), [0xff, 0x14, 0x93]);
+    }
+
+    /// 十六进制颜色:合法的读得对,不合法的一律 `None`(不猜)。
+    #[test]
+    fn 十六进制颜色只认六位() {
+        assert_eq!(parse_hex("#add8e6"), Some([0xad, 0xd8, 0xe6]));
+        assert_eq!(parse_hex("ADD8E6"), Some([0xad, 0xd8, 0xe6]), "大写也认");
+        assert_eq!(parse_hex("#ffffff"), Some([255, 255, 255]));
+        assert_eq!(parse_hex("#000000"), Some([0, 0, 0]));
+        for bad in ["#abc", "#abcdefg", "", "#", "abcde", "#gggggg", "#ad d8e6"] {
+            assert_eq!(parse_hex(bad), None, "{bad:?} 不该被认成颜色");
+        }
     }
 }

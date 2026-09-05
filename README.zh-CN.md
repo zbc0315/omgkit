@@ -44,12 +44,12 @@ Rust 侧按需取层,每一层只依赖它下面的那些:
 
 ```toml
 [dependencies]
-omgkit-core   = "0.0.7"   # 数据结构
-omgkit-io     = "0.0.7"   # SMILES、SMARTS、.mol/.sdf
-omgkit-chem   = "0.0.7"   # 净化
-omgkit-match  = "0.0.7"   # 匹配、反应、副产物
-omgkit-conf   = "0.0.7"   # 三维构型
-omgkit-depict = "0.0.7"   # 二维坐标,二维与三维出图
+omgkit-core   = "0.0.8"   # 数据结构
+omgkit-io     = "0.0.8"   # SMILES、SMARTS、.mol/.sdf
+omgkit-chem   = "0.0.8"   # 净化
+omgkit-match  = "0.0.8"   # 匹配、反应、副产物
+omgkit-conf   = "0.0.8"   # 三维构型
+omgkit-depict = "0.0.8"   # 二维坐标,二维与三维出图
 ```
 
 ## 上手

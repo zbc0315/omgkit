@@ -218,6 +218,59 @@ impl PyMol {
         })
     }
 
+    /// 画一张二维结构式,返回 SVG 源码(字符串)。
+    ///
+    /// **不改动本分子**:内部先深拷贝一份,在那一份上净化、感知顺反、排布局。
+    ///
+    /// ```python
+    /// open("aspirin.svg", "w").write(omgkit.parse_smiles("CC(=O)Oc1ccccc1C(=O)O").to_svg())
+    /// ```
+    ///
+    /// | 参数 | 默认 | 说明 |
+    /// |---|---|---|
+    /// | `style` | `"ACS Document 1996"` | 绘图规范。另一套是 `"ChemDraw New Document"`(键长 30 pt,放到网页上更舒展) |
+    /// | `aromatic_fill` | `False` | 芳香环底下要不要铺一层径向渐变 |
+    /// | `fill_centre` | `"#ffffff"` | 渐变高光那一点的颜色 |
+    /// | `fill_edge` | `"#add8e6"` | 渐变外缘的颜色(CSS 的具名色 `lightblue`) |
+    ///
+    /// 底色铺在**最底层**,不遮任何线条与原子标签。高光落在环心与**最靠左上
+    /// 那个顶点**的中点上,与三维图的光源方向是同一个。
+    ///
+    /// 两个颜色只在 `aromatic_fill=True` 时起作用,但**写错了照样报错** ——
+    /// 只在用得上时才校验的话,关着底色调好的一组颜色,开的那天才发现拼错了。
+    ///
+    /// 规范名或颜色不认识、净化过不去时抛 `ValueError`。
+    #[pyo3(signature = (
+        style = "ACS Document 1996",
+        aromatic_fill = false,
+        fill_centre = "#ffffff",
+        fill_edge = "#add8e6",
+    ))]
+    fn to_svg(
+        &self,
+        style: &str,
+        aromatic_fill: bool,
+        fill_centre: &str,
+        fill_edge: &str,
+    ) -> PyResult<String> {
+        let fill = omgkit_depict::style::AromaticFill {
+            centre: colour("fill_centre", fill_centre)?,
+            edge: colour("fill_edge", fill_edge)?,
+        };
+        let st = omgkit_depict::style::Style {
+            aromatic_fill: aromatic_fill.then_some(fill),
+            ..style_2d(style)?.clone()
+        };
+        let mut mol = self.inner.clone();
+        omgkit_chem::sanitize(&mut mol).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        omgkit_io::stereo::perceive_bond_stereo(&mut mol);
+        let d = omgkit_depict::generate(&mol, &st);
+        Ok(omgkit_depict::svg::to_svg(
+            &omgkit_depict::render::scene(&mol, &d, &st),
+            &st,
+        ))
+    }
+
     /// 画一张二维结构图,写成 V2000 molblock(`.mol` 文件的内容)。
     ///
     /// **不改动本分子**:内部先深拷贝一份,在那一份上净化、感知顺反、排布局。
@@ -409,6 +462,34 @@ impl PyMol {
             self.inner.num_bonds()
         )
     }
+}
+
+/// 按名字取一套**二维**绘图规范。理由与 [`style_3d`] 那条一样:名字是公开
+/// 契约,拼错了要报错,不能静默退回默认的那一套。
+///
+/// 名字用的就是 `Style::ALL` 里的全名(`"ACS Document 1996"` /
+/// `"ChemDraw New Document"`)—— 不另起一套短名:两套拼法并存,迟早有人
+/// 在一处加了新规范、忘了在另一处加短名。
+fn style_2d(name: &str) -> PyResult<&'static omgkit_depict::style::Style> {
+    omgkit_depict::style::Style::ALL
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| {
+            let all: Vec<&str> = omgkit_depict::style::Style::ALL
+                .iter()
+                .map(|s| s.name)
+                .collect();
+            PyValueError::new_err(format!(
+                "不认识的绘图规范 {name:?};认识的是:{}",
+                all.join("、")
+            ))
+        })
+}
+
+/// 读一个 `#rrggbb`,读不出来就报错并说清是哪个参数。
+fn colour(what: &str, hex: &str) -> PyResult<[u8; 3]> {
+    omgkit_depict::palette::parse_hex(hex)
+        .ok_or_else(|| PyValueError::new_err(format!("{what} 不是 #rrggbb 形式的颜色:{hex:?}")))
 }
 
 /// 按名字取一套三维样式。**名字是公开契约的一部分**,不认识就报错并把

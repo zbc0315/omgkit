@@ -93,6 +93,7 @@ So the coverage table matters more than any single judge:
 | Product-side **chirality**, four instruction kinds | `check_product_chirality.py` (with a discriminating-power check) |
 | Drawing (L9) | `omgkit-depict --example audit` over the whole corpus — see below |
 | 3D figures | `check_depict3d.py` — the circles and lines are read back out of the emitted SVG and recomputed from the coordinates, RDKit's van der Waals radii and Jmol's colour table |
+| Aromatic ring shading | `check_depict2d.py` — the polygons and gradients are read back out of the emitted SVG; how many aromatic rings there are and how large comes from RDKit. Deleting the shading from the SVG must leave it byte-identical to the unshaded one |
 | Graph descriptors for ML | `check_descriptors.py` — sixteen of the nineteen values, atom by atom and bond by bond, over five corpora |
 
 **When adding a path, ask this table first.** Which cell does it fall in? No
